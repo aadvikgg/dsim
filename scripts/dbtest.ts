@@ -4193,6 +4193,40 @@ async function main(): Promise<void> {
     check('⚠️ boost sweep: an incomplete read pushes no floors at all', swept.applied === false && swept.floored.length === 0);
   }
 
+  // ------------------------------------------------ the email gate's source of truth
+  /* Neon Auth keeps its tables in the game's own database (`neon_auth` schema), and the
+     verification code flips `neon_auth."user"."emailVerified"`. The gate reads it when the JWT
+     carries no claim. It is a MANAGED schema this repo does not migrate, so it is built here the
+     way Neon has it, and every way of not finding the answer must be null (the gate passes). */
+  {
+    check(
+      'email gate: no neon_auth schema is null, not a throw',
+      (await repo.authEmailVerified('00000000-0000-0000-0000-000000000001')) === null,
+    );
+    await db.exec(`create schema neon_auth;
+      create table neon_auth."user" (id uuid primary key, email text, "emailVerified" boolean not null);
+      insert into neon_auth."user" values
+        ('00000000-0000-0000-0000-000000000001', 'a@b.co', false),
+        ('00000000-0000-0000-0000-000000000002', 'c@d.co', true);`);
+    check(
+      'email gate: an unverified row reads false',
+      (await repo.authEmailVerified('00000000-0000-0000-0000-000000000001')) === false,
+    );
+    check(
+      'email gate: a verified row reads true',
+      (await repo.authEmailVerified('00000000-0000-0000-0000-000000000002')) === true,
+    );
+    check(
+      'email gate: an unknown id is null',
+      (await repo.authEmailVerified('00000000-0000-0000-0000-00000000000f')) === null,
+    );
+    check(
+      'email gate: an id that is not a uuid is null, not a throw',
+      (await repo.authEmailVerified('not-a-uuid')) === null,
+    );
+    await db.exec(`drop schema neon_auth cascade;`);
+  }
+
   await db.close();
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);
