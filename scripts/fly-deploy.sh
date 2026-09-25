@@ -38,18 +38,13 @@ if [ "$ALPHA" -eq 1 ]; then
   # -c pins the config: without it `fly deploy` reads fly.toml and would deploy PRODUCTION
   # under an alpha app name, quietly giving the preview production's multi-region VM block.
   deploy_rc=0
-update_rc=0 # any satellite whose re-shrink failed — reported at the end, never silent
   # --ha=false: Fly's default launches a SECOND machine for high availability, and for this
   # server that is not redundancy, it is a SPLIT. Rooms live in the process's memory and the
   # routing hints resolve to a REGION, not a machine — so two machines in one region means
   # two players can land on different ones and sit in different rooms with the same code,
   # which is exactly the cross-region bug this app just fixed, one level down.
   fly deploy --remote-only --ha=false -c "$CONFIG" -a "$APP" "$@" || deploy_rc=$?
-  if [ "$update_rc" -ne 0 ]; then
-  echo "!! AT LEAST ONE SATELLITE WAS NOT RE-SHRUNK (see above). A machine left on fly.toml's"
-  echo "   [[vm]] is running shared-cpu-4x AND MAX_ROOMS 24 — costly, and oversubscribed."
-fi
-if [ "$deploy_rc" -ne 0 ]; then
+  if [ "$deploy_rc" -ne 0 ]; then
     echo "!! fly deploy exited $deploy_rc — CHECK THE DEPLOY (fly machine list -a $APP)"
     exit "$deploy_rc"
   fi
@@ -111,11 +106,16 @@ SATELLITE_SIZES=(
   ord:performance-1x:2048
   sjc:performance-1x:2048
   lhr:performance-1x:2048
-  gru:shared-cpu-4x:1024
+  gru:performance-1x:2048
   jnb:shared-cpu-4x:1024
-  syd:shared-cpu-4x:1024
-  nrt:shared-cpu-4x:1024
+  syd:performance-1x:2048
+  nrt:performance-1x:2048
 )
+# 2026-09-24 (BIOBUZZ Act 2): gru, syd and nrt stay on the dedicated core the capacity task
+# moved them to on 09-23 (peaks 0.17-0.43 cores against shared-cpu-4x's 0.175 baseline), because
+# every online BIOBUZZ room is now a 3D solve. A bigger size does NOT help: the server is ONE
+# process on ONE core (no worker_threads/cluster). ⚠️ MULTI-CORE IS THE URGENT NEXT CAPACITY
+# ITEM — see docs/capacity.md, "MULTI-CORE".
 SATELLITES=()
 for entry in "${SATELLITE_SIZES[@]}"; do SATELLITES+=("${entry%%:*}"); done
 
@@ -147,6 +147,7 @@ echo "==> fly deploy ($APP)"
 # the script mid-way, silently leaving the satellites on shared-cpu-4x. Observed
 # 2026-07-20. So capture the status, ALWAYS re-shrink, and re-raise at the end.
 deploy_rc=0
+update_rc=0 # any satellite whose re-shrink failed — reported at the end, never silent
 # --ha=false: the note on the ALPHA deploy line above applies here word for word, and
 # harder — production has EIGHT regions where the preview has one. Fly's default launches
 # a SECOND machine for high availability, and for this server that is not redundancy, it
@@ -214,6 +215,10 @@ while read -r region id; do
   fi
 done <<< "$ids"
 
+if [ "$update_rc" -ne 0 ]; then
+  echo "!! AT LEAST ONE SATELLITE WAS NOT RE-SHRUNK (see above). A machine left on fly.toml's"
+  echo "   [[vm]] is running shared-cpu-4x AND MAX_ROOMS 24 — costly, and oversubscribed."
+fi
 if [ "$deploy_rc" -ne 0 ]; then
   echo "!! VM sizes re-applied, but 'fly deploy' had exited $deploy_rc — CHECK THE DEPLOY."
   echo "   Often a transient API flake with the rollout actually complete; confirm every"
