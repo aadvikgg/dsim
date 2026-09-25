@@ -4087,6 +4087,9 @@ tr.lb-detail td {
   letter-spacing: var(--ds-track-caps);
 }
 /* a code is short: the row's 240px basis wrapped Verify under the field at phone width */
+.ds-pwform {
+  max-width: 360px;
+}
 .ds-field-row > .ds-input.code {
   flex-basis: 120px;
 }

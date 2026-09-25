@@ -390,6 +390,13 @@ Profile banner, the sign-up dialog's code step, and `/account/verify`. A refused
 OTP_EXPIRED, TOO_MANY_ATTEMPTS) is `invalid-code`, never the expired-LINK sentence. **No copy may
 say what an unverified address is refused**: that depends on `REQUIRE_VERIFIED_EMAIL`, which the
 client cannot see, and the banner claimed "ranked needs it" while the gate was off.
+**A GOOGLE ACCOUNT SETS A PASSWORD BY CODE** (2026-09-25, Profile ▸ Account ▸ Password). The
+client cannot call Better Auth's `setPassword` (server-scoped), but `/email-otp/reset-password`
+CREATES the `credential` account when there is none, so `requestPasswordCode`
+(`sendVerificationOtp` type `forget-password`) + `setPasswordWithCode` give a Google user an
+email+password login, and change an existing password the same way. The row reads
+`listAccounts()` (`credential` = has a password); an unreadable list is `null` and the row says
+nothing definite. The same route also marks the address verified.
 ⚠️ **`forgetPassword` IS NOT A TOP-LEVEL METHOD** on this build — only `forgetPassword.emailOtp`,
 a different flow. The top-level request is `requestPasswordReset`.
 ⚠️ **THE EMAILED TOKEN IS CAPTURED AT MODULE LOAD** (`src/ui/entryToken.ts`): App’s mount effect
