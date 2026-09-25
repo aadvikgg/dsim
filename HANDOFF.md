@@ -1,3 +1,10 @@
+# HANDOFF — 2026-09-25b (ranked badge numerals centred)
+
+**State: pushed on `alpha`.** `build` and `uiaudit` pass. Client-only.
+
+- **Bug (owner):** the 1/2/3 on the podium crests sat off centre. They were HTML text over the SVG, so Space Grotesk's metrics decided where they landed: the 1's flag pulled its ink a unit left, and the digits rode high at the small sizes.
+- **Fix:** `NUMERAL` in `BadgeMark.tsx` draws them as stroked paths in the crest's 24 box, centred on (12, 11.5), so they also scale with the crest at every size (they were 60% of it at `sm` and 30% at `lg`). `.badge-num` is now a stroke rule in `shell.css`.
+
 # HANDOFF — 2026-09-25 (email verification takes the CODE Neon Auth sends)
 
 **State: pushed on `alpha`.** `npm test` (shared + 5123 BIOBUZZ), `build`, `server:check`, `uiaudit` pass. Server change (the two refusal strings now say "Enter the code we emailed you"), so it rides the next Fly deploy. Nothing on `main`.
