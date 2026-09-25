@@ -566,6 +566,30 @@ export async function getProfile(userId: string): Promise<PublicProfile | null> 
     : null;
 }
 
+/**
+ * Neon Auth's OWN record of whether this account's address is verified — the row the
+ * verification code flips. The email gate's source of truth when the JWT does not carry
+ * the claim (server/auth.ts).
+ *
+ * It can read it because Neon Auth keeps its tables in THIS database, in the
+ * `neon_auth` schema (`user`, `session`, `verification`, …; seen 2026-09-25). That is a
+ * managed schema we do not migrate, so every failure — no DB, no schema, a renamed
+ * column, an id that is not a uuid — answers null ("not told"), which the gate passes.
+ */
+export async function authEmailVerified(userId: string): Promise<boolean | null> {
+  if (!dbEnabled) return null;
+  try {
+    const rows = await q<{ v: unknown }>(
+      `select "emailVerified" as v from neon_auth."user" where id = $1`,
+      [userId],
+    );
+    const v = rows[0]?.v;
+    return typeof v === 'boolean' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 /** resolve a public username → profile (the /profile/<username> read path), or null */
 export async function getProfileByUsername(username: string): Promise<PublicProfile | null> {
   const rows = await q<{

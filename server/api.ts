@@ -1084,7 +1084,15 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
        */
       {
         const refusal = emailGateRefusal(user);
-        if (refusal) return json(403, { error: refusal }), true;
+        // its own sentence: the shared one says "to play ranked", and this is a practice save
+        if (refusal) {
+          return (
+            json(403, {
+              error: 'Verify your email to save practice runs. Enter the code we emailed you on your Profile page.',
+            }),
+            true
+          );
+        }
       }
       let body: Record<string, unknown>;
       try {

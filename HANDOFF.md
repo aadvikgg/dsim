@@ -5,7 +5,7 @@
 - **Bug (owner):** the verification email arrived with a code and nowhere in the app took one. Neon Auth verifies with an OTP; the app only knew the link/token path.
 - **Fix:** `verifyEmailCode` (`authFlows.ts`, `emailOtp.verifyEmail`) + `VerifyCodeForm`, shown in the Profile banner, as a code step in the sign-up dialog, and on `/account/verify`. The session refreshes itself on that route, so the banner goes away. Rule in `docs/area/accounts.md`.
 - **Copy:** the banner said ranked and record runs need a verified address. False: `REQUIRE_VERIFIED_EMAIL` is off. The sentence is gone.
-- **Open, owner call:** turn on `REQUIRE_VERIFIED_EMAIL=1` (owner: verification SHOULD be required). `docs/deploy.md` §4 says first check the JWT carries `email_verified`; without it the gate passes everybody.
+- **Gate ON on alpha (owner, 2026-09-25):** `REQUIRE_VERIFIED_EMAIL=1` on `dsim-alpha`. The JWT's claims were never confirmed, so the gate now reads Neon Auth's own `neon_auth."user"."emailVerified"` from the game DB (`authEmailVerified`, repo.ts; dbtest pins it) before the `/get-session` fallback. At the time of setting, 742 of 1787 auth users were unverified. Production still needs the code UI on `main` first, then the secret. It gates ranked, record rooms AND practice saves (`POST /api/practice`, which now has its own refusal sentence).
 - **Likely the same bug, not checked:** the password-reset email may also carry a code, and `/account/reset` only takes a link token.
 
 # HANDOFF — 2026-09-24o (BIOBUZZ Act 2 RELEASED to production; PR #83 merged with review fixes)

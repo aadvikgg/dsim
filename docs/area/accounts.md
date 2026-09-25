@@ -400,7 +400,7 @@ ranked queue door, the record-room join door and `POST /api/practice`. Extend it
 second "is this account allowed" check. It is OFF unless `REQUIRE_VERIFIED_EMAIL=1`, because every
 email/password account that exists today is unverified and the sender domain is an owner dashboard
 action (`docs/deploy.md` §4) — default-on would refuse ranked to everybody with no way to fix it.
-`null` (nobody told us) counts as VERIFIED: a gate whose unknown case refuses goes dark silently.
+`null` (nobody told us) counts as VERIFIED: a gate whose unknown case refuses goes dark silently. When the JWT carries no claim, the answer comes from Neon Auth's own `neon_auth."user"` row in the game DB (`authEmailVerified`), then `/get-session`. ON on `dsim-alpha` since 2026-09-25.
 ⚠️ **THE RECORD GATE LIVES IN `server/index.ts`, NOT `Room.startMatch`** beside the duo-record
 guard it belongs with — `server/room.ts` is bundled into the LAN host worker and may not import
 `jose` or read `process.env`.
