@@ -1,3 +1,14 @@
+# HANDOFF — 2026-09-24o (BIOBUZZ Act 2 RELEASED to production; PR #83 merged with review fixes)
+
+**State: production = `main` = `fff39e92`, Vercel and every Fly machine on it.** Maintenance lifts 22:30 EDT (02:30Z); the Act 2 and patch-notes announcements publish at the same moment.
+
+- **Released:** alpha → `main` fast-forward (`9d9efac2`, 21:37), then PR #83 + review fixes (`fff39e92`, 22:23). Migrations 0037–0049 applied on boot. Boot award job: 23 grants over 5 periods (DECODE and Chain Reaction Act 1 + their closed seasons).
+- **BIOBUZZ rolled to Act 2 · Season 1** (season 5), `announce=0`: 11 grants over 2 periods. Act 1's archived board shows its 2D records (per-season era, 2026-09-24n). DECODE (7) and Chain Reaction (5) unchanged.
+- **Production secrets:** the ten linking/star/boost secrets are live. `.env` in `D:\Projects\2ddecodesim` holds alpha's under the plain names and production's GitHub OAuth app as `PROD_GITHUB_OAUTH_ID` / `PROD_GITHUB_OAUTH_SECRET`. ⚠️ `ADMIN_SECRET` needs URL-encoding in a query string (`curl -G --data-urlencode`); a raw one 403s.
+- **Satellites:** gru/syd/nrt on `performance-1x` in `SATELLITE_SIZES`, MAX_ROOMS 6. ⚠️ **Multi-core game server is the urgent next capacity item** (`docs/capacity.md`, "MULTI-CORE").
+- **PR #83 review** found a blocker (seat token lost after a room recycle, so reconnect/abandon refused from a room's second match) plus 8 smaller issues and 12 CRLF-fragile checks; all fixed in `fff39e92` and pinned by checks. The first-time BIOBUZZ loadout now seeds from `BB_DEFAULT_SPEC` (Pollinator); owner approved.
+- **Next:** post the Discord announcement (text in `docs/releases/biobuzz-act2.md` §5; link `https://playdsim.com/?act2` so Discord re-fetches the card, the old one said "2D"). The public FTC post (§6) a day later. Watch `/api/perf` and the capacity task for 3D room load. The Discord Activity is still unverified in a real Discord client.
+
 # HANDOFF — 2026-09-24o (PR #83 review fixes, branch `pr83-fixes`)
 
 **State: committed on local branch `pr83-fixes` (PR #83's `fix/discord-activity-audit` + `origin/alpha` merged in). Not pushed, not deployed.** ⚠️ Server change (`server/room.ts`: the recycle's `lobby` frame carries `seatToken`; per-field moderation verdicts), so it rides the next Fly deploy.
