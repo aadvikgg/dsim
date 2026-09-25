@@ -25068,8 +25068,8 @@ const dumperSetup = (): RobotSetup => {
  */
 {
   const ss = readFileSync('src/net/serverSession.ts', 'utf8');
-  const app = readFileSync('src/ui/App.tsx', 'utf8');
-  const lc = readFileSync('src/net/lobbyClient.ts', 'utf8');
+  const app = readFileSync('src/ui/App.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const lc = readFileSync('src/net/lobbyClient.ts', 'utf8').replace(/\r\n/g, '\n');
   const sess = readFileSync('src/net/session.ts', 'utf8');
   check('rejoin/drivers: `MatchStart` NAMES the field (a field the type omits is one nobody copies)', /drivers\?: MatchDriver\[\]/.test(lc));
   check('rejoin/drivers: ...and so does `NetSession`, which is what beginSession reads', /drivers\?: MatchDriver\[\]/.test(sess));
@@ -26003,7 +26003,7 @@ const dumperSetup = (): RobotSetup => {
     else delete g.localStorage;
   }
 
-  const app = readFileSync('src/ui/App.tsx', 'utf8');
+  const app = readFileSync('src/ui/App.tsx', 'utf8').replace(/\r\n/g, '\n');
   check(
     'discord activity: the season is seeded to BIOBUZZ, and only inside the activity',
     /inDiscordActivity\(\) && !hasStoredSettings\(\) \? switchGame\(stored, 'biobuzz'\)/.test(app),
@@ -26077,7 +26077,7 @@ const dumperSetup = (): RobotSetup => {
  */
 {
   // ── the loading screen's links ────────────────────────────────────────────────
-  const bootHtml = readFileSync('index.html', 'utf8');
+  const bootHtml = readFileSync('index.html', 'utf8').replace(/\r\n/g, '\n');
   const bootAnchors = bootHtml.match(/<a\b[^>]*>/g) ?? [];
   const bootExternal = bootAnchors.filter((a) => /href="https?:/.test(a));
   const bootSameFrame = bootExternal
@@ -26167,8 +26167,8 @@ const dumperSetup = (): RobotSetup => {
   );
 
   // ── the SDK is built from that query, and not paid for when there is none ─────
-  const actSrc = readFileSync('src/net/discordActivity.ts', 'utf8');
-  const sdkSrc = readFileSync('src/net/discordSdk.ts', 'utf8');
+  const actSrc = readFileSync('src/net/discordActivity.ts', 'utf8').replace(/\r\n/g, '\n');
+  const sdkSrc = readFileSync('src/net/discordSdk.ts', 'utf8').replace(/\r\n/g, '\n');
   check(
     '⚠️ discord activity: nothing constructs the SDK straight off the live URL',
     !/new DiscordSDK\(/.test(actSrc),
@@ -26204,9 +26204,9 @@ const dumperSetup = (): RobotSetup => {
  * ws handlers. Each predicate is narrow so an ordinary edit nearby does not red the suite.
  */
 {
-  const room = readFileSync('server/room.ts', 'utf8');
-  const idx = readFileSync('server/index.ts', 'utf8');
-  const proto = readFileSync('src/net/protocol.ts', 'utf8');
+  const room = readFileSync('server/room.ts', 'utf8').replace(/\r\n/g, '\n');
+  const idx = readFileSync('server/index.ts', 'utf8').replace(/\r\n/g, '\n');
+  const proto = readFileSync('src/net/protocol.ts', 'utf8').replace(/\r\n/g, '\n');
 
   check(
     '⚠️ seat: the token is REQUIRED to reclaim a secured seat, and the id alone is not enough',
@@ -26263,6 +26263,167 @@ const dumperSetup = (): RobotSetup => {
   );
 }
 
+/**
+ * ⚠️ THE SEAT'S SECRET SURVIVES A RECYCLE. The token arrives in `welcome` and nowhere else, and
+ * a recycled room re-sends no `welcome`: the lobby that adopts the socket was built with an empty
+ * token, the next match's session inherited it, and from a custom room's SECOND match on every
+ * rejoin, Home rejoin card and Abandon was refused for a current client (`seatSecured`). Both
+ * halves are pinned: the server re-states it in the owner's own `lobby` frame, and the client
+ * carries it through `ResumedRoom` regardless of which server it is talking to.
+ *
+ * Behavioural on the server half, through a real `Room`: `held` is exactly what the adopting
+ * lobby holds, and it has to reclaim and abandon the seat in match two. The empty-token refusal
+ * is asserted beside it so the positive cannot pass on a room that stopped checking.
+ */
+{
+  const sink: Record<string, ServerMsg[]> = { a: [], b: [] };
+  const mk = (id: string, alliance: Alliance): Client => ({
+    id,
+    send: (m) => sink[id].push(m),
+    player: { clientId: id, name: id, teamName: 'T', teamNumber: 1, alliance, startIndex: 0, ready: true, spec: { ...DEFAULT_SPEC }, assists: { ...DEFAULT_ASSISTS } },
+    connected: true,
+    disconnectAt: 0,
+    caps: ['recycle', 'seat'],
+    userId: 'u-' + id,
+  });
+  const room = new Room('smoke-recycle-seat', () => {}, { kind: 'versus' });
+  room.add(mk('a', 'red'));
+  room.add(mk('b', 'blue'));
+  const minted = (sink.a.find((m) => m.t === 'welcome') as Extract<ServerMsg, { t: 'welcome' }> | undefined)?.seatToken ?? '';
+  check('recycle seat: a secured seat is minted a token on join (anchors the checks below)', minted !== '');
+  room.onMessage('a', { t: 'start' });
+  forceRoomToPost(room);
+  room.onMessage('a', { t: 'lobby' });
+  check('recycle seat: the room went back to its lobby', room.worldForTest() === null);
+  const lobbyA = sink.a.find((m) => m.t === 'lobby') as Extract<ServerMsg, { t: 'lobby' }> | undefined;
+  const held = lobbyA?.seatToken ?? '';
+  check('⚠️ recycle seat: the owner’s `lobby` frame re-states the seat’s secret', held !== '' && held === minted, `held=${held === '' ? 'empty' : 'set'}`);
+  check(
+    'recycle seat: ...and only the owner’s: nobody else’s frame carries it',
+    !sink.b.some((m) => m.t === 'lobby' && m.seatToken === minted),
+  );
+
+  room.onMessage('a', { t: 'update', patch: { ready: true } });
+  room.onMessage('b', { t: 'update', patch: { ready: true } });
+  room.onMessage('a', { t: 'start' });
+  check('recycle seat: the second match started', room.worldForTest() !== null);
+  room.advanceForTest(20);
+  room.detach('a'); // a mid-match drop in match two
+  check(
+    'recycle seat: an EMPTY token (what the adopting lobby held before the fix) is refused',
+    room.reattach('a', () => {}, undefined, undefined, '') === null,
+  );
+  check(
+    '⚠️ recycle seat: in the SECOND match the token the client holds reclaims the seat',
+    room.reattach('a', () => {}, undefined, undefined, held) !== null,
+  );
+  check('recycle seat: an empty-token abandon is refused', room.abandonSlot('a', '') === false);
+  check('⚠️ recycle seat: ...and the held token abandons it', room.abandonSlot('a', held) === true);
+
+  const app = readFileSync('src/ui/App.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const lobbySrc = readFileSync('src/ui/Lobby.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const lc = readFileSync('src/net/lobbyClient.ts', 'utf8').replace(/\r\n/g, '\n');
+  const ss = readFileSync('src/net/serverSession.ts', 'utf8').replace(/\r\n/g, '\n');
+  check(
+    '⚠️ recycle seat: the client carries the token through the handover (App → ResumedRoom → LobbyClient)',
+    /seatToken: string;/.test(readFileSync('src/ui/roomReturn.ts', 'utf8')) &&
+      /setResumedRoom\(\{[^}]*seatToken: s\.seatToken \?\? '' \}\)/.test(app) &&
+      /\.resume\(resume\.code, myPlayer\(\), resume\.clientId, resume\.seatToken,/.test(lobbySrc) &&
+      /clientId: string,\n    seatToken: string,[\s\S]{0,700}?this\.seatToken = seatToken;/.test(lc),
+    'against an older server this is the only half; without it match two is built with an empty token',
+  );
+  check(
+    'recycle seat: and both clients adopt one the server re-states on `lobby`',
+    /m\.t === 'lobby'\) \{[\s\S]{0,300}?if \(m\.seatToken\) this\.seatToken = m\.seatToken;/.test(lc) &&
+      /m\.t === 'lobby'\) \{[\s\S]{0,1200}?if \(m\.seatToken\) this\.seatToken = m\.seatToken;\n      this\.lobbyCb/.test(ss),
+  );
+}
+
+/**
+ * ⚠️ A MODERATION VERDICT IS WRITTEN ONLY OVER THE VALUE IT IS ABOUT. The in-room editor patches
+ * per keystroke and a check coalesces them, so a check that started on "abc" returned while the
+ * name was already "abcd" and wrote "abc" back over it, and the queued re-check then passed the
+ * stale name. Moderation is off in this run, which is enough: the verdict on an unflagged name is
+ * the name itself, so the old code wrote the checked value back all the same.
+ */
+{
+  const sink: ServerMsg[] = [];
+  const room = new Room('smoke-mod-stale', () => {}, { kind: 'versus' });
+  room.add({
+    id: 'a',
+    send: (m) => sink.push(m),
+    player: { clientId: 'a', name: 'abc', teamName: 'T', teamNumber: 1, alliance: 'red', startIndex: 0, ready: false, spec: { ...DEFAULT_SPEC }, assists: { ...DEFAULT_ASSISTS } },
+    connected: true,
+    disconnectAt: 0,
+  });
+  // the join's check is in flight; a keystroke lands before it returns
+  room.onMessage('a', { t: 'update', patch: { name: 'abcd' } });
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  const last = [...sink].reverse().find((m) => m.t === 'roster') as Extract<ServerMsg, { t: 'roster' }> | undefined;
+  const name = last?.players.find((p) => p.clientId === 'a')?.name;
+  check('⚠️ moderation: a rename that lands mid-check is not overwritten by the stale verdict', name === 'abcd', String(name));
+  check(
+    'moderation: the verdict is applied per field, only where the field still holds what was checked',
+    /if \(p\.name === was\.name && name !== p\.name\) \{/.test(readFileSync('server/room.ts', 'utf8')),
+  );
+}
+
+/**
+ * THE REVIEW'S CLIENT FINDINGS ON THE ROOM SCREENS — each one silent in use, so pinned in source.
+ */
+{
+  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const app = readFileSync('src/ui/App.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const list = readFileSync('src/ui/DiscordLobbyList.tsx', 'utf8').replace(/\r\n/g, '\n');
+
+  // an in-room refusal ("Everyone has to be ready…") was silent, and it latched `refusedRef`,
+  // which then swallowed "Lost connection" for the rest of the room
+  check(
+    '⚠️ lobby: only a refusal at the DOOR marks the socket refused',
+    /if \(phaseRef\.current !== 'room'\) refusedRef\.current = true;/.test(lobby) &&
+      !/lobby\.on\('error', \(msg, code\) => \{\n      refusedRef\.current = true;/.test(lobby),
+    'latched in the room, a later drop never said "Lost connection"',
+  );
+  check(
+    'lobby: an in-room refusal is shown in the room, and the next roster clears it',
+    /\{error && <p className="ds-form-err">⚠ \{error\}<\/p>\}/.test(lobby) &&
+      /lobby\.on\('roster', \(list, host\) => \{[\s\S]{0,300}?setError\(''\);/.test(lobby),
+  );
+  check(
+    'lobby: the "Trying again" countdown is said only where it runs (the activity)',
+    /\{joiningGroup && ` Trying again in \$\{retryIn\}s\.`\}/.test(lobby) && !/finishes\. Trying again in \{retryIn\}s\./.test(lobby),
+    'on the web an invite has no retry timer, so it read "Trying again in 0s." forever',
+  );
+  check(
+    '⚠️ lobby: TRY NOW and TRY AGAIN drop the refused socket before dialling, as the timer does',
+    (lobby.match(/lobbyRef\.current\?\.dispose\(\);[^\n]*\n\s*join\(code, autoJoinRegion\);/g) ?? []).length === 3 &&
+      !/onClick=\{\(\) => join\(code, autoJoinRegion\)\}/.test(lobby),
+    'a leaked socket’s closed handler can later clobber a working room',
+  );
+
+  const rj = app.match(/const rejoinGame = \(ref: ActiveGameRef, onGone\?: \(\) => void\): void => \{([\s\S]*?)\n  \};/);
+  const rjBody = rj?.[1] ?? '';
+  check(
+    '⚠️ rejoin: one at a time — a second click during the wait builds no second session',
+    /^\s*(\/\/[^\n]*\n\s*)*if \(rejoiningRef\.current\) return;/.test(rjBody) && /rejoiningRef\.current = s;/.test(rjBody),
+    'setSession dropped the first session without disposing it: a live socket holding the seat',
+  );
+  check(
+    '⚠️ rejoin: a session the player walked away from is disposed, unless the recycle took its socket',
+    /if \(screenRef\.current !== from\) \{[\s\S]{0,900}?if \(rejoiningRef\.current === s\) \{\n\s*s\.dispose\(\);/.test(rjBody) &&
+      /if \(rejoiningRef\.current === s\) rejoiningRef\.current = null;\n    const transport = s\.release\(\);/.test(app),
+  );
+
+  // a list read that never succeeds used to leave JOIN MAIN LOBBY disabled on CHECKING… for good
+  check(
+    'discord lobbies: a list that keeps failing unlocks JOIN MAIN LOBBY instead of spinning forever',
+    /const loading = lobbies === null && !readFailed;/.test(list) &&
+      /setReadFailed\(misses >= READ_FAILS_MAX\)/.test(list) &&
+      /disabled=\{loading \|\| mainBusy\}/.test(list),
+  );
+}
+
 // ---- THE KEYS ARE GOING SOMEWHERE ELSE, AND THE HUD SAYS SO ------------------------
 /**
  * Embedded as a Discord Activity the game is a cross-origin iframe beside a chat box, and a
@@ -26314,9 +26475,9 @@ const dumperSetup = (): RobotSetup => {
 
 // ---- ...and the bit reaches the screen ---------------------------------------------
 {
-  const gm = readFileSync('src/game.ts', 'utf8');
-  const gv = readFileSync('src/ui/GameView.tsx', 'utf8');
-  const css = readFileSync('src/ui/styles.css', 'utf8');
+  const gm = readFileSync('src/game.ts', 'utf8').replace(/\r\n/g, '\n');
+  const gv = readFileSync('src/ui/GameView.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const css = readFileSync('src/ui/styles.css', 'utf8').replace(/\r\n/g, '\n');
   check(
     'focus: the 10 Hz HUD read carries it, off the keyboard rather than a second mechanism',
     /windowFocused: this\.input\.keyboard\.hasFocus\(\),/.test(gm),
@@ -26353,8 +26514,8 @@ const dumperSetup = (): RobotSetup => {
  * `Audio` elements), so this reads the source, the way the LAN and env checks above do.
  */
 {
-  const src = readFileSync('src/audio.ts', 'utf8');
-  const gm = readFileSync('src/game.ts', 'utf8');
+  const src = readFileSync('src/audio.ts', 'utf8').replace(/\r\n/g, '\n');
+  const gm = readFileSync('src/game.ts', 'utf8').replace(/\r\n/g, '\n');
   // the method body alone, to the first method-level `}` — nothing lazy that could run on
   const at = src.indexOf('\n  dispose(): void {');
   const body = at < 0 ? '' : src.slice(at + 1, src.indexOf('\n  }', at));
@@ -26387,7 +26548,7 @@ const dumperSetup = (): RobotSetup => {
 // rather than matched with a lazy span, because a lazy `[\s\S]*?` across a JSX ternary will
 // happily walk out of the arm it was meant to stay inside.
 {
-  const dl = readFileSync('src/ui/Download.tsx', 'utf8');
+  const dl = readFileSync('src/ui/Download.tsx', 'utf8').replace(/\r\n/g, '\n');
   const open = dl.indexOf('{embedded ? (');
   const mid = open < 0 ? -1 : dl.indexOf(') : (', open);
   const end = mid < 0 ? -1 : dl.indexOf(')}', mid);
@@ -26447,7 +26608,7 @@ const dumperSetup = (): RobotSetup => {
   check('region: a region-coded ROOM prefix is validated too, not just ?region=', at('room=' + encodeURIComponent('a\r\nb') + '-abc') === null);
   check('region: legalRegion agrees with the router', legalRegion('iad') && !legalRegion('IAD') && !legalRegion('ia') && !legalRegion('iad\n'));
 
-  const idx = readFileSync('server/index.ts', 'utf8');
+  const idx = readFileSync('server/index.ts', 'utf8').replace(/\r\n/g, '\n');
   check(
     'region: /health validates before building its replay header',
     /legalRegion\(want\)/.test(idx),
@@ -26465,8 +26626,8 @@ const dumperSetup = (): RobotSetup => {
  * activity's lobby list again.
  */
 {
-  const lc = readFileSync('src/net/lobbyClient.ts', 'utf8');
-  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8');
+  const lc = readFileSync('src/net/lobbyClient.ts', 'utf8').replace(/\r\n/g, '\n');
+  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8').replace(/\r\n/g, '\n');
   const resumeFn = lc.match(/  resume\([\s\S]*?\n  \}/);
   check('resume: the function is still found (the checks below are anchored on it)', !!resumeFn);
   check(
@@ -26475,7 +26636,7 @@ const dumperSetup = (): RobotSetup => {
   );
   check(
     'resume: and the call site actually passes one',
-    /\.resume\(resume\.code, myPlayer\(\), resume\.clientId, roomConfig\(\), group\)/.test(lobby),
+    /\.resume\(resume\.code, myPlayer\(\), resume\.clientId, resume\.seatToken, roomConfig\(\), group\)/.test(lobby),
   );
 }
 
@@ -26489,10 +26650,10 @@ const dumperSetup = (): RobotSetup => {
  * whole match AND the whole results screen. Reproduced against a real server before the fix.
  */
 {
-  const room = readFileSync('server/room.ts', 'utf8');
-  const idx = readFileSync('server/index.ts', 'utf8');
-  const api = readFileSync('src/net/api.ts', 'utf8');
-  const list = readFileSync('src/ui/DiscordLobbyList.tsx', 'utf8');
+  const room = readFileSync('server/room.ts', 'utf8').replace(/\r\n/g, '\n');
+  const idx = readFileSync('server/index.ts', 'utf8').replace(/\r\n/g, '\n');
+  const api = readFileSync('src/net/api.ts', 'utf8').replace(/\r\n/g, '\n');
+  const list = readFileSync('src/ui/DiscordLobbyList.tsx', 'utf8').replace(/\r\n/g, '\n');
 
   check(
     '⚠️ lobbies: a room that cannot be joined is still LISTED, with why',
@@ -26557,8 +26718,8 @@ const dumperSetup = (): RobotSetup => {
  * instance id cannot quietly re-advertise any of them (the split that `inActivity` exists for).
  */
 {
-  const shell = readFileSync('src/ui/AppShell.tsx', 'utf8');
-  const modes = readFileSync('src/ui/ModeSelect.tsx', 'utf8');
+  const shell = readFileSync('src/ui/AppShell.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const modes = readFileSync('src/ui/ModeSelect.tsx', 'utf8').replace(/\r\n/g, '\n');
 
   check(
     '⚠️ discord activity: the app bar drops its auth slot in the embed',
@@ -26620,7 +26781,7 @@ const dumperSetup = (): RobotSetup => {
  *    record flashed it and bounced — taking a WebGL context and the 3D chunk fetches with it.
  */
 {
-  const app = readFileSync('src/ui/App.tsx', 'utf8');
+  const app = readFileSync('src/ui/App.tsx', 'utf8').replace(/\r\n/g, '\n');
   const enter = app.match(/const enterDiscordRoom = \(code: string, game: GameId\): void => \{([\s\S]*?)\n  \};/);
   const body = enter?.[1] ?? '';
   check('discord guard: the entry path is still found (the checks below are anchored on it)', !!enter);
@@ -26684,7 +26845,7 @@ const dumperSetup = (): RobotSetup => {
   );
   check(
     'discord rejoin: a redirect that beat us (a recycled room) is not overwritten',
-    !!rj && /if \(screenRef\.current !== from\) return;/.test(rjBody),
+    !!rj && /if \(screenRef\.current !== from\) \{/.test(rjBody),
     '`setSession` is immediate because it wires `onLobby`, so `backToRoomLobby` can fire while we wait',
   );
   const iv = rjBody.match(/\n    \}, (\d+)\);/);
@@ -26765,7 +26926,7 @@ const dumperSetup = (): RobotSetup => {
  * narrow so an ordinary edit nearby does not red the suite.
  */
 {
-  const room = readFileSync('server/room.ts', 'utf8');
+  const room = readFileSync('server/room.ts', 'utf8').replace(/\r\n/g, '\n');
   check(
     '⚠️ moderation: a patch that CHANGES a name is re-moderated, on the same path the join uses',
     /if \(Room\.nameFingerprint\(c\.player\) !== namesBefore\) this\.moderatePlayerNames\(c\);/.test(room),
@@ -26842,7 +27003,7 @@ const dumperSetup = (): RobotSetup => {
     allianceDuo([b, c], a) === null,
     'otherwise a hidden member is handed somebody else’s partner and somebody else’s half of the split');
 
-  const rsSrc = readFileSync('src/ui/useRoleSwap.ts', 'utf8');
+  const rsSrc = readFileSync('src/ui/useRoleSwap.ts', 'utf8').replace(/\r\n/g, '\n');
   check('useRoleSwap: the partner is read off allianceDuo',
     /const partner = duo\?\.partner \?\? null;/.test(rsSrc));
   check('⚠️ useRoleSwap: and NOT off roster order any more',
@@ -26862,7 +27023,7 @@ const dumperSetup = (): RobotSetup => {
  * all reached the UI.
  */
 {
-  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8');
+  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8').replace(/\r\n/g, '\n');
   const panelMatch = lobby.match(/if \(autoEntry && phase !== 'room'\) \{[\s\S]*?\n  \}/);
   check('auto-join: the dedicated joining panel exists (the checks below are anchored on it)',
     !!panelMatch);
@@ -26901,7 +27062,7 @@ const dumperSetup = (): RobotSetup => {
  * literals, and was echo-only, so a re-entry re-advertised them.
  */
 {
-  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8');
+  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8').replace(/\r\n/g, '\n');
   check('⚠️ identity: the driver-name box starts EMPTY, not on the literal',
     /useState\(initialName \|\| \(displayName \?\? settings\.spec\.teamName\) \|\| ''\)/.test(lobby),
     '`|| \'Player\'` put the fallback in the box the player is looking at');
@@ -26950,9 +27111,9 @@ const dumperSetup = (): RobotSetup => {
  *   client's own setting.
  */
 {
-  const idx = readFileSync('server/index.ts', 'utf8');
-  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8');
-  const proto = readFileSync('src/net/protocol.ts', 'utf8');
+  const idx = readFileSync('server/index.ts', 'utf8').replace(/\r\n/g, '\n');
+  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const proto = readFileSync('src/net/protocol.ts', 'utf8').replace(/\r\n/g, '\n');
 
   check(
     'refusals: both new codes are declared, and `code` stays OPTIONAL (one app serves every client)',
@@ -27000,7 +27161,7 @@ const dumperSetup = (): RobotSetup => {
     'a stale `in_progress` would caption an unrelated failure AND re-arm the timer forever',
   );
   const waitPanel = lobby.match(
-    /phase === 'error' && errorCode === 'in_progress' \? \(([\s\S]{0,1200}?)\) : phase === 'error' \? \(/,
+    /phase === 'error' && errorCode === 'in_progress' \? \(([\s\S]{0,1600}?)\) : phase === 'error' \? \(/,
   );
   check('mid-match: the waiting panel is still found (anchors the checks below)', !!waitPanel);
   check(
@@ -27008,7 +27169,7 @@ const dumperSetup = (): RobotSetup => {
     !!waitPanel &&
       /ds-loading/.test(waitPanel[1]) &&
       /You’ll be able to join when it finishes\./.test(waitPanel[1]) &&
-      /\{retryIn\}s/.test(waitPanel[1]) &&
+      /\$\{retryIn\}s/.test(waitPanel[1]) &&
       !/ds-form-err/.test(waitPanel[1]),
   );
 
@@ -27087,9 +27248,9 @@ const dumperSetup = (): RobotSetup => {
  * where we are, never why one fetch failed.
  */
 {
-  const rail = readFileSync('src/ui/NavRail.tsx', 'utf8');
-  const account = readFileSync('src/ui/Account.tsx', 'utf8');
-  const friendsSrc = readFileSync('src/ui/FriendsPanel.tsx', 'utf8');
+  const rail = readFileSync('src/ui/NavRail.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const account = readFileSync('src/ui/Account.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const friendsSrc = readFileSync('src/ui/FriendsPanel.tsx', 'utf8').replace(/\r\n/g, '\n');
 
   check(
     '⚠️ discord activity: the rail drops its Profile destination in the embed',
@@ -27208,8 +27369,8 @@ const dumperSetup = (): RobotSetup => {
  * Both now say what is true instead of asking for something impossible.
  */
 {
-  const home = readFileSync('src/ui/HomeMenu.tsx', 'utf8');
-  const appear = readFileSync('src/ui/Appearance.tsx', 'utf8');
+  const home = readFileSync('src/ui/HomeMenu.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const appear = readFileSync('src/ui/Appearance.tsx', 'utf8').replace(/\r\n/g, '\n');
 
   check(
     '⚠️ embed: the HOME keycaps use the same filter as the rail, so the two cannot drift',
@@ -27258,7 +27419,7 @@ const dumperSetup = (): RobotSetup => {
  * is still the cheap test it claims to be, rather than having quietly grown an inference.
  */
 {
-  const src = readFileSync('src/settings.ts', 'utf8');
+  const src = readFileSync('src/settings.ts', 'utf8').replace(/\r\n/g, '\n');
   const doc = src.slice(0, src.indexOf('export function hasStoredSettings'));
   check(
     '⚠️ settings: the key-presence limit of hasStoredSettings() is recorded where it is defined',
@@ -27285,8 +27446,8 @@ const dumperSetup = (): RobotSetup => {
  * networked match, which is the mode the Discord Activity is always in.
  */
 {
-  const g = readFileSync('src/game.ts', 'utf8');
-  const gs = readFileSync('src/ui/GraphicsSection.tsx', 'utf8');
+  const g = readFileSync('src/game.ts', 'utf8').replace(/\r\n/g, '\n');
+  const gs = readFileSync('src/ui/GraphicsSection.tsx', 'utf8').replace(/\r\n/g, '\n');
   check(
     '⚠️ scene: a quality notice goes to the drain this mode reads, not always world.events',
     /onQualityEvent: \(line\) => \(this\.session \? this\.netEvents : this\.world\.events\)\.push\(line\)/.test(g),
@@ -27307,8 +27468,8 @@ const dumperSetup = (): RobotSetup => {
  * them is visible from the embed, which is the surface everything else was tested against.
  */
 {
-  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8');
-  const app = readFileSync('src/ui/App.tsx', 'utf8');
+  const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const app = readFileSync('src/ui/App.tsx', 'utf8').replace(/\r\n/g, '\n');
 
   check(
     '⚠️ lobby: a refusal that arrives while we are IN the room stays inline, it does not replace the screen',

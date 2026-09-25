@@ -589,6 +589,8 @@ export class ServerSession implements NetSession {
        * a session that is over rather than one that is merely quiet.
        */
       this.connected = false;
+      // the recycle re-states the seat's secret (a current server); the App hands it on
+      if (m.seatToken) this.seatToken = m.seatToken;
       this.lobbyCb?.(m.clientId);
     } else if (m.t === 'rejoined') {
       if (!m.ok) {

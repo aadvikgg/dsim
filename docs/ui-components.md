@@ -141,10 +141,10 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-form` | src/ui/shell.css:3917 | 36 |
+| `.ds-form` | src/ui/shell.css:3917 | 37 |
 | `.ds-form-alt` | src/ui/shell.css:3966 | 2 |
 | `.ds-form-aside` | src/ui/shell.css:4029 | 1 |
-| `.ds-form-err` | src/ui/shell.css:3951 | 15 |
+| `.ds-form-err` | src/ui/shell.css:3951 | 16 |
 | `.ds-form-hint` | src/ui/shell.css:3955 | 11 |
 | `.ds-form-switch` | src/ui/shell.css:4007 | 2 |
 
@@ -611,7 +611,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-empty` | src/ui/shell.css:2254 | 39 |
+| `.ds-empty` | src/ui/shell.css:2254 | 40 |
 
 ## `ds-fields` — 1
 

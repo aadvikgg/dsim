@@ -7,6 +7,9 @@ import { fetchLobbies, type DiscordLobby } from '../net/api';
 import { preloadRoomPhysics } from '../net/roomPhysics';
 import { generateRoomCode } from '../net/roomCode';
 
+/** failed list reads in a row, with no answer yet, before the screen stops saying CHECKING… */
+const READ_FAILS_MAX = 2;
+
 /**
  * The Discord Activity LOBBY BROWSER. Opened by the home "Join Discord Lobby"
  * button, it lists the open rooms of THIS activity (scoped by `group`, the
@@ -50,11 +53,14 @@ export function DiscordLobbyList({
   onBack: () => void;
 }) {
   const [lobbies, setLobbies] = useState<DiscordLobby[] | null>(null);
+  /** no read has answered yet and `READ_FAILS_MAX` in a row have failed — see `loading` */
+  const [readFailed, setReadFailed] = useState(false);
   useEscape(onBack);
 
   useEffect(() => {
     let alive = true;
     let inFlight = false;
+    let misses = 0;
     const poll = (): void => {
       // a minimised activity has nobody looking at the list; skip the request
       if (document.visibilityState === 'hidden') return;
@@ -68,6 +74,9 @@ export function DiscordLobbyList({
           // single dropped poll used to repaint the screen as "nobody has opened the main
           // lobby yet" while four people were sitting in it.
           if (alive && l !== null) setLobbies(l);
+          if (!alive) return;
+          misses = l === null ? misses + 1 : 0;
+          setReadFailed(misses >= READ_FAILS_MAX);
         })
         .finally(() => {
           inFlight = false;
@@ -111,7 +120,12 @@ export function DiscordLobbyList({
    * An older server sends no `joinable`, and for it absence really did mean unopened; a row
    * from one is therefore treated as joinable, which is what it meant.
    */
-  const loading = lobbies === null;
+  // ⚠️ A READ THAT KEEPS FAILING IS NOT A LOAD THAT IS STILL COMING. With no answer ever, the
+  // button sat disabled on CHECKING… for as long as the list was unreachable, although joining
+  // the main lobby needs nothing from it (the server decides the room). So it unlocks, and the
+  // poll carries on: the first good read replaces this state.
+  const unknown = lobbies === null && readFailed;
+  const loading = lobbies === null && !readFailed;
   const mainBusy = !!main && main.joinable === false;
   const busyLabel = (l: DiscordLobby): string =>
     l.state === 'full' ? 'Full'
@@ -139,6 +153,7 @@ export function DiscordLobbyList({
           </button>
           <p className="ds-hint">
             {loading ? 'Checking what’s open in this activity…'
+              : unknown ? 'Couldn’t check what’s open in this activity. You can still join the main lobby.'
               : mainBusy
                 ? `${main?.players}/${main?.capacity} playing ${seasonFor(mainGame).name}. You can join when this match finishes, or open a separate lobby below.`
                 : main
@@ -152,6 +167,11 @@ export function DiscordLobbyList({
           {/* the house list states, one padding, so the section does not jump when rows land */}
           {loading ? (
             <div className="ds-loading">Loading…</div>
+          ) : unknown ? (
+            <div className="ds-empty">
+              <div className="big">Couldn’t load the lobby list</div>
+              It tries again every few seconds.
+            </div>
           ) : others.length === 0 ? (
             <div className="ds-empty">
               <div className="big">No other lobbies open</div>

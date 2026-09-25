@@ -313,6 +313,9 @@ export function Lobby({
   const startedRef = useRef(false);
   /** the room said no (an `error` frame) — a close that follows is the same event, not a new one */
   const refusedRef = useRef(false);
+  /** `phase` for the handlers `wire` registers once, which would otherwise read the render that connected */
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
   const nameEditedRef = useRef(false);
   // which room code the auto-join effect below has already fired for (value-keyed,
   // not a one-shot boolean, so accepting a DIFFERENT invite while mounted rejoins).
@@ -573,6 +576,7 @@ export function Lobby({
       setHostId(host);
       setMyId(lobby.clientId);
       setSlowConnect(false); // whatever it was, we are talking to the room again
+      setError(''); // an in-room refusal (see 'error') is answered by the room moving on
       setPhase((p) => (p === 'connecting' ? 'room' : p));
     });
     lobby.on('matchStart', (m) => handleStart(m, roomCode));
@@ -588,7 +592,10 @@ export function Lobby({
       if (!isRanked) setStarting({ deadline, mode: m });
     });
     lobby.on('error', (msg, code) => {
-      refusedRef.current = true;
+      // ⚠️ ONLY A REFUSAL AT THE DOOR marks the socket refused. In the room it is a message
+      // (a START refused on readiness, a restart pending) and the socket stays seated, so a
+      // drop later in the room is still a lost connection and must be said as one.
+      if (phaseRef.current !== 'room') refusedRef.current = true;
       setError(msg);
       setErrorCode(code);
       /**
@@ -660,7 +667,7 @@ export function Lobby({
     }
     setPhase('room');
     setMyId(resume.clientId);
-    wire(resume.transport, resume.code).resume(resume.code, myPlayer(), resume.clientId, roomConfig(), group);
+    wire(resume.transport, resume.code).resume(resume.code, myPlayer(), resume.clientId, resume.seatToken, roomConfig(), group);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resume]);
 
@@ -977,10 +984,18 @@ export function Lobby({
                 <>
                   <p className="ds-loading">A match is running in this lobby.</p>
                   <p className="ds-hint">
-                    You’ll be able to join when it finishes. Trying again in {retryIn}s.
+                    {/* the countdown runs only inside the activity (the retry effect); on the
+                        web an invite has no timer, and "Trying again in 0s." would sit forever */}
+                    You’ll be able to join when it finishes.{joiningGroup && ` Trying again in ${retryIn}s.`}
                   </p>
                   <div className="ds-actions">
-                    <button className="ds-cta" onClick={() => join(code, autoJoinRegion)}>
+                    <button
+                      className="ds-cta"
+                      onClick={() => {
+                        lobbyRef.current?.dispose(); // the refused socket, as the retry effect does
+                        join(code, autoJoinRegion);
+                      }}
+                    >
                       TRY NOW
                     </button>
                   </div>
@@ -998,7 +1013,13 @@ export function Lobby({
                     </p>
                   )}
                   <div className="ds-actions">
-                    <button className="ds-cta" onClick={() => join(code, autoJoinRegion)}>
+                    <button
+                      className="ds-cta"
+                      onClick={() => {
+                        lobbyRef.current?.dispose();
+                        join(code, autoJoinRegion);
+                      }}
+                    >
                       TRY AGAIN
                     </button>
                   </div>
@@ -1485,6 +1506,9 @@ export function Lobby({
             </button>
           )}
         </div>
+        {/* a refusal while seated (see the 'error' handler): said here, where the host who
+            pressed START is looking, and cleared by the next roster */}
+        {error && <p className="ds-form-err">⚠ {error}</p>}
         {!startLegal && (
           <p className="ds-hint">
             ⚠ Your start position isn’t legal for this chassis. Fix it above, or pick a preset, to

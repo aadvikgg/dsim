@@ -1,3 +1,15 @@
+# HANDOFF — 2026-09-24o (PR #83 review fixes, branch `pr83-fixes`)
+
+**State: committed on local branch `pr83-fixes` (PR #83's `fix/discord-activity-audit` + `origin/alpha` merged in). Not pushed, not deployed.** ⚠️ Server change (`server/room.ts`: the recycle's `lobby` frame carries `seatToken`; per-field moderation verdicts), so it rides the next Fly deploy.
+
+- **Seat token lost on recycle (blocker):** the lobby that adopts a recycled socket never gets a `welcome`, so match two's session had an empty token and rejoin/Abandon were refused. Fixed both ways: `ResumedRoom.seatToken` → `LobbyClient.resume`, and the owner's `t: 'lobby'` frame re-states it.
+- **Moderation:** a verdict is written only over a field that still holds the value checked.
+- **Lobby:** an in-room refusal is shown (`.ds-form-err`) and no longer latches `refusedRef`; the web invite panel drops "Trying again in 0s."; TRY NOW / TRY AGAIN dispose the refused socket.
+- **App.rejoinGame:** re-entry guard (`rejoiningRef`); a session the player walked away from during the wait is disposed (not when the recycle took its socket).
+- **HDRI failure count** resets on success and after `HDRI_RETRY_MS`. **Discord lobby list:** two failed reads with no answer unlock JOIN MAIN LOBBY.
+- **Smoke:** the PR's source-reading checks normalise CRLF at the read site; new checks under "recycle seat:", "moderation:", "lobby:", "rejoin:", "discord lobbies:".
+- **Not changed, owner call pending:** `settings.ts` seeding a first-time BIOBUZZ loadout from `BB_DEFAULT_SPEC`.
+
 # HANDOFF — 2026-09-24n (BIOBUZZ Act 1's 2D records stay on the boards; Act 2 release prep)
 
 **State: pushed on `alpha`.** `dbtest` ALL PASS (10 new era checks), `server:check`, `build`, `docaudit` pass. Server change: `dsim-alpha` needs a redeploy, and production gets it with the `main` deploy. Nothing merged to `main`, nothing deployed.

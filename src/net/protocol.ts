@@ -924,13 +924,15 @@ export type ServerMsg =
    * immediately, so the client that adopts the socket back into a `LobbyClient` has
    * the players without asking for them. `clientId` is re-sent because the adopting
    * lobby never sends a `join` (it is already in the room) and so never gets a
-   * `welcome` of its own.
+   * `welcome` of its own. `seatToken` rides for the same reason, and like `welcome`'s it goes
+   * only to the seat's owner (each member gets its own frame; a spectator gets none).
+   * Optional: an older server does not send it, and the client keeps the token it had.
    *
    * Gated on the 'recycle' capability: the room only offers this when EVERY member
    * advertises it, because a client that ignores this message would sit on a dead
    * results screen while the room restarted around it.
    */
-  | { t: 'lobby'; clientId: string }
+  | { t: 'lobby'; clientId: string; seatToken?: string }
   /**
    * `message` is human-readable and every client since the first build shows it.
    *

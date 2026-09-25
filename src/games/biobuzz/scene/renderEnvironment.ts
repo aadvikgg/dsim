@@ -97,6 +97,13 @@ const SKY_H = 384;
  */
 const HDRI_MAX_TRIES = 2;
 const failedHdri = new Map<EnvironmentId, number>();
+/**
+ * ⚠️ AND THE COUNT EXPIRES. Two blips in one long Electron run still meant the stand-in until a
+ * restart, so a spent count is forgotten `HDRI_RETRY_MS` after its last miss (and a success clears
+ * it outright). An unreachable host is then asked once per window, not once per scene build.
+ */
+const HDRI_RETRY_MS = 5 * 60_000;
+const hdriFailedAt = new Map<EnvironmentId, number>();
 
 /**
  * ⚠️ **THE ENVIRONMENT MAP IS SAMPLED IN THREE'S OWN Y-UP FRAME AND THIS SCENE IS Z-UP.**
@@ -420,6 +427,7 @@ export function createEnvironment(renderer: THREE.WebGLRenderer, scene: THREE.Sc
       }
       // ALREADY TRIED, ALREADY REFUSED. Without this the retry ran on every scene build and every
       // graphics-settings change, because only a SUCCESS was ever cached — see `failedHdri`.
+      if (Date.now() - (hdriFailedAt.get(id) ?? 0) >= HDRI_RETRY_MS) failedHdri.delete(id);
       if ((failedHdri.get(id) ?? 0) >= HDRI_MAX_TRIES) {
         loading = false;
         applyFallback(def, lighting);
@@ -438,8 +446,10 @@ export function createEnvironment(renderer: THREE.WebGLRenderer, scene: THREE.Sc
           src = await new HDRLoader().loadAsync(def.hdri.url);
         } catch (err) {
           failedHdri.set(id, (failedHdri.get(id) ?? 0) + 1);
+          hdriFailedAt.set(id, Date.now());
           throw err;
         }
+        failedHdri.delete(id); // it CAN be fetched: earlier misses were blips, not the host
         if (disposed || mine !== epoch) {
           src.dispose();
           return;
