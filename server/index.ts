@@ -3148,7 +3148,7 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
         send({
           t: 'error',
           message:
-            'Verify your email to save a record run. Open the link we sent you, or resend it from your Profile page.',
+            'Verify your email to save a record run. Enter the code we emailed you on your Profile page.',
         });
         abandon();
         return;

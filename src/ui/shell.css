@@ -4057,7 +4057,7 @@ tr.lb-detail td {
    token in both themes and adds no pair to scripts/contrast.mjs. */
 .ds-verifybar {
   display: flex;
-  align-items: center;
+  align-items: flex-start; /* the buttons stay level with the sentence, not the code field under it */
   gap: var(--ds-s-3);
   padding: var(--ds-s-3) var(--ds-s-4);
   margin-bottom: var(--ds-s-5);
@@ -4074,6 +4074,21 @@ tr.lb-detail td {
 }
 .ds-verifybar-text .err {
   color: var(--ds-danger);
+}
+/* the code field (VerifyCodeForm.tsx): under the sentence in the bar, and alone in
+   the sign-up dialog and on /account/verify. Capped so a 6-digit code does not sit
+   in a field as wide as the page. */
+.ds-verifycode {
+  max-width: 360px;
+  margin-top: var(--ds-s-2);
+}
+.ds-input.code {
+  font-family: var(--ds-font-mono);
+  letter-spacing: var(--ds-track-caps);
+}
+/* a code is short: the row's 240px basis wrapped Verify under the field at phone width */
+.ds-field-row > .ds-input.code {
+  flex-basis: 120px;
 }
 /* PHONE: the buttons drop under the sentence rather than squeezing it to one word
    per line. Same rule as the rest of the shell at this breakpoint. */

@@ -1,3 +1,13 @@
+# HANDOFF — 2026-09-25 (email verification takes the CODE Neon Auth sends)
+
+**State: pushed on `alpha`.** `npm test` (shared + 5123 BIOBUZZ), `build`, `server:check`, `uiaudit` pass. Server change (the two refusal strings now say "Enter the code we emailed you"), so it rides the next Fly deploy. Nothing on `main`.
+
+- **Bug (owner):** the verification email arrived with a code and nowhere in the app took one. Neon Auth verifies with an OTP; the app only knew the link/token path.
+- **Fix:** `verifyEmailCode` (`authFlows.ts`, `emailOtp.verifyEmail`) + `VerifyCodeForm`, shown in the Profile banner, as a code step in the sign-up dialog, and on `/account/verify`. The session refreshes itself on that route, so the banner goes away. Rule in `docs/area/accounts.md`.
+- **Copy:** the banner said ranked and record runs need a verified address. False: `REQUIRE_VERIFIED_EMAIL` is off. The sentence is gone.
+- **Open, owner call:** turn on `REQUIRE_VERIFIED_EMAIL=1` (owner: verification SHOULD be required). `docs/deploy.md` §4 says first check the JWT carries `email_verified`; without it the gate passes everybody.
+- **Likely the same bug, not checked:** the password-reset email may also carry a code, and `/account/reset` only takes a link token.
+
 # HANDOFF — 2026-09-24o (BIOBUZZ Act 2 RELEASED to production; PR #83 merged with review fixes)
 
 **State: production = `main` = `fff39e92`, Vercel and every Fly machine on it.** Maintenance lifts 22:30 EDT (02:30Z); the Act 2 and patch-notes announcements publish at the same moment.

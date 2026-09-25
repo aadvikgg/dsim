@@ -21,6 +21,16 @@
  *           → { status: boolean }
  *   1562  verifyEmail({ query: { token: string; callbackURL?: string } })
  *           → { status: boolean } | void
+ *   1128  emailOtp.verifyEmail({ email: string; otp: string })
+ *           → { status: boolean; token: string | null; user }
+ *
+ * ⚠️ NEON AUTH VERIFIES WITH A CODE, NOT A LINK. `sendVerificationEmail` is the
+ * right call to SEND (the SDK's own Supabase adapter resends through it), but
+ * the email it produces carries a one-time code, and the SDK's adapter answers a
+ * link-style verification with "Magic link verification is not supported. Use
+ * email OTP authentication instead." So the code is completed through
+ * `emailOtp.verifyEmail`, which `verifyEmailCode` wraps. The token path stays for
+ * a project configured to send links; nothing in this build sends one today.
  *
  * ⚠️ `forgetPassword` — which the roadmap named — is NOT a top-level method on
  * this build. The only `forgetPassword` in the .d.mts is `forgetPassword.emailOtp`
@@ -78,6 +88,9 @@ export interface AuthFlowsClient {
   verifyEmail: (a: { query: { token: string; callbackURL?: string } }) => Promise<
     SdkResponse<{ status: boolean } | void>
   >;
+  emailOtp: {
+    verifyEmail: (a: { email: string; otp: string }) => Promise<SdkResponse<{ status: boolean }>>;
+  };
 }
 
 /** resolved lazily — see the module note. Null when auth is off in this build. */
@@ -95,6 +108,7 @@ async function liveClient(): Promise<AuthFlowsClient | null> {
 export type AuthFlowFailure =
   | 'unavailable' // auth is not configured in this build
   | 'invalid-token' // expired, already spent, or not ours
+  | 'invalid-code' // the emailed code was wrong, expired, or tried too often
   | 'invalid-credentials' // the email/password pair was rejected — see `describeAuthError`
   | 'weak-password'
   | 'invalid-email'
@@ -117,6 +131,7 @@ const MESSAGES: Record<AuthFlowFailure, string> = {
   unavailable: 'Accounts are turned off in this build.',
   'invalid-token':
     'That link has expired or has already been used. Request a new one and open it from the newest email.',
+  'invalid-code': 'That code is wrong or has expired. Check the newest email, or send a new code.',
   'invalid-credentials': 'That email and password don’t match an account. Check both and try again.',
   'weak-password': `Passwords need at least ${PASSWORD_MIN} characters.`,
   'invalid-email': 'That doesn’t look like an email address.',
@@ -386,6 +401,40 @@ export async function requestEmailVerification(email: string): Promise<AuthFlowR
   );
 }
 
+/**
+ * A typed code, as the server wants it: digits and letters only. People paste
+ * "123 456" or "123-456" out of a mail client, and a space is not worth a
+ * round trip that answers INVALID_OTP.
+ */
+export const normalizeCode = (code: string): string => code.replace(/[^0-9A-Za-z]/g, '');
+
+/** the code's length, when the email's format is the Better Auth default. Only a
+ *  hint for the input's `maxLength`; the server decides what a valid code is. */
+export const CODE_MAX = 12;
+
+/**
+ * (5) complete verification with the code from the email — see the module note:
+ * this is the one Neon Auth sends.
+ *
+ * A 400 or 403 here means the CODE was refused (Better Auth answers INVALID_OTP,
+ * OTP_EXPIRED, or TOO_MANY_ATTEMPTS, and after the last one the code is gone),
+ * so `invalid-token` is re-labelled `invalid-code`, whose sentence says to send a
+ * new one rather than to open a link.
+ */
+export async function verifyEmailCode(email: string, code: string): Promise<AuthFlowResult> {
+  const client = await liveClient();
+  if (!client) return fail('unavailable');
+  return codeFlow(client, email, code);
+}
+
+async function codeFlow(client: AuthFlowsClient, email: string, code: string): Promise<AuthFlowResult> {
+  const otp = normalizeCode(code);
+  if (!otp) return fail('invalid-code');
+  if (!looksLikeEmail(email)) return fail('invalid-email');
+  const r = await run(() => client.emailOtp.verifyEmail({ email: email.trim(), otp }));
+  return !r.ok && r.reason === 'invalid-token' ? fail('invalid-code') : r;
+}
+
 /** (4) complete verification from the emailed link's token. */
 export async function completeEmailVerification(token: string): Promise<AuthFlowResult> {
   if (!token.trim()) return fail('invalid-token');
@@ -397,7 +446,7 @@ export async function completeEmailVerification(token: string): Promise<AuthFlow
 // ------------------------------------------------------------ test seam -----
 
 /**
- * Run the four flows against a STUB client instead of the real one.
+ * Run the flows against a STUB client instead of the real one.
  *
  * Exported for `scripts/smoke.ts`, which asserts the RESULT SHAPES — that a
  * rejected token comes back `{ok: false, reason: 'invalid-token'}` rather than
@@ -428,4 +477,5 @@ export const authFlowsForTesting = {
     if (!token.trim()) return fail('invalid-token');
     return run(() => client.verifyEmail({ query: { token } }));
   },
+  verifyCode: codeFlow,
 };
