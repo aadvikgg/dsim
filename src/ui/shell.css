@@ -4087,6 +4087,14 @@ tr.lb-detail td {
   letter-spacing: var(--ds-track-caps);
 }
 /* a code is short: the row's 240px basis wrapped Verify under the field at phone width */
+/* the code form where a refusal happens: the ranked queue, the record card, Practice
+   replays (VerifyEmailInline) */
+.ds-verifyinline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-s-2);
+  max-width: 420px;
+}
 .ds-pwform {
   max-width: 360px;
 }

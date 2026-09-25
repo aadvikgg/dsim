@@ -38,6 +38,7 @@ import { Announcements } from './Announcements';
 import { AccountReset } from './AccountReset';
 import { AccountSync } from './AccountSync';
 import { AccountVerify } from './AccountVerify';
+import { EMAIL_VERIFIED_EVENT } from './VerifyCodeForm';
 import { GameView } from './GameView';
 import { Lobby } from './Lobby';
 import { WatchLive } from './WatchLive';
@@ -1796,7 +1797,14 @@ export function App() {
       void flushLanRuns();
     };
     window.addEventListener('online', onOnline);
-    return () => window.removeEventListener('online', onOnline);
+    // a verified email is the one fix for a practice save the server refused (403
+    // `email_unverified`), and that refusal left the backlog waiting
+    const onVerified = (): void => void flushPracticeRuns();
+    window.addEventListener(EMAIL_VERIFIED_EVENT, onVerified);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener(EMAIL_VERIFIED_EVENT, onVerified);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
