@@ -381,6 +381,15 @@ expired reset link to check their connection. The throw carries `status` and a l
 `code` (`bad_jwt`, `weak_password`, `over_email_send_rate_limit`), which is the ADAPTER’s
 vocabulary and not Better Auth’s SCREAMING_SNAKE one; `classifySdkError` speaks both, and tests
 rate limiting BEFORE the address because EMAIL is a substring of that last code.
+⚠️ **NEON AUTH VERIFIES AN ADDRESS WITH A CODE, NOT A LINK** (2026-09-25). `sendVerificationEmail`
+sends it, but the email carries a one-time code, and the SDK's own adapter refuses link-style
+verification ("Use email OTP authentication instead"). For months the app knew only the link
+path, so the email arrived and there was nowhere to type the code. It is completed through
+`emailOtp.verifyEmail({ email, otp })` (`verifyEmailCode`), rendered by `VerifyCodeForm` in the
+Profile banner, the sign-up dialog's code step, and `/account/verify`. A refused code (INVALID_OTP,
+OTP_EXPIRED, TOO_MANY_ATTEMPTS) is `invalid-code`, never the expired-LINK sentence. **No copy may
+say what an unverified address is refused**: that depends on `REQUIRE_VERIFIED_EMAIL`, which the
+client cannot see, and the banner claimed "ranked needs it" while the gate was off.
 ⚠️ **`forgetPassword` IS NOT A TOP-LEVEL METHOD** on this build — only `forgetPassword.emailOtp`,
 a different flow. The top-level request is `requestPasswordReset`.
 ⚠️ **THE EMAILED TOKEN IS CAPTURED AT MODULE LOAD** (`src/ui/entryToken.ts`): App’s mount effect

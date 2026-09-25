@@ -86,7 +86,7 @@ const REQUIRE_VERIFIED = process.env.REQUIRE_VERIFIED_EMAIL === '1';
 
 /** the one sentence, so the four refusal sites cannot drift apart */
 export const VERIFY_EMAIL_REFUSAL =
-  'Verify your email to play ranked. Open the link we sent you, or resend it from your Profile page.';
+  'Verify your email to play ranked. Enter the code we emailed you on your Profile page.';
 
 /**
  * May this user do the things that need a verified address? The ONE predicate —

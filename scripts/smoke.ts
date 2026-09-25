@@ -195,6 +195,7 @@ import { legalRegion, routeTarget } from '../server/routing';
 import {
   authFlowsForTesting,
   classifySdkError,
+  normalizeCode,
   describeAuthError,
   SITE_HOST,
   PASSWORD_MIN,
@@ -23063,6 +23064,7 @@ const dumperSetup = (): RobotSetup => {
       resetPassword: reply,
       sendVerificationEmail: reply,
       verifyEmail: reply,
+      emailOtp: { verifyEmail: reply },
     } as unknown as AuthFlowsClient;
   };
   const ok = stub({ data: { status: true } });
@@ -23196,6 +23198,52 @@ const dumperSetup = (): RobotSetup => {
   check(
     'authFlows: verifyEmail answering void (no body) still reads as success',
     (await F.completeVerification(stub({ data: undefined }), 'tok')).ok,
+  );
+
+  /* ---- the CODE path — what Neon Auth actually sends ------------------------
+     The email carries a one-time code and there was nowhere to type it (2026-09-25): the
+     app only knew the link flow. A refused code must say CODE, not "that link has expired". */
+  {
+    let sent: { email: string; otp: string } | null = null;
+    const spy = {
+      emailOtp: {
+        verifyEmail: async (a: { email: string; otp: string }) => {
+          sent = a;
+          return { data: { status: true }, error: null };
+        },
+      },
+    } as unknown as AuthFlowsClient;
+    const r = await F.verifyCode(spy, ' a@b.co ', '123 456');
+    check(
+      'authFlows: a code goes to emailOtp.verifyEmail with the address trimmed and the spaces stripped',
+      r.ok && sent !== null && (sent as { email: string; otp: string }).email === 'a@b.co' &&
+        (sent as { email: string; otp: string }).otp === '123456',
+      JSON.stringify(sent),
+    );
+  }
+  {
+    const r = await F.verifyCode(ok, 'a@b.co', ' - ');
+    check("authFlows: an empty code is 'invalid-code' before the call", !r.ok && r.reason === 'invalid-code');
+  }
+  {
+    const codes = await Promise.all([
+      F.verifyCode(stub({ error: { code: 'INVALID_OTP', status: 400 } }), 'a@b.co', '111111'),
+      F.verifyCode(stub({ error: { code: 'OTP_EXPIRED', status: 400 } }), 'a@b.co', '111111'),
+      F.verifyCode(stub({ error: { code: 'TOO_MANY_ATTEMPTS', status: 403 } }), 'a@b.co', '111111'),
+    ]);
+    check(
+      "⚠️ authFlows: a wrong, expired or over-tried CODE is 'invalid-code', never the link sentence",
+      codes.every((r) => !r.ok && r.reason === 'invalid-code' && /code/i.test(r.message) && !/link/i.test(r.message)),
+      codes.map((r) => (r.ok ? 'ok' : r.reason)).join(','),
+    );
+  }
+  {
+    const r = await F.verifyCode(stub('throw'), 'a@b.co', '111111');
+    check('authFlows: a thrown code call is a network result, not a throw', !r.ok && r.reason === 'network');
+  }
+  check(
+    'authFlows: normalizeCode keeps letters and digits only',
+    normalizeCode(' 12-34 5a ') === '12345a',
   );
 
   /* ---- the SDK THROWS its failures, and that is the whole bug ---------------
