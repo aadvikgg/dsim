@@ -168,10 +168,17 @@ export class LobbyClient {
     room: string,
     player: Omit<LobbyPlayer, 'clientId'>,
     clientId: string,
+    seatToken: string,
     config?: RoomConfig,
     group?: string,
   ): void {
     this.clientId = clientId;
+    /**
+     * ⚠️ AND THE SEAT'S SECRET, which no `welcome` will re-send on this socket either. Dropped
+     * here, the next `ServerSession` was built with an empty token, and from the room's second
+     * match on every `rejoin` and `abandon` of this secured seat was refused by the server.
+     */
+    this.seatToken = seatToken;
     /**
      * ASK FOR THE ROSTER RATHER THAN HOPING WE CAUGHT IT.
      *
@@ -356,8 +363,10 @@ export class LobbyClient {
       this.sendPhysicsReady();
     } else if (m.t === 'lobby') {
       // a recycle that landed on a lobby rather than a session (the host recycled while
-      // we were still coming back). The id is ours either way — take it.
+      // we were still coming back). The id is ours either way — take it, and the seat's
+      // secret with it when the server sends one (an older server does not).
       this.clientId = m.clientId;
+      if (m.seatToken) this.seatToken = m.seatToken;
     } else if (m.t === 'roster') {
       this.players = m.players;
       this.hostId = m.hostId;

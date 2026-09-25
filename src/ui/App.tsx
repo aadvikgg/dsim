@@ -517,6 +517,8 @@ export function App() {
   // `screen`/`session` directly would re-run it on every navigation instead
   const sessionRef = useRef<NetSession | null>(null);
   const screenRef = useRef<Screen>('home');
+  /** the session `rejoinGame` is still waiting to show (see its guard); null when none is */
+  const rejoiningRef = useRef<ServerSession | null>(null);
   // which flow opened the live session — only 'record' offers an in-game NEW RUN
   const [sessionKind, setSessionKind] = useState<ActiveGameRef['kind'] | null>(null);
   /**
@@ -1086,6 +1088,10 @@ export function App() {
    * server slot within its reconnect grace; fails cleanly to the "connection lost"
    * panel if the slot is already gone). */
   const rejoinGame = (ref: ActiveGameRef, onGone?: () => void): void => {
+    // ⚠️ ONE REJOIN AT A TIME. The wait below lasts up to `REJOIN_SHOW_MS` with the player
+    // still on the screen they clicked from, so a second click built a second session, and
+    // `setSession` dropped the first one without disposing it: a live socket holding the seat.
+    if (rejoiningRef.current) return;
     // the HOST's region if the ref recorded one, ours otherwise — the same rule every other
     // room-opening path uses. A bare code with no hint lands on whichever machine anycast
     // puts nearest to US, which is not where the room we are rejoining lives.
@@ -1118,6 +1124,7 @@ export function App() {
       ),
     );
     const s = new ServerSession(transport, false, ref.start, ref.clientId, ref.room, false, ref.seatToken ?? '');
+    rejoiningRef.current = s;
     /**
      * A REJOIN THE SERVER REFUSES GOES BACK TO THE MENU, IT DOES NOT PARK ON A DEAD CARD.
      *
@@ -1160,6 +1167,10 @@ export function App() {
     /** the screen the player is standing on while we wait — see `show` */
     const from = screenRef.current;
     let shown = false;
+    /** the wait is over: let the next rejoin through (the poll outlives a `show`, see below) */
+    const settle = (): void => {
+      if (rejoiningRef.current === s) rejoiningRef.current = null;
+    };
     const show = (): void => {
       if (shown) return;
       /**
@@ -1168,12 +1179,31 @@ export function App() {
        * `backToRoomLobby` takes the player to the room's lobby, and the session is torn down.
        * Navigating to `game` after that renders the match view over a null session.
        */
-      if (screenRef.current !== from) return;
+      if (screenRef.current !== from) {
+        /**
+         * ⚠️ AND A SESSION NOBODY WILL SHOW IS A SEAT NOBODY IS IN. A player who walked away
+         * during the wait was left holding a live socket that kept the seat, behind no screen.
+         * Unless the recycle above took it: `backToRoomLobby` released the socket to the lobby
+         * (and cleared `rejoiningRef`), and closing it would pull the lobby's connection.
+         */
+        if (rejoiningRef.current === s) {
+          s.dispose();
+          if (sessionRef.current === s) {
+            setSession(null);
+            setSessionKind(null);
+            setSessionCoop(false);
+          }
+        }
+        window.clearInterval(watch);
+        settle();
+        return;
+      }
       // ⚠️ CONSUMED ONLY ONCE IT ACTUALLY NAVIGATES. Setting this before the bail above meant
       // a player who moved during the wait disabled `show` for good — and `setSession` has
       // already run, so they were left holding a live session, a live socket and a held seat
       // with no screen showing any of it.
       shown = true;
+      settle();
       navigate('game');
     };
     const watch = window.setInterval(() => {
@@ -1183,6 +1213,7 @@ export function App() {
         return;
       }
       window.clearInterval(watch);
+      settle();
       clearActiveGame();
       setActiveGame(null);
       // an ordinary drop, not a refusal: the player really is in that match, so open it and
@@ -1210,7 +1241,10 @@ export function App() {
       setRejoinGone(true);
       navigate('home');
     }, 120);
-    window.setTimeout(() => window.clearInterval(watch), 30_000);
+    window.setTimeout(() => {
+      window.clearInterval(watch);
+      settle();
+    }, 30_000);
     setSession(s);
     setSessionKind(ref.kind);
     // a duo run rejoined has more than one robot on the roster; a solo one does not
@@ -1530,6 +1564,8 @@ export function App() {
   const backToRoomLobby = (): void => {
     const s = session;
     if (!s?.release || !s.room || !s.clientId) return;
+    // a rejoin still waiting on this session no longer owns it: the socket is the lobby's now
+    if (rejoiningRef.current === s) rejoiningRef.current = null;
     const transport = s.release();
     setEditMobileLayout(false);
     setSession(null);
@@ -1539,7 +1575,10 @@ export function App() {
     // leaving the record behind would offer Home a "rejoin your match" that cannot work.
     clearActiveGame();
     setActiveGame(null);
-    setResumedRoom({ transport, code: s.room, region: s.region, clientId: s.clientId });
+    // ⚠️ THE SEAT'S SECRET TRAVELS WITH THE SOCKET: no `welcome` is re-sent on it, and a lobby
+    // that dropped it built the next match's session with an empty token, so every rejoin,
+    // Home rejoin card and Abandon was refused for this seat from the room's second match on.
+    setResumedRoom({ transport, code: s.room, region: s.region, clientId: s.clientId, seatToken: s.seatToken ?? '' });
     navigate('lobby');
   };
 

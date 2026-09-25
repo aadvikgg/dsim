@@ -9872,7 +9872,7 @@ function environmentAndReadoutChecks(check: Check): void {
     // the stored setting still says `school-hall`, so the same profile opened outside the embed
     // gets the photograph back, and no `.hdr` joined the repo to make this work.
     {
-      const envDataSrc = readFileSync(join(BIOBUZZ_DIR, 'graphics', 'environments.ts'), 'utf8');
+      const envDataSrc = readFileSync(join(BIOBUZZ_DIR, 'graphics', 'environments.ts'), 'utf8').replace(/\r\n/g, '\n');
       check('the fix stores nothing — no write of the resolved id anywhere in the data module', !/localStorage|setGraphicsSetting/.test(envDataSrc));
       check(
         'the two HDRIs are still fetched from Poly Haven, not from a bundled copy',
@@ -9923,6 +9923,12 @@ function environmentAndReadoutChecks(check: Check): void {
         // red. Counting the sites and pinning the one is the discriminator that holds.)
         (envSrc.match(/failedHdri\.set\(/g) ?? []).length === 1 &&
           /loadAsync\(def\.hdri\.url\);\s*\} catch \(err\) \{\s*failedHdri\.set\(/.test(envSrc),
+      );
+      check(
+        '⚠️ ...and the count does not last the whole run: a success clears it, and it expires',
+        /failedHdri\.set\([^\n]*\n\s*hdriFailedAt\.set\(id, Date\.now\(\)\);\s*throw err;\s*\}\s*failedHdri\.delete\(id\);/.test(envSrc) &&
+          /if \(Date\.now\(\) - \(hdriFailedAt\.get\(id\) \?\? 0\) >= HDRI_RETRY_MS\) failedHdri\.delete\(id\);\s*if \(\(failedHdri\.get\(id\) \?\? 0\) >= HDRI_MAX_TRIES\) \{/.test(envSrc),
+        'two blips in one Electron run used to mean the stand-in until a restart',
       );
       // and the failure lands on the entry's own stand-in rather than on the flattest row there is
       check('a failed fetch falls back to the entry’s stand-in, not to `room`', /const alt = applyFallback\(def, lighting\);/.test(envSrc));

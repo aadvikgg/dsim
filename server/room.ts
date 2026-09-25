@@ -1180,20 +1180,37 @@ export class Room {
     this.modInFlight.add(client.id);
     void (async () => {
       const p = client.player;
+      /**
+       * ⚠️ WHAT WAS CHECKED, so a verdict is only ever written over the value it is about.
+       * A keystroke that lands mid-check moves a name on ("abc" → "abcd"); writing the verdict
+       * on "abc" back over it put the STALE name on the roster, and the queued re-check then
+       * passed that stale name. A field that moved since is left alone — the re-check owns it.
+       */
+      const was = { name: p.name, teamName: p.teamName, specName: p.spec.name, specTeam: p.spec.teamName };
       try {
         const [name, teamName, specName, specTeam] = await Promise.all([
-          scrubName(p.name, 'Driver'),
-          scrubName(p.teamName, ''),
-          scrubName(p.spec.name, DEFAULT_SPEC.name),
-          scrubName(p.spec.teamName, ''),
+          scrubName(was.name, 'Driver'),
+          scrubName(was.teamName, ''),
+          scrubName(was.specName, DEFAULT_SPEC.name),
+          scrubName(was.specTeam, ''),
         ]);
         if (!this.clients.has(client.id)) return; // left before the check returned
-        if (name === p.name && teamName === p.teamName && specName === p.spec.name && specTeam === p.spec.teamName) {
-          return; // all clean (or moderation disabled) — nothing to do
+        let changed = false;
+        if (p.name === was.name && name !== p.name) {
+          p.name = name;
+          changed = true;
         }
-        p.name = name;
-        p.teamName = teamName;
-        p.spec = { ...p.spec, name: specName, teamName: specTeam };
+        if (p.teamName === was.teamName && teamName !== p.teamName) {
+          p.teamName = teamName;
+          changed = true;
+        }
+        const nextSpecName = p.spec.name === was.specName ? specName : p.spec.name;
+        const nextSpecTeam = p.spec.teamName === was.specTeam ? specTeam : p.spec.teamName;
+        if (nextSpecName !== p.spec.name || nextSpecTeam !== p.spec.teamName) {
+          p.spec = { ...p.spec, name: nextSpecName, teamName: nextSpecTeam };
+          changed = true;
+        }
+        if (!changed) return; // all clean (or moderation disabled), or every field moved on
         this.broadcastRoster();
       } finally {
         this.modInFlight.delete(client.id);
@@ -3390,8 +3407,11 @@ export class Room {
     for (const c of this.clients.values()) c.player.ready = false;
 
     // `clientId` rides along because the client that adopts this socket back into a lobby
-    // never sends a `join`, and so never gets a `welcome` of its own.
-    for (const c of this.clients.values()) c.send({ t: 'lobby', clientId: c.id });
+    // never sends a `join`, and so never gets a `welcome` of its own. So does the seat's
+    // SECRET, for the same reason: without it the adopting lobby holds an empty token, and
+    // from the room's second match on every `rejoin`/`abandon` of a secured seat is refused.
+    // `c.send` reaches only this seat's owner, so this is not a broadcast.
+    for (const c of this.clients.values()) c.send({ t: 'lobby', clientId: c.id, seatToken: c.seatToken });
     for (const c of this.spectators.values()) c.send({ t: 'lobby', clientId: c.id });
     this.broadcastRoster();
     this.broadcastRematch();
