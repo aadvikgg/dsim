@@ -6,6 +6,11 @@ you are making today, which is why it is no longer loaded into every session. `C
 
 ---
 
+## ⚠️ URGENT: multi-core game server (owner, 2026-09-24)
+
+Do this as soon as possible after the BIOBUZZ Act 2 release. The server runs on one core per
+machine, so bigger VMs don't add room capacity. Details in `docs/capacity.md`, "MULTI-CORE".
+
 ## Owner priorities, 2026-09-18 (plan; branches named; none started unless marked)
 
 Eight items the owner asked for beside BIOBUZZ 3D. Items 1–2 need the 3D renderer and stay on
