@@ -90,7 +90,15 @@ export interface AuthFlowsClient {
   >;
   emailOtp: {
     verifyEmail: (a: { email: string; otp: string }) => Promise<SdkResponse<{ status: boolean }>>;
+    sendVerificationOtp: (a: {
+      email: string;
+      type: 'sign-in' | 'email-verification' | 'forget-password';
+    }) => Promise<SdkResponse<{ success: boolean }>>;
+    resetPassword: (a: { email: string; otp: string; password: string }) => Promise<
+      SdkResponse<{ success: boolean }>
+    >;
   };
+  listAccounts: () => Promise<SdkResponse<{ providerId: string }[]>>;
 }
 
 /** resolved lazily — see the module note. Null when auth is off in this build. */
@@ -435,6 +443,79 @@ async function codeFlow(client: AuthFlowsClient, email: string, code: string): P
   return !r.ok && r.reason === 'invalid-token' ? fail('invalid-code') : r;
 }
 
+/**
+ * (6) SET OR CHANGE A PASSWORD BY CODE — Profile ▸ Account's Password row.
+ *
+ * This is how an account that signed in with GOOGLE gets a password, so it can sign
+ * in either way. Better Auth's `/email-otp/reset-password` CREATES the `credential`
+ * account when the user has none, and updates it when they do; the client-callable
+ * `setPassword` does not exist (it is server-scoped). The code also proves the inbox,
+ * and the route marks the address verified as a side effect.
+ *
+ * The code path rather than `requestPasswordReset`'s link, because the code is what
+ * this Neon Auth project is known to deliver (the verification email is one).
+ */
+export async function requestPasswordCode(email: string): Promise<AuthFlowResult> {
+  if (!looksLikeEmail(email)) return fail('invalid-email');
+  const client = await liveClient();
+  if (!client) return fail('unavailable');
+  return sendPasswordCodeFlow(client, email);
+}
+
+async function sendPasswordCodeFlow(client: AuthFlowsClient, email: string): Promise<AuthFlowResult> {
+  return run(
+    () => client.emailOtp.sendVerificationOtp({ email: email.trim(), type: 'forget-password' }),
+    ACCOUNT_EXISTENCE,
+  );
+}
+
+export async function setPasswordWithCode(
+  email: string,
+  code: string,
+  password: string,
+): Promise<AuthFlowResult> {
+  const client = await liveClient();
+  if (!client) return fail('unavailable');
+  return setPasswordFlow(client, email, code, password);
+}
+
+async function setPasswordFlow(
+  client: AuthFlowsClient,
+  email: string,
+  code: string,
+  password: string,
+): Promise<AuthFlowResult> {
+  const otp = normalizeCode(code);
+  if (!otp) return fail('invalid-code');
+  if (password.length < PASSWORD_MIN) return fail('weak-password');
+  if (!looksLikeEmail(email)) return fail('invalid-email');
+  const r = await run(() => client.emailOtp.resetPassword({ email: email.trim(), otp, password }));
+  return !r.ok && r.reason === 'invalid-token' ? fail('invalid-code') : r;
+}
+
+/**
+ * Does this account have a password login? `true` / `false` from the account list
+ * (`credential` is Better Auth's provider id for email + password), `null` when the
+ * list could not be read — the row then offers the neutral "Set or change" wording
+ * rather than telling somebody with a password that they have none.
+ */
+export async function hasPasswordLogin(): Promise<boolean | null> {
+  const client = await liveClient();
+  if (!client) return null;
+  return passwordLoginFlow(client);
+}
+
+async function passwordLoginFlow(client: AuthFlowsClient): Promise<boolean | null> {
+  try {
+    const res = await client.listAccounts();
+    const list = res?.data;
+    if (res?.error || !Array.isArray(list)) return null;
+    return list.some((a) => a?.providerId === 'credential');
+  } catch {
+    return null;
+  }
+}
+
 /** (4) complete verification from the emailed link's token. */
 export async function completeEmailVerification(token: string): Promise<AuthFlowResult> {
   if (!token.trim()) return fail('invalid-token');
@@ -478,4 +559,7 @@ export const authFlowsForTesting = {
     return run(() => client.verifyEmail({ query: { token } }));
   },
   verifyCode: codeFlow,
+  sendPasswordCode: sendPasswordCodeFlow,
+  setPassword: setPasswordFlow,
+  hasPassword: passwordLoginFlow,
 };

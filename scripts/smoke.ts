@@ -23064,7 +23064,8 @@ const dumperSetup = (): RobotSetup => {
       resetPassword: reply,
       sendVerificationEmail: reply,
       verifyEmail: reply,
-      emailOtp: { verifyEmail: reply },
+      emailOtp: { verifyEmail: reply, sendVerificationOtp: reply, resetPassword: reply },
+      listAccounts: reply,
     } as unknown as AuthFlowsClient;
   };
   const ok = stub({ data: { status: true } });
@@ -23245,6 +23246,61 @@ const dumperSetup = (): RobotSetup => {
     'authFlows: normalizeCode keeps letters and digits only',
     normalizeCode(' 12-34 5a ') === '12345a',
   );
+
+  /* ---- a password by CODE — how a Google account gets one (2026-09-25) ------------------
+     `/email-otp/reset-password` creates the password login when there is none, so the same
+     two calls set a first password and change an existing one. */
+  {
+    const calls: unknown[] = [];
+    const spy = {
+      emailOtp: {
+        sendVerificationOtp: async (a: unknown) => (calls.push(a), { data: { success: true }, error: null }),
+        resetPassword: async (a: unknown) => (calls.push(a), { data: { success: true }, error: null }),
+      },
+    } as unknown as AuthFlowsClient;
+    const sent = await F.sendPasswordCode(spy, ' g@mail.co ');
+    const set = await F.setPassword(spy, 'g@mail.co', '12 34 56', 'longenough123');
+    check(
+      "authFlows: the password code is asked for as type 'forget-password', then spent with the password",
+      sent.ok && set.ok &&
+        JSON.stringify(calls) ===
+          JSON.stringify([
+            { email: 'g@mail.co', type: 'forget-password' },
+            { email: 'g@mail.co', otp: '123456', password: 'longenough123' },
+          ]),
+      JSON.stringify(calls),
+    );
+  }
+  {
+    const r = await F.sendPasswordCode(stub({ error: { code: 'USER_NOT_FOUND', status: 400 } }), 'x@y.co');
+    check('authFlows: asking for a password code never says whether the account exists', r.ok);
+  }
+  {
+    const short = await F.setPassword(ok, 'a@b.co', '123456', 'short');
+    const noCode = await F.setPassword(ok, 'a@b.co', '', 'longenough123');
+    const wrong = await F.setPassword(stub({ error: { code: 'INVALID_OTP', status: 400 } }), 'a@b.co', '1', 'longenough123');
+    const tooShort = await F.setPassword(stub({ error: { code: 'PASSWORD_TOO_SHORT', status: 400 } }), 'a@b.co', '1', 'longenough123');
+    check(
+      'authFlows: set-password refuses a short password and an empty code locally, and a wrong code says code',
+      !short.ok && short.reason === 'weak-password' &&
+        !noCode.ok && noCode.reason === 'invalid-code' &&
+        !wrong.ok && wrong.reason === 'invalid-code' &&
+        !tooShort.ok && tooShort.reason === 'weak-password',
+      [short, noCode, wrong, tooShort].map((r) => (r.ok ? 'ok' : r.reason)).join(','),
+    );
+  }
+  {
+    const list = (rows: unknown) => ({ listAccounts: async () => ({ data: rows, error: null }) }) as unknown as AuthFlowsClient;
+    const google = await F.hasPassword(list([{ providerId: 'google' }]));
+    const both = await F.hasPassword(list([{ providerId: 'google' }, { providerId: 'credential' }]));
+    const broken = await F.hasPassword(stub('throw'));
+    const odd = await F.hasPassword(list({ nope: 1 }));
+    check(
+      "authFlows: a password login is the 'credential' account; an unreadable list is null, never false",
+      google === false && both === true && broken === null && odd === null,
+      [google, both, broken, odd].join(','),
+    );
+  }
 
   /* ---- the SDK THROWS its failures, and that is the whole bug ---------------
      The Neon adapter's `customFetchImpl` throws a normalized `AuthApiError` on any non-2xx
