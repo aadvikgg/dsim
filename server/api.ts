@@ -1089,6 +1089,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
           return (
             json(403, {
               error: 'Verify your email to save practice runs. Enter the code we emailed you on your Profile page.',
+              code: 'email_unverified',
             }),
             true
           );

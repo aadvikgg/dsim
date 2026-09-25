@@ -12,6 +12,7 @@ import { DISCORD_REGION } from './discordActivity';
 // practice upload can say that the replay container structurally cannot. It is a leaf module
 // with no React and no DOM beyond `localStorage`, guarded against storage being unavailable.
 import { getViewPref } from '../games/biobuzz/graphics/store';
+import { setPracticeUploadBlocked } from './practiceRuns';
 
 /**
  * Boards + periods are per-game. DECODE is the server's default for a MISSING
@@ -740,7 +741,15 @@ export async function uploadPracticeRun(
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({ replay, score, view: getViewPref() }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // the one refusal the player can fix: say so on Practice replays (`practiceRuns.ts`)
+      if (res.status === 403) {
+        const body = (await res.json().catch(() => null)) as { code?: string } | null;
+        if (body?.code === 'email_unverified') setPracticeUploadBlocked(true);
+      }
+      return null;
+    }
+    setPracticeUploadBlocked(false);
     return ((await res.json()) as { run: PracticeRun }).run ?? null;
   } catch {
     return null;

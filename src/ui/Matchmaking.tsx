@@ -26,6 +26,7 @@ import { usePresence } from './usePresence';
 import { useServerNotice } from '../net/notice';
 import { ConsoleHead } from './ConsoleHead';
 import { useEscape } from './useEscape';
+import { VerifyEmailInline } from './VerifyCodeForm';
 import { OptRow, ToggleRow } from './OptRow';
 import { formatLabel, type PendingChallenge } from './challenge';
 import { clearStagedMatch, loadStagedMatch, saveStagedMatch } from '../net/stagedMatch';
@@ -144,6 +145,10 @@ export function Matchmaking({
   const [bumps, setBumps] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState('');
+  /** the queue was refused for an unverified email (code, or the older sentence) */
+  const [unverified, setUnverified] = useState(false);
+  /** ...and the code was then accepted here */
+  const [verifiedHere, setVerifiedHere] = useState(false);
   /** what a cancelled ranked pairing cost — shown next to the cancellation itself, because
    *  a rating drop the player is not told about is the thing that makes a penalty feel
    *  arbitrary. `null` for a player who was NOT at fault, which is worth saying out loud. */
@@ -832,6 +837,8 @@ export function Matchmaking({
     void preloadRoomPhysics(queueGame);
     preloadRoomView(queueGame);
     setError('');
+    setUnverified(false);
+    setVerifiedHere(false);
     setElapsed(0);
     setBumps(0);
     alertedRef.current = false;
@@ -868,7 +875,10 @@ export function Matchmaking({
     });
     lobby.on('dodgeVerdict', (yours, others) => setDodge({ yours, others }));
     lobby.on('standingLock', (until, score) => { setLock({ until, score }); setSearching(false); });
-    lobby.on('error', (msg) => strategyCancelled(msg));
+    lobby.on('error', (msg, code) => {
+      strategyCancelled(msg);
+      if (code === 'email_unverified' || /verify your email/i.test(msg)) setUnverified(true);
+    });
     lobby.on('closed', () => {
       if (!startedRef.current && !assigningRef.current)
         setError('Lost connection to the game server.');
@@ -1145,7 +1155,18 @@ export function Matchmaking({
           Null while the capability read is in flight, so neither sentence flickers. */}
       {rankedPhysicsNote}
       <p className="ds-hint">{READY_WINDOW_NOTE}</p>
-      {error && <p className="ds-form-err">⚠ {error}</p>}
+      {/* the server's sentence points at the Profile page; the code form is right here */}
+      {error && <p className="ds-form-err">⚠ {unverified ? 'Verify your email to play ranked.' : error}</p>}
+      {error && unverified && (
+        <VerifyEmailInline
+          onVerified={() => {
+            setError('');
+            setUnverified(false);
+            setVerifiedHere(true);
+          }}
+        />
+      )}
+      {verifiedHere && !error && <p className="ds-hint ok">Email verified. Press FIND MATCH.</p>}
       {dodgeNote()}
       {lockNote()}
       {restartPending && (

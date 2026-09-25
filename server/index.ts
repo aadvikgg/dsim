@@ -3149,6 +3149,7 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
           t: 'error',
           message:
             'Verify your email to save a record run. Enter the code we emailed you on your Profile page.',
+          code: 'email_unverified',
         });
         abandon();
         return;
@@ -3525,7 +3526,7 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
           {
             const refusal = emailGateRefusal(u);
             if (refusal) {
-              send({ t: 'error', message: refusal });
+              send({ t: 'error', message: refusal, code: 'email_unverified' });
               return;
             }
           }

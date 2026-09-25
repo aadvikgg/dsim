@@ -892,7 +892,14 @@ export type ErrorCode =
    * twice and still not know which season to pick, so the message now names both and the
    * code lets a screen offer the switch instead of just reading it back.
    */
-  | 'game_mismatch';
+  | 'game_mismatch'
+  /**
+   * The account's email address is not verified and this server requires it
+   * (`REQUIRE_VERIFIED_EMAIL`, server/auth.ts): ranked queueing, a record room, a practice
+   * save. Actionable in place — the screen shows the code form rather than TRY AGAIN, which
+   * would only be refused the same way. Older servers send the sentence alone.
+   */
+  | 'email_unverified';
 
 export type ServerMsg =
   /**
