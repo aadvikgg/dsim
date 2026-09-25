@@ -8095,17 +8095,14 @@ a.ds-cta {
 .badge-mark .badge-crown {
   fill: var(--ds-award-ink);
 }
-.badge-num {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--ds-font-mono);
-  font-size: 0.6em;
-  font-weight: 800;
-  line-height: var(--ds-lh-tight);
-  color: var(--ds-podium-ink);
+/* the placement numeral: a stroked path in the crest's own box (`NUMERAL`, BadgeMark.tsx), so
+   it scales with the crest and no font metric can move it off centre */
+.badge-mark .badge-num {
+  fill: none;
+  stroke: var(--ds-podium-ink);
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 /* THE COUNTER. Beside a name it TRAILS the glyph as `×2` — a pip on a 16px crest covers the
    crest. A badge earned once carries none. */
@@ -8153,9 +8150,6 @@ a.ds-cta {
 .badge-mark.badge-xl .badge-glyph {
   width: 96px;
   height: 96px;
-}
-.badge-mark.badge-xl .badge-num {
-  font-size: 1.15em;
 }
 
 /* ====================================================================================
