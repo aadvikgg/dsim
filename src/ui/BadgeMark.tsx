@@ -28,6 +28,20 @@ const RIBBON = 'M5.5 1.8H18.5V22.2L12 17.6 5.5 22.2Z';
 /** a three-point crown, the "top of the board" mark on the record ribbon */
 const CROWN = 'M8 12.6 8.6 7.8 10.6 9.8 12 6.8 13.4 9.8 15.4 7.8 16 12.6Z';
 /**
+ * THE PODIUM NUMERALS, stroked centrelines in the crest's 24 box. They were HTML text laid over
+ * the SVG, and the font put them off centre: Space Grotesk's "1" carries its flag to the left, so
+ * its ink sat a unit left of the crest's axis, the digits sat high at the small sizes, and the
+ * numeral was 60% of the crest at `sm` but 30% at `lg` because its size followed the text size
+ * and not the crest. As geometry, each numeral's ink box is centred on (12, 11.5): the inner
+ * shield's axis, and a touch above its middle, where a tapering shield's visual weight is.
+ */
+const NUMERAL: Record<'gold' | 'silver' | 'bronze', string> = {
+  gold: 'M10.1 9.9 12 8.5V14.5M10 14.5H14',
+  silver: 'M10.1 10.4C10.1 9.2 11 8.5 12 8.5 13.1 8.5 13.9 9.2 13.9 10.3 13.9 11.2 13.3 11.8 12.6 12.4L10.1 14.5H13.9',
+  bronze:
+    'M10.1 9.4C10.5 8.8 11.2 8.5 12 8.5 13.1 8.5 13.9 9.2 13.9 10 13.9 10.9 13.1 11.5 12 11.5H11.3M12 11.5C13.2 11.5 14 12.2 14 13 14 13.9 13.1 14.5 12 14.5 11.1 14.5 10.4 14.2 9.9 13.6',
+};
+/**
  * THE STARGAZER DISC, in a 128 box (the one `SupporterBadge`'s discs use, where it was first
  * drawn): the disc and the star in one coordinate space, the star centred on its own bounding
  * box, so where it sits is geometry and nothing in CSS can move it. r = 61 leaves room inside the
@@ -43,7 +57,6 @@ export function BadgeArt({ id, n = 1, size = 'sm' }: { id: BadgeId; n?: number; 
   const label = BADGE_LABELS[id];
   const said = n > 1 ? `${label} badge, earned ${n} times` : `${label} badge`;
   const podium = tier === 'gold' || tier === 'silver' || tier === 'bronze';
-  const numeral = tier === 'gold' ? '1' : tier === 'silver' ? '2' : tier === 'bronze' ? '3' : null;
   return (
     <span className={`badge-mark badge-${size} tier-${tier}`} role="img" aria-label={said} title={said}>
       <span className="badge-glyph" aria-hidden="true">
@@ -55,10 +68,16 @@ export function BadgeArt({ id, n = 1, size = 'sm' }: { id: BadgeId; n?: number; 
         ) : (
           <svg viewBox="0 0 24 24">
             <path className="badge-body" d={podium ? CREST : RIBBON} />
-            {podium ? <path className="badge-inner" d="M12 4.4 18 6.7V11.3C18 15.1 15.5 17.9 12 19.4 8.5 17.9 6 15.1 6 11.3V6.7Z" /> : <path className="badge-crown" d={CROWN} />}
+            {podium ? (
+              <>
+                <path className="badge-inner" d="M12 4.4 18 6.7V11.3C18 15.1 15.5 17.9 12 19.4 8.5 17.9 6 15.1 6 11.3V6.7Z" />
+                <path className="badge-num" d={NUMERAL[tier]} />
+              </>
+            ) : (
+              <path className="badge-crown" d={CROWN} />
+            )}
           </svg>
         )}
-        {numeral && <span className="badge-num">{numeral}</span>}
       </span>
       {/* beside a name the count TRAILS the glyph (`×2`) — a pip on a 16px crest covers it;
           at the large sizes it is the corner pip */}
