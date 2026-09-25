@@ -23416,6 +23416,17 @@ const dumperSetup = (): RobotSetup => {
       bare > 0 && reset < bare && verify < bare,
       reset + ',' + verify + ' < ' + bare,
     );
+    // ⚠️ GOOGLE SIGN-IN RETURNS WITH `?neon_auth_session_verifier=`, and the SDK reads it from
+    // the address bar when its first session request starts. App's mount effect strips every
+    // query to canonicalize the path, and on some loads it won that race: the player came back
+    // from Google signed out ("Sign in with Google just reloads the page", 2026-09-25).
+    const canon = app.slice(app.indexOf('const canonical = pathFor('), app.indexOf("window.history.replaceState(null, '', target"));
+    check(
+      '⚠️ auth: URL canonicalization keeps the Google sign-in verifier for the SDK',
+      /AUTH_VERIFIER_PARAM = 'neon_auth_session_verifier'/.test(app) &&
+        canon.includes('.get(AUTH_VERIFIER_PARAM)') &&
+        canon.includes('[AUTH_VERIFIER_PARAM]: verifier'),
+    );
   }
 }
 

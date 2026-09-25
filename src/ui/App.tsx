@@ -448,6 +448,10 @@ function OverlayDialog({
   );
 }
 
+/** Neon Auth's OAuth return param (`NEON_AUTH_SESSION_VERIFIER_PARAM_NAME` in the SDK, not
+ *  exported from its public entry). See the canonicalization effect in `App`. */
+const AUTH_VERIFIER_PARAM = 'neon_auth_session_verifier';
+
 export function App() {
   /* Whether the LAN entry points exist at all. Not a build constant any more: the
      server advertises it, so this flips once the shell's first presence poll lands
@@ -589,8 +593,18 @@ export function App() {
     // unprefixed `/admin` canonicalizes to `/decode/admin`, which is not equal, so EVERY
     // pasted console link was rewritten to a bare path before `Admin` mounted and opened on
     // Live. The query still goes: `?token=` is consumed at module load and must not survive.
-    if (window.location.pathname + window.location.search !== canonical) {
-      window.history.replaceState(null, '', canonical + window.location.hash);
+    // ⚠️ EXCEPT THE GOOGLE SIGN-IN VERIFIER. Neon Auth returns from Google to this page with
+    // `?neon_auth_session_verifier=…`, and the SDK trades it for the session when its first
+    // `get-session` request STARTS, reading `location.search` at that moment, then deletes the
+    // param itself. This effect used to strip it first on some loads (it is a race with the
+    // session fetch), and the player landed back signed out. Someone already signed in to Google
+    // never sees Google's page, so it looked like "Sign in with Google just reloads the page".
+    const verifier = new URLSearchParams(window.location.search).get(AUTH_VERIFIER_PARAM);
+    const target = verifier
+      ? `${canonical}?${new URLSearchParams({ [AUTH_VERIFIER_PARAM]: verifier })}`
+      : canonical;
+    if (window.location.pathname + window.location.search !== target) {
+      window.history.replaceState(null, '', target + window.location.hash);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
