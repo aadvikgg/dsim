@@ -1446,8 +1446,10 @@ export function net3dChecks(check: Check): void {
       !/setEra|ds-seg \$\{era/.test(board) && !/physics\.toUpperCase\(\)/.test(board),
     );
     check(
-      'ruling: ...and it drops a 2D row an OLDER server still serves',
-      /filter\(\(x\) => x\.physics !== '2d'\)/.test(board),
+      // the era is per season now (2026-09-24): keep the one the server echoes, 3D when an older
+      // server echoes none, so a 2D row that server still serves on the live board is dropped
+      'ruling: ...and it keeps only the era the server names, dropping a 2D row an OLDER server still serves',
+      /x\.physics === \(r\.physics \?\? '3d'\)/.test(board),
     );
     const api = readFileSync('src/net/api.ts', 'utf8');
     check(

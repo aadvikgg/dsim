@@ -5,6 +5,18 @@ Measured 2026-09-10 on branch `perf-load`, against the real server (`npm run ser
 exactly as `game.ts` does. Raw JSON in `.loadtest-out/`, reproduced by `scripts/loadsweep.sh` and
 tabulated by `scripts/loadsummary.ts`.
 
+## ⚠️ MULTI-CORE — URGENT, NOT STARTED (owner, 2026-09-24)
+
+The game server is ONE Node process on ONE core: nothing in `server/` uses `worker_threads` or
+`cluster`. Every room on a machine shares that core, so a bigger VM (`shared-cpu-4x`, a
+`performance-2x`) buys headroom for the OS and nothing for rooms. This matters more now that
+every online BIOBUZZ room is a 3D solve (Act 2, 2026-09-24). Until it is built, satellites that
+carry real load stay on `performance-1x` (one dedicated core), and `SATELLITE_SIZES` in
+`scripts/fly-deploy.sh` says so. The owner wants this done as soon as possible after the Act 2
+release. The obvious shape is rooms spread over worker threads, each worker stepping its own
+rooms, with the socket layer and the room-code routing kept on the main thread. Rooms already
+live in process memory and nothing crosses between rooms, so that seam exists.
+
 **Read the next section before quoting any number from this file.** Half of what a capacity model
 normally reports is not measurable on the machine these runs came from, and the half that is
 measurable is the half that matters.
