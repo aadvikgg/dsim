@@ -1661,13 +1661,48 @@ one) and EASY stood idle for 113 s of 150. Head to head now, 12 seeded 2v2s each
 - **The clock:** park in the LOADING ZONE at the end of AUTO (LEAVE + PARK) and of the MATCH, leaving
   when the drive takes as long as the time left — unless the hopper holds a TIP it can fire first.
 - **The FLOWER plan** (a Box Tube build that carries NECTAR, `places` tiers): empty the hopper into
-  the HIVE before the cue, collect only own NECTAR, press the human player's button at the zone, and
-  place one NECTAR per FLOWER in value order from 1:00. One NECTAR on four POLLEN is 15 points; the
-  two tube builds score ~50 FLOWER points a solo match.
+  the HIVE, collect only own NECTAR, press the human player's button at the zone, and place one
+  NECTAR per FLOWER. One NECTAR on four POLLEN is 15 points.
+  ⚠️ **IT STARTS BY RATE, AT THE END, NOT AT THE CUE** (`hoardingNow`, 2026-09-26). It used to
+  hoard from 1:12 and place from 1:00, and that measured 26–29 points a solo match BELOW never
+  placing at all: ~52 FLOWER points for ~30 s without a TIP. FLOWER points are permanent and an
+  opponent's NECTAR on top takes the FLOWER over, so they go last: the plan starts when the time left
+  is the tour's own time (`flowerTour`, nearest-neighbour, NECTAR fetches priced in) plus
+  `tourMargin`, and only if the tour's points per second beat the bot's own TIP rate (`tipRate`,
+  counted off the swings it has watched). A start-time sweep put the best start at 12–20 s from the
+  end; the rate rule lands there (seed 7000: first placement at 21 s left).
 - **2v2:** leave elements the partner is clearly nearer, take the other side of the envelope, park
   at the other end of the zone, and a partner nearer a FLOWER with NECTAR aboard takes it.
-- Tuning the rewrite added lives in `ai/tuning.ts`; `config.ts`'s `BB_AI_*` block still carries the
-  cadence, arrival radii, wall band, pin clock and give-up radius it reads.
+- **Rolling elements are elements (3D).** A TIP's spill stays `flight` for ~2.8 s after the release
+  (548 spilled elements measured, landing 50–58 in out from the HIVE, sd ~20), and the 3D intake
+  takes a low flight element. A low, slow one that has touched something (no G409 `spill` tag) is a
+  candidate, aimed `BB_AI_ROLL_LEAD` ahead along its roll. Reading only `ground` was blind to the
+  most contested pile on the field for three seconds after every TIP.
+- **The stand is the cheapest CLEAR point of the envelope** (`standFor`): the nearest point, leaning
+  to one side of the mouth in a 2v2, plus a grid across the envelope. It used to fall back to a
+  blocked stand when a partner stood on all four nearest-point tries, and dither there until the
+  stuck test fired (2v2 same-policy +14.5 ± 4.6 when fixed).
+- **Every hand-set number the decision multiplies is `BB_AI_WEIGHTS`** (`ai/tuning.ts`). A seat may
+  carry its own (`createBiobuzzBot`'s optional fifth argument, which `BotDriver.create` never passes,
+  so the table IS the shipped policy); that is what `npm run tune:ai` searches. `config.ts`'s
+  `BB_AI_*` block still carries the cadence, arrival radii, wall band, pin clock and give-up radius.
+- **TRIED AND MEASURED WORSE — do not re-try without a new reason** (2026-09-26, paired seeds):
+  - *velocity-obstacle avoidance* in place of the robot push: head-to-head **−47 a match (11–85)**.
+    A bot that yields to opponents loses the elements and the stands in a contact game; the stuck
+    count fell and the score fell further.
+  - *pricing own NECTAR by the POLLEN it saves the TIP* (3rd saves 3, 4th saves 2): −12 to −13 solo
+    for both tube builds. With a 4-element hopper 3 NECTAR + 3 POLLEN is still two loads, like 8
+    POLLEN, so the saving never removes a trip and the chase adds detours.
+  - *topping the hopper up before walking to the other cell* after a tipping volley: −6 ± 4. The
+    same load crosses the same number of times.
+  - *braking for a point past a lined-up element* (drive through it): −20 on a 4-seed trace.
+  - *HARD `speedCap` 1.0*: no effect (−4 ± 6). The bot averages ~30 in/s against a ~88 top speed;
+    top speed is not what binds.
+  - *halving the push off opponents in TELEOP*: solo +5, 2v2 same-policy −14, head-to-head +4 ± 4.
+- **Why solo tops out where it does:** the two cells of a HIVE face ±y, so the two firing stands are
+  ~95 in apart, and every spill lands at the end OPPOSITE the cell that takes next. With a 4-element
+  hopper a TIP is two loads, so every TIP costs about three field-length crossings. A faster TIP
+  cycle is a crossing problem, not an aiming or a speed one.
 - **Verification:** the `AI` lane (the seam, determinism over 3,600 ticks under BOTH physics, the
   read list, quantization, R102, `step3d` perf with bots) and the **`AIPLAY` lane** (the roster:
   fixed points, not the default, legal, varied, deterministic; both seating sites call `build`; and

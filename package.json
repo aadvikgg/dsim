@@ -28,6 +28,7 @@
     "test:mm": "tsx scripts/mmsmoke.ts",
     "test:ai": "tsx scripts/aismoke.ts",
     "bench:ai": "tsx scripts/aibench.ts",
+    "tune:ai": "node --import tsx scripts/aitune.mjs",
     "contrast": "node scripts/contrast.mjs",
     "shiftaudit": "electron scripts/shiftaudit.cjs",
     "shots": "electron scripts/shots.cjs",
