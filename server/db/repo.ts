@@ -121,8 +121,18 @@ export async function ensureSeason(
   // No baked-in name — the structured "Act X · Season Y" label is derived in
   // listSeasons. A brand-new game's first row seeds `initialAct` (Chain Reaction
   // starts at Act 1); on conflict we only re-activate — act is left untouched.
+  //
+  // ⚠️ `initialAct` IS FOR THE FIRST ROW ONLY ("the act this game's very first period opens
+  // in", src/games/types.ts). A code BALANCE_VERSION bump also lands here with a season number
+  // no row has yet, and seeding THAT row with `initialAct` dropped a game in Act 2 back into its
+  // beta act: every rating is keyed by act, so the whole ladder moved to the old board, and the
+  // real act never counted as closed for the reward job. So a new row CONTINUES the latest act
+  // the game has, and `initialAct` is only the fallback when there is none.
   await q(
-    `insert into seasons (game, balance_version, act, active) values ($1, $2, $3, true)
+    `insert into seasons (game, balance_version, act, active)
+     values ($1, $2,
+             coalesce((select act from seasons where game = $1 order by balance_version desc limit 1), $3),
+             true)
      on conflict (game, balance_version) do update set active = true`,
     [g(game), balanceVersion, initialAct],
   );
@@ -131,6 +141,7 @@ export async function ensureSeason(
     balanceVersion,
   ]);
   seasonEnsured.add(key);
+  clearSeasonsCache();
 }
 
 /**
@@ -213,6 +224,32 @@ export async function listSeasons(game?: Game): Promise<SeasonRow[]> {
   }));
 }
 
+/**
+ * `listSeasons` for the PUBLIC season picker, memoized per game.
+ *
+ * `/api/seasons` runs on every visit to Records, and `listSeasons` counts every record and
+ * every match of every season to fill two columns — a scan of both history tables per page
+ * view that grows with everything ever played, unauthenticated. The list changes when a season
+ * rolls (dropped below, and by `ensureSeason` seeding a new row) and otherwise only in its
+ * counts, which a picker does not need to the second. Same `{at, val}` shape as `statsCache`.
+ * The reward job and the admin console keep calling `listSeasons` directly: they want it exact.
+ */
+const SEASONS_TTL_MS = 60_000;
+const seasonsCache = new Map<string, { at: number; val: SeasonRow[] }>();
+
+export async function listSeasonsCached(game?: Game, now = Date.now()): Promise<SeasonRow[]> {
+  const hit = seasonsCache.get(g(game));
+  if (hit && now - hit.at < SEASONS_TTL_MS) return hit.val;
+  const val = await listSeasons(game);
+  seasonsCache.set(g(game), { at: now, val });
+  return val;
+}
+
+/** drop the memo — a roll, a newly seeded season, and tests */
+export function clearSeasonsCache(): void {
+  seasonsCache.clear();
+}
+
 /** Archive the live season and open a fresh one (admin action). The new
  * balance_version is one past the current, so its boards start empty; old
  * seasons stay fully queryable. `bumpAct` opens a new ACT (act++, its season
@@ -253,6 +290,7 @@ export async function startNewSeason(
     );
     return Number(cnt[0]?.n ?? 1);
   });
+  clearSeasonsCache();
 
   /**
    * THE CLOSED PERIODS ARE PAID OUT NOW, BY THE SAME JOB THE BOOT BACKFILL RUNS
@@ -384,16 +422,67 @@ export async function deleteAnnouncement(id: string): Promise<boolean> {
  * were provably no-ops. Bounded by the distinct users a machine sees before it
  * auto-stops; a restart simply re-learns them.
  */
-const profileEnsured = new Set<string>();
+const profileEnsured = new Map<string, number>();
 
-export async function ensureProfile(userId: string, handle: string): Promise<void> {
-  if (profileEnsured.has(userId)) return;
-  await q(
+/**
+ * ⚠️ THE MEMO EXPIRES, BECAUSE A PROFILE ROW CAN STOP EXISTING. "Can never do anything again"
+ * above is true only while the row lives, and `deleteAccount` removes it while the Neon Auth
+ * identity — and so the same user id — stays signed in. With a permanent memo every machine
+ * that had seen the account skipped the insert until it restarted, and every write keyed to the
+ * profile then failed: an FK violation in the middle of a ranked result (the opponents' ratings
+ * written, no match row), a record run thrown away, and `setUsername` / `saveUserSettings`
+ * updating zero rows while reporting success. `deleteAccount` drops its own machine's entry;
+ * the TTL bounds how long any OTHER machine can be wrong, and still collapses a 6-second poll
+ * to one insert per ten minutes.
+ */
+const PROFILE_MEMO_MS = 10 * 60_000;
+
+/**
+ * Create the profile row if it is missing. `fresh` skips the memo — for the writes that cannot
+ * afford a stale one (the match-end persist, a payment claim), which run once per event rather
+ * than once per poll.
+ */
+export async function ensureProfile(userId: string, handle: string, fresh = false): Promise<void> {
+  const at = profileEnsured.get(userId);
+  if (!fresh && at !== undefined && Date.now() - at < PROFILE_MEMO_MS) return;
+  const made = await q<{ user_id: string }>(
     `insert into profiles (user_id, handle) values ($1, $2)
-     on conflict (user_id) do nothing`,
+     on conflict (user_id) do nothing
+     returning user_id`,
     [userId, handle],
   );
-  profileEnsured.add(userId);
+  // a row that did not exist a moment ago may be a DELETED account coming back (0054)
+  if (made.length) await restoreTombstone(userId);
+  profileEnsured.set(userId, Date.now());
+}
+
+/**
+ * RE-APPLY A DELETED ACCOUNT'S SANCTIONS to its re-created profile, and drop the tombstone
+ * (0054). ONE statement, so two machines creating the same profile cannot both restore — only
+ * the insert that actually made the row gets here — and a half-applied restore cannot exist.
+ *
+ * A suspension or lock that has run out in the meantime is not re-applied; the standing score
+ * keeps its ORIGINAL `healed_at`, so the idle days since the deletion heal it on the next read
+ * exactly as they would have had the account never left.
+ */
+async function restoreTombstone(userId: string): Promise<void> {
+  await q(
+    `with t as (delete from account_tombstones where user_id = $1 returning *),
+     s as (
+       update profiles p set suspended_until = t.suspended_until, updated_at = now()
+         from t
+        where p.user_id = t.user_id and t.suspended_until > now()
+       returning 1
+     )
+     insert into account_standing (user_id, score, restricted_until, healed_at, updated_at)
+     select t.user_id, least($2::int, coalesce(t.standing_score, $2::int)),
+            case when t.restricted_until > now() then t.restricted_until end,
+            coalesce(t.standing_healed_at, now()), now()
+       from t
+      where t.standing_score is not null or t.restricted_until > now()
+     on conflict (user_id) do nothing`,
+    [userId, STANDING_MAX],
+  );
 }
 
 export async function setHandle(userId: string, handle: string): Promise<void> {
@@ -800,10 +889,14 @@ export async function grantSupporter(
   note?: string,
 ): Promise<string | null> {
   const n = Math.max(1, Math.floor(months));
-  const rows = await q<{ until: string }>(EXTEND_SQL, [userId, String(n)]);
-  const until = rows[0]?.until ?? null;
-  if (rows[0]) await logGrant(userId, source, n, until, note ?? null);
-  return until;
+  // the extension and its audit row in ONE transaction, like the two Ko-fi paths: "every write
+  // to `supporter_until` logs a row" is only true if a failed log also undoes the write
+  return tx(async (query) => {
+    const rows = await query<{ until: string }>(EXTEND_SQL, [userId, String(n)]);
+    const until = rows[0]?.until ?? null;
+    if (rows[0]) await logGrant(userId, source, n, until, note ?? null, query);
+    return until;
+  });
 }
 
 /**
@@ -815,15 +908,17 @@ export async function grantSupporter(
  * that was. Returns false if there was nothing to revoke.
  */
 export async function revokeSupporter(userId: string, note?: string): Promise<boolean> {
-  const rows = await q<{ user_id: string }>(
-    `update profiles set supporter_until = null, updated_at = now()
-      where user_id = $1 and supporter_until is not null
-      returning user_id`,
-    [userId],
-  );
-  if (rows.length === 0) return false;
-  await logGrant(userId, 'revoke', 0, null, note ?? null);
-  return true;
+  return tx(async (query) => {
+    const rows = await query<{ user_id: string }>(
+      `update profiles set supporter_until = null, updated_at = now()
+        where user_id = $1 and supporter_until is not null
+        returning user_id`,
+      [userId],
+    );
+    if (rows.length === 0) return false;
+    await logGrant(userId, 'revoke', 0, null, note ?? null, query);
+    return true;
+  });
 }
 
 /**
@@ -846,27 +941,29 @@ export async function revokeSupporter(userId: string, note?: string): Promise<bo
  * when something really changed, so the sweep's own count is honest too.
  */
 export async function ensureSupporterFloor(userId: string, days: number): Promise<boolean> {
-  const rows = await q<{ until: string; moved: boolean }>(
-    /* ⚠️ THE CTE SNAPSHOTS THE OLD VALUE, AND IT HAS TO. Postgres' `RETURNING` sees the
-       row AFTER the update, so `supporter_until < now() + grace` compared there is always
-       false — which silently made "did the floor move?" answer NO on every sweep including
-       the first, and with it the audit row. (`RETURNING OLD.col` is PG 18; this runs on 17.) */
-    `with prev as (select supporter_until as before from profiles where user_id = $1)
-     update profiles p
-        set supporter_until = greatest(coalesce(p.supporter_until, now()), now() + ($2 || ' days')::interval),
-            updated_at = now()
-       from prev
-      where p.user_id = $1
-      returning p.supporter_until as until,
-                (prev.before is null or prev.before < now() + ($2 || ' days')::interval - interval '1 day') as moved`,
-    [userId, String(days)],
-  );
-  const row = rows[0];
-  if (!row) return false;
-  if (!row.moved) return false;
-  // months = 0 is a real, meaningful value here and 0019 already defines it as one.
-  await logGrant(userId, 'boost', 0, row.until, 'discord server boost');
-  return true;
+  return tx(async (query) => {
+    const rows = await query<{ until: string; moved: boolean }>(
+      /* ⚠️ THE CTE SNAPSHOTS THE OLD VALUE, AND IT HAS TO. Postgres' `RETURNING` sees the
+         row AFTER the update, so `supporter_until < now() + grace` compared there is always
+         false — which silently made "did the floor move?" answer NO on every sweep including
+         the first, and with it the audit row. (`RETURNING OLD.col` is PG 18; this runs on 17.) */
+      `with prev as (select supporter_until as before from profiles where user_id = $1)
+       update profiles p
+          set supporter_until = greatest(coalesce(p.supporter_until, now()), now() + ($2 || ' days')::interval),
+              updated_at = now()
+         from prev
+        where p.user_id = $1
+        returning p.supporter_until as until,
+                  (prev.before is null or prev.before < now() + ($2 || ' days')::interval - interval '1 day') as moved`,
+      [userId, String(days)],
+    );
+    const row = rows[0];
+    if (!row) return false;
+    if (!row.moved) return false;
+    // months = 0 is a real, meaningful value here and 0019 already defines it as one.
+    await logGrant(userId, 'boost', 0, row.until, 'discord server boost', query);
+    return true;
+  });
 }
 
 async function logGrant(
@@ -875,8 +972,9 @@ async function logGrant(
   months: number,
   until: string | null,
   note: string | null,
+  query: Tx = q,
 ): Promise<void> {
-  await q(
+  await query(
     `insert into supporter_grants (user_id, source, months, until, note)
      values ($1, $2, $3, $4, $5)`,
     [userId, source, months, until, note],
@@ -1837,7 +1935,11 @@ export async function recordKofiPayment(p: KofiEventRow): Promise<KofiRecordResu
          (message_id, kind, email, transaction_id, amount, currency,
           is_subscription, tier_name, months)
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       on conflict (message_id) do nothing
+       -- NO conflict target, on purpose: the TRANSACTION id is unique too (0018), and an event
+       -- carrying a stored transaction under a new message id hit that index as an error. The
+       -- webhook answered 500, Ko-fi retried it forever, and the event was never recorded. The
+       -- same payment is a duplicate whichever key says so, and a duplicate grants nothing.
+       on conflict do nothing
        returning message_id`,
       [
         p.messageId,
@@ -2097,7 +2199,13 @@ export async function saveReplay(replay: Replay, season: number, game?: Game): P
   return rows[0].id;
 }
 
+/** a replay id is a uuid column. Anything else is answered as absent here, rather than handed to
+ *  Postgres to refuse as a cast error — `/api/replay/<id>` takes `[\w-]+`, so a mistyped or
+ *  truncated link was a 500 and a stack trace in the log instead of a 404. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function getReplay(id: string): Promise<Replay | null> {
+  if (!UUID_RE.test(id)) return null;
   const rows = await q<{
     format: number;
     balance_version: number;
@@ -2204,6 +2312,7 @@ export async function replayAccess(
   replayId: string,
   viewerId: string | null,
 ): Promise<ReplayAccessResult> {
+  if (!UUID_RE.test(replayId)) return { access: 'missing', kind: null };
   // the owner fan-out and "does this id exist at all" are separate questions, and both are
   // primary-key lookups. Asking them together lets a MISSING replay come back as 404 rather
   // than as a privacy refusal — a purged season's dead link is not somebody keeping a secret.
@@ -3093,8 +3202,36 @@ export async function deleteAccount(userId: string): Promise<boolean> {
       `update kofi_payments set email = null where claimed_by = $1`,
       [userId],
     );
+    /* THE SANCTIONS STAY (0054). Deleting DSIM's data does not delete the Neon Auth identity,
+       so without this a suspended or ranked-locked player was one DELETE away from a clean
+       slate — `getSuspension` reads a missing profile as "not suspended" and `getStanding` a
+       missing row as a full score. Written only when there is something to carry, and before
+       the profile delete below cascades `account_standing` away. On conflict the STRICTER of
+       the two wins, so deleting twice cannot launder anything either. */
+    await query(
+      `insert into account_tombstones (user_id, suspended_until, standing_score, standing_healed_at, restricted_until)
+       select p.user_id,
+              case when p.suspended_until > now() then p.suspended_until end,
+              case when s.score < $2::int then s.score end,
+              case when s.score < $2::int then s.healed_at end,
+              case when s.restricted_until > now() then s.restricted_until end
+         from profiles p left join account_standing s on s.user_id = p.user_id
+        where p.user_id = $1
+          and (p.suspended_until > now() or s.score < $2::int or s.restricted_until > now())
+       on conflict (user_id) do update set
+         suspended_until = greatest(account_tombstones.suspended_until, excluded.suspended_until),
+         standing_score = least(account_tombstones.standing_score, excluded.standing_score),
+         standing_healed_at = coalesce(excluded.standing_healed_at, account_tombstones.standing_healed_at),
+         restricted_until = greatest(account_tombstones.restricted_until, excluded.restricted_until),
+         deleted_at = now()`,
+      [userId, STANDING_MAX],
+    );
     await query(`delete from profiles where user_id = $1`, [userId]);
     return true;
+  }).then((gone) => {
+    // this machine's memo would otherwise skip re-creating the row (see `PROFILE_MEMO_MS`)
+    profileEnsured.delete(userId);
+    return gone;
   });
 }
 
@@ -3531,14 +3668,32 @@ export async function getRatingsFull(
   mode: '1v1' | '2v2',
   act: number,
   game?: Game,
+  /** a transaction to read in. With `lock`, the rows are LOCKED for the rest of it — see below */
+  query: Tx = q,
+  lock = false,
 ): Promise<Map<string, { rating: number; rd: number; vol: number }>> {
   const out = new Map<string, { rating: number; rd: number; vol: number }>();
-  const ids = [...new Set(userIds.filter(Boolean))];
+  // sorted, so two transactions locking overlapping rosters take the locks in the same order
+  const ids = [...new Set(userIds.filter(Boolean))].sort();
   for (const id of ids) out.set(id, { rating: 1000, rd: 350, vol: 0.06 });
   if (!ids.length) return out;
-  const rows = await q<{ user_id: string; rating: number; rd: number; vol: number }>(
+  if (lock) {
+    /* READ-MODIFY-WRITE NEEDS A ROW TO LOCK. A player with no row yet has nothing for
+       `for update` to hold, so two transactions could both read the default and the second
+       write would erase the first. Seeding the defaults first (games 0 — the same thing an
+       absent row means everywhere) makes the second one wait on the first's insert. It rolls
+       back with the transaction if the result is never written. */
+    await query(
+      `insert into elo_ratings (user_id, mode, act, game, rating, rd, vol, games)
+       select id, $2, $3, $4, 1000, 350, 0.06, 0 from unnest($1::text[]) as id
+       on conflict (user_id, mode, game, act) do nothing`,
+      [ids, mode, act, g(game)],
+    );
+  }
+  const rows = await query<{ user_id: string; rating: number; rd: number; vol: number }>(
     `select user_id, rating, rd, vol from elo_ratings
-      where user_id = any($1::text[]) and mode = $2 and act = $3 and game = $4`,
+      where user_id = any($1::text[]) and mode = $2 and act = $3 and game = $4
+      order by user_id${lock ? ' for update' : ''}`,
     [ids, mode, act, g(game)],
   );
   for (const r of rows) out.set(r.user_id, { rating: r.rating, rd: r.rd, vol: r.vol });
@@ -3571,8 +3726,9 @@ export async function upsertRating(
   rd: number,
   vol: number,
   game?: Game,
+  query: Tx = q,
 ): Promise<number> {
-  const rows = await q<{ games: number }>(
+  const rows = await query<{ games: number }>(
     `insert into elo_ratings (user_id, mode, act, game, rating, rd, vol, games)
      values ($1, $2, $3, $4, $5, $6, $7, 1)
      on conflict (user_id, mode, game, act)
@@ -3610,20 +3766,43 @@ export async function chargeRatingForBehaviour(
   floor: number,
   game?: Game,
 ): Promise<{ before: number; after: number }> {
-  const cur = await getRatingFull(userId, mode, act, game);
-  const before = Math.round(cur.rating);
-  const after = Math.max(floor, before - Math.max(0, Math.round(charge)));
-  if (after === before) return { before, after };
-  // upsert WITHOUT touching games/rd/vol (see above). A player with no rating row on this
-  // board yet gets one seeded at the charged value, games still 0.
-  await q(
-    `insert into elo_ratings (user_id, mode, act, game, rating, rd, vol, games)
-     values ($1, $2, $3, $4, $5, $6, $7, 0)
-     on conflict (user_id, mode, game, act)
-       do update set rating = excluded.rating, updated_at = now()`,
-    [userId, mode, act, g(game), after, cur.rd, cur.vol],
+  const c = Math.max(0, Math.round(charge));
+  if (c === 0) {
+    const r = Math.round((await getRatingFull(userId, mode, act, game)).rating);
+    return { before: r, after: r };
+  }
+  /* ⚠️ ONE STATEMENT, SUBTRACTING FROM WHATEVER IS STORED — never a value read earlier.
+     This runs at the SAME moment as the match's own rating write: the room fires the
+     behaviour report and the result side by side, and both used to read the rating, work in
+     JS, and write an absolute number back. Whichever wrote second erased the other — measured,
+     a +15 result and a −50 charge stored 1150 where 1165 was owed, while the match history and
+     the results screen said 1215. Arithmetic on the row itself cannot lose an update, and the
+     ranked write locks the rows it reads (`persistVersusMatch`), so either order now adds up.
+
+     Upsert WITHOUT touching games/rd/vol (see above). A player with no rating row on this board
+     yet gets one seeded at the charged value, games still 0. `least(current, …)` so a charge
+     can never RAISE a rating that already sits under the floor, and the `where` skips a write
+     that would change nothing — `updated_at` is what `lastRankedBoard` sorts by. */
+  const rows = await q<{ before: number; after: number }>(
+    `with prev as (
+       select round(rating)::int as r from elo_ratings
+        where user_id = $1 and mode = $2 and act = $3 and game = $4
+     ),
+     up as (
+       insert into elo_ratings (user_id, mode, act, game, rating, rd, vol, games)
+       values ($1, $2, $3, $4, least(1000, greatest($6::int, 1000 - $5::int)), 350, 0.06, 0)
+       on conflict (user_id, mode, game, act) do update
+         set rating = least(round(elo_ratings.rating), greatest($6::int, round(elo_ratings.rating) - $5::int)),
+             updated_at = now()
+         where least(round(elo_ratings.rating), greatest($6::int, round(elo_ratings.rating) - $5::int))
+               <> round(elo_ratings.rating)
+       returning round(rating)::int as r
+     )
+     select coalesce((select r from prev), 1000) as before,
+            coalesce((select r from up), (select r from prev), 1000) as after`,
+    [userId, mode, act, g(game), c, Math.round(floor)],
   );
-  return { before, after };
+  return { before: Number(rows[0]?.before ?? 1000), after: Number(rows[0]?.after ?? 1000) };
 }
 
 /**
@@ -3700,6 +3879,17 @@ export async function getStanding(userId: string): Promise<StandingSnapshot> {
     [userId, STANDING_MAX],
   );
   if (fast.length && !fast[0].heal_due) return snap(fast[0]);
+  if (!fast.length) {
+    // A DELETED account with a sanction to carry (0054) has no row here, and cannot be given
+    // one (the FK needs a profile). Answer READ-ONLY from the tombstone — the ranked lock is
+    // what `rankedLock` asks this for — and let `ensureProfile` re-apply it for real.
+    const tomb = await q<{ score: number | null; restricted_until: string | null }>(
+      `select standing_score as score, restricted_until from account_tombstones
+        where user_id = $1 and not exists (select 1 from profiles where user_id = $1)`,
+      [userId],
+    );
+    if (tomb.length) return snap({ score: tomb[0].score ?? STANDING_MAX, restricted_until: tomb[0].restricted_until });
+  }
 
   return tx(async (query) => {
     await query(
@@ -3768,27 +3958,39 @@ export async function writeStandingEvent(
   userId: string,
   v: StandingVerdict,
   ctx: { game?: Game; mode?: string; roomCode?: string } = {},
-): Promise<void> {
-  await tx(async (query) => {
-    await query(
+): Promise<number> {
+  /* ⚠️ THE EXISTING ROW TAKES THE DELTA, NOT THE VERDICT'S ABSOLUTE SCORE. The verdict was
+     worked out from a snapshot read a few round trips earlier (`chargeStanding` reads, looks up
+     the rung, maybe charges rating, then writes), and writing `scoreAfter` back verbatim erased
+     anything that landed in between: a clean-match heal from the same match end, a moderator's
+     `adminEditStanding`, or a second charge. Subtracting what THIS offence costs from whatever
+     is stored now keeps every one of them. A brand-new row has nothing to race with, so it
+     takes the verdict as computed (its base was the full score). Returns what was stored, which
+     the ledger row records and the caller reports. */
+  const delta = Math.max(0, v.scoreBefore - v.scoreAfter);
+  return tx(async (query) => {
+    const stored = await query<{ score: number }>(
       `insert into account_standing (user_id, score, restricted_until, healed_at, updated_at)
        values ($1, $2, $3, now(), now())
        on conflict (user_id) do update
-         set score = excluded.score,
+         set score = greatest(0, least($5::int, account_standing.score - $4::int)),
              restricted_until = greatest(
                coalesce(account_standing.restricted_until, to_timestamp(0)),
                coalesce(excluded.restricted_until, to_timestamp(0))
              ),
              healed_at = now(),
-             updated_at = now()`,
-      [userId, v.scoreAfter, v.restrictedUntil ? new Date(v.restrictedUntil).toISOString() : null],
+             updated_at = now()
+       returning score`,
+      [userId, v.scoreAfter, v.restrictedUntil ? new Date(v.restrictedUntil).toISOString() : null, delta, STANDING_MAX],
     );
+    const scoreAfter = Number(stored[0]?.score ?? v.scoreAfter);
     await query(
       `insert into standing_events (user_id, kind, points, score_after, cooldown_min, rating_charge, game, mode, room_code)
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [userId, v.kind, v.points, v.scoreAfter, v.cooldownMin, v.ratingCharge,
+      [userId, v.kind, v.points, scoreAfter, v.cooldownMin, v.ratingCharge,
        ctx.game ? g(ctx.game) : null, ctx.mode ?? null, ctx.roomCode ?? null],
     );
+    return scoreAfter;
   });
 }
 
@@ -4570,8 +4772,9 @@ export async function upsertEloHistory(
   vol: number,
   games: number,
   game?: Game,
+  query: Tx = q,
 ): Promise<void> {
-  await q(
+  await query(
     `insert into elo_history (user_id, mode, game, balance_version, rating, rd, vol, games)
      values ($1, $2, $3, $4, $5, $6, $7, $8)
      on conflict (user_id, mode, game, balance_version)
@@ -5001,8 +5204,9 @@ export async function saveMatch(
   game?: Game,
   /** which physics solve the authoritative loop ran (0039). Absent ⇒ '2d'. */
   physics?: string,
+  query: Tx = q,
 ): Promise<string> {
-  const rows = await q<{ id: string }>(
+  const rows = await query<{ id: string }>(
     `insert into matches (mode, balance_version, replay_id, ranked, game, physics) values ($1, $2, $3, $4, $5, $6) returning id`,
     [mode, balanceVersion, replayId, ranked, g(game), physics === '3d' ? '3d' : '2d'],
   );
@@ -5048,9 +5252,10 @@ export async function addMatchParticipants(
     ratingBefore: number | null;
     ratingAfter: number | null;
   }[],
+  query: Tx = q,
 ): Promise<void> {
   if (!ps.length) return;
-  await q(
+  await query(
     `insert into match_participants
        (match_id, user_id, alliance, drivetrain, score, won, rating_before, rating_after)
      select $1, u, a, d, s, w, rb, ra
@@ -5131,8 +5336,10 @@ export async function userMatchHistory(
     viewerIsStaff?: boolean;
   },
 ): Promise<MatchHistoryPage> {
-  const limit = Math.min(100, Math.max(1, opts.limit ?? 25));
-  const offset = Math.max(0, opts.offset ?? 0);
+  // FINITE first: these arrive from a query string, and `Math.max(1, NaN)` is NaN, which reached
+  // Postgres as `limit 'NaN'` and came back as a 500
+  const limit = Math.min(100, Math.max(1, Math.floor(Number.isFinite(opts.limit) ? opts.limit! : 25)));
+  const offset = Math.max(0, Math.floor(Number.isFinite(opts.offset) ? opts.offset! : 0));
 
   const conds: string[] = [];
   switch (opts.type) {
@@ -6466,9 +6673,23 @@ export type RequestOutcome = 'sent' | 'accepted' | 'already-friends' | 'blocked'
  * up with two pending requests and no friendship, each looking at a request
  * they can't tell is already reciprocated.
  */
+/**
+ * SERIALIZE every friendship write about one PAIR. A transaction alone does not: under READ
+ * COMMITTED, A and B pressing Add at the same moment each looked for the other's request, found
+ * nothing yet committed, and each inserted their own — two pending mirror requests and no
+ * friendship, which is the exact case `sendFriendRequest` exists to fold into an accept. A block
+ * landing between a request's block check and its insert let the request through the same way.
+ * One transaction-scoped advisory lock per unordered pair makes them queue instead.
+ */
+async function lockPair(query: Tx, a: string, b: string, scope = 'pair'): Promise<void> {
+  const [low, high] = a < b ? [a, b] : [b, a];
+  await query(`select pg_advisory_xact_lock(hashtext($1))`, [`${scope}:${low}:${high}`]);
+}
+
 export async function sendFriendRequest(fromId: string, toId: string): Promise<RequestOutcome> {
   if (fromId === toId) return 'duplicate';
   return tx(async (query) => {
+    await lockPair(query, fromId, toId);
     // a block in EITHER direction stops the request. The handler reports this
     // the same way as an ordinary failure — telling a sender they were blocked
     // is itself the signal that lets someone confirm they were blocked.
@@ -6567,6 +6788,7 @@ export async function removeFriend(callerId: string, otherId: string): Promise<b
 export async function blockUser(callerId: string, targetId: string): Promise<boolean> {
   if (callerId === targetId) return false;
   return tx(async (query) => {
+    await lockPair(query, callerId, targetId);
     await query(
       `insert into friend_blocks (blocker_id, blocked_id) values ($1, $2) on conflict do nothing`,
       [callerId, targetId],
@@ -6657,12 +6879,18 @@ export async function inviteToRoom(
   // own party token, so the recipient could accept a stale one and sit in a
   // private queue waiting for a challenger who is already waiting under a
   // different token. Replacing keeps exactly one token in play.
-  await q(`delete from room_invites where from_user_id = $1 and to_user_id = $2`, [fromId, toId]);
-  await q(
-    `insert into room_invites (from_user_id, to_user_id, room, game, kind, record, format, region)
-     values ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [fromId, toId, room, game, kind, record, format, region || null],
-  );
+  //
+  // ...and the replace is ONE locked transaction, or it is not a replace: as two bare `q()`s, a
+  // double click ran both deletes before either insert and left two rows, two live tokens.
+  await tx(async (query) => {
+    await lockPair(query, fromId, toId, `invite>${fromId}`);
+    await query(`delete from room_invites where from_user_id = $1 and to_user_id = $2`, [fromId, toId]);
+    await query(
+      `insert into room_invites (from_user_id, to_user_id, room, game, kind, record, format, region)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [fromId, toId, room, game, kind, record, format, region || null],
+    );
+  });
   return 'sent';
 }
 
@@ -6999,12 +7227,19 @@ const NOT_SUSPENDED: Suspension = { until: null, reason: null };
 
 /** Is this account suspended RIGHT NOW? Read at the room-join and ranked-queue doors, so it
  *  answers `NOT_SUSPENDED` for an id with no profile row and for an expired deadline — a gate
- *  whose unknown case refuses goes dark silently (the `emailGateRefusal` rule). */
+ *  whose unknown case refuses goes dark silently (the `emailGateRefusal` rule). The one
+ *  exception is a DELETED account's tombstone (0054): that id is not unknown, it is banned. */
 export async function getSuspension(userId: string): Promise<Suspension> {
   if (!dbEnabled) return NOT_SUSPENDED;
+  // A DELETED account answers from its tombstone (0054) until its profile is re-created — the
+  // gap between a self-delete and the next API call is exactly when a banned player would try
+  // the door. The profile wins whenever it exists.
   const rows = await q<{ until: string | null; reason: string | null }>(
-    `select suspended_until as until, suspended_reason as reason
-       from profiles where user_id = $1`,
+    `select case when p.user_id is not null then p.suspended_until else t.suspended_until end as until,
+            p.suspended_reason as reason
+       from (select $1::text as id) x
+       left join profiles p on p.user_id = x.id
+       left join account_tombstones t on t.user_id = x.id`,
     [userId],
   );
   const until = rows[0]?.until ? new Date(rows[0].until).getTime() : null;

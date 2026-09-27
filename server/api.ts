@@ -75,7 +75,7 @@ import {
   recordKofiPayment,
   deleteAccount,
   exportAccount,
-  listSeasons,
+  listSeasonsCached,
   recordLeaderboard,
   saveUserSettings,
   setHandle,
@@ -1282,7 +1282,8 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       if (typeof txn !== 'string' || !txn.trim()) {
         return json(400, { error: 'transaction id required' }), true;
       }
-      await ensureProfile(user.userId, user.handle);
+      // `fresh`: the claim writes `claimed_by`, an FK — a stale memo must not fail a payment
+      await ensureProfile(user.userId, user.handle, true);
       const r = await claimKofiPayment(user.userId, txn.trim());
       if (r.outcome === 'not-found') {
         return (
@@ -1675,13 +1676,20 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
     // default board view = the live season FOR THIS GAME (which may be admin-advanced past
     // the code's BALANCE_VERSION); an explicit ?season= picks an archived one.
     const seasonParam = url.searchParams.get('season');
+    // A season is an INTEGER key. `Number('abc')` is NaN and `Number('1.5')` is not a key, and
+    // both went straight into a bound parameter, where Postgres refused them as a 500. Refused
+    // here instead, as what they are.
+    if (seasonParam !== null && !Number.isSafeInteger(Number(seasonParam))) {
+      return json(400, { error: 'bad season' }), true;
+    }
     const season =
       seasonParam !== null
         ? Number(seasonParam)
         : dbEnabled
           ? await currentSeasonNumber(BALANCE_VERSION, game)
           : BALANCE_VERSION;
-    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? 100)));
+    // `|| 100` catches NaN, which `Math.max` passes straight through
+    const limit = Math.min(500, Math.max(1, Math.floor(Number(url.searchParams.get('limit') ?? 100) || 100)));
     // paginated match-history opts (repo clamps limit to [1,100], default 25)
     const historyOpts = {
       balanceVersion: season,
@@ -1771,7 +1779,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       // module owns that number, so a third game does not land in DECODE's bucket
       const current = dbEnabled ? await currentSeasonNumber(BALANCE_VERSION, game) : BALANCE_VERSION;
       if (dbEnabled) await ensureSeason(current, game, simModuleFor(game).initialAct);
-      const seasons = dbEnabled ? await listSeasons(game) : [];
+      const seasons = dbEnabled ? await listSeasonsCached(game) : [];
       return json(200, { current, seasons, game }), true;
     }
 

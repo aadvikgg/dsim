@@ -4741,6 +4741,258 @@ async function main(): Promise<void> {
     await db.exec(`drop schema neon_auth cascade;`);
   }
 
+  /* ---- persistence hardening (races, atomicity, deleted accounts) ----------------------
+     Each block pins one fix. PGlite is ONE connection, so the row locks themselves cannot be
+     raced here; what is asserted is what a single connection CAN prove — the statement is
+     arithmetic on the row, the transaction rolls back whole, the delta survives a write that
+     landed after the read — plus, where the guard is a call that could be tidied away, the
+     source. */
+  {
+    const { persistVersusMatch } = await import('../server/ranked');
+    const { DEFAULT_SPEC, DEFAULT_ASSISTS } = await import('../src/sim/spawn');
+
+    // ---- 0054: a deleted account's sanctions outlive it --------------------------------
+    await repo.ensureProfile('tomb-ban', 'Banned');
+    await db.query(
+      `update profiles set suspended_until = now() + interval '30 days', suspended_reason = 'names @someone'
+        where user_id = 'tomb-ban'`,
+    );
+    await db.query(
+      `insert into account_standing (user_id, score, restricted_until, healed_at)
+       values ('tomb-ban', 40, now() + interval '2 hours', now())`,
+    );
+    await repo.deleteAccount('tomb-ban');
+    const tomb = await db.query<Record<string, unknown>>(`select * from account_tombstones where user_id = 'tomb-ban'`);
+    check('tombstone: deleting a suspended, locked account leaves ONE tombstone row', tomb.rows.length === 1);
+    check(
+      'tombstone: ...holding no free text — the moderator’s reason does not survive the deletion',
+      tomb.rows.length === 1 && !('suspended_reason' in tomb.rows[0]) && Number(tomb.rows[0].standing_score) === 40,
+      JSON.stringify(Object.keys(tomb.rows[0] ?? {})),
+    );
+    check(
+      '⚠️ tombstone: the deleted id is STILL SUSPENDED before any profile exists (the self-delete ban evasion)',
+      (await repo.getSuspension('tomb-ban')).until !== null,
+    );
+    const tombStanding = await repo.getStanding('tomb-ban');
+    check(
+      'tombstone: ...and still ranked-locked at its old score, answered read-only',
+      tombStanding.score === 40 && tombStanding.restrictedUntil !== null,
+      JSON.stringify(tombStanding),
+    );
+    // the same process that ran the delete: its profile memo must not skip the re-create
+    await repo.ensureProfile('tomb-ban', 'Back again');
+    const back = await db.query<{ suspended_until: string | null }>(
+      `select suspended_until from profiles where user_id = 'tomb-ban'`,
+    );
+    check('⚠️ memo: ensureProfile re-creates a profile this process just deleted', back.rows.length === 1);
+    check('tombstone: ...and re-applies the suspension to it', !!back.rows[0]?.suspended_until);
+    const reStanding = await db.query<{ score: number; restricted_until: string | null }>(
+      `select score, restricted_until from account_standing where user_id = 'tomb-ban'`,
+    );
+    check(
+      'tombstone: ...and the standing score and lock',
+      Number(reStanding.rows[0]?.score) === 40 && !!reStanding.rows[0]?.restricted_until,
+      JSON.stringify(reStanding.rows[0]),
+    );
+    const spent = await db.query(`select 1 from account_tombstones where user_id = 'tomb-ban'`);
+    check('tombstone: ...and is spent by the restore', spent.rows.length === 0);
+
+    await repo.ensureProfile('tomb-clean', 'Clean');
+    await repo.deleteAccount('tomb-clean');
+    const clean = await db.query(`select 1 from account_tombstones where user_id = 'tomb-clean'`);
+    check('tombstone: a clean account leaves nothing behind — only a sanction is carried', clean.rows.length === 0);
+
+    // ---- the behaviour charge is arithmetic on the stored row --------------------------
+    await repo.ensureProfile('race-a', 'RaceA');
+    await repo.upsertRating('race-a', '1v1', 5, 1200, 80, 0.06, 'decode');
+    // the ranked write lands AFTER any read the charge could have made, and must survive it
+    await repo.upsertRating('race-a', '1v1', 5, 1215, 78, 0.06, 'decode');
+    const ch = await repo.chargeRatingForBehaviour('race-a', '1v1', 5, 50, 100, 'decode');
+    const afterCharge = await repo.getRatingFull('race-a', '1v1', 5, 'decode');
+    check(
+      '⚠️ rating charge: subtracts from what is STORED (1215 − 50), reporting the real before/after',
+      afterCharge.rating === 1165 && ch.before === 1215 && ch.after === 1165,
+      `${JSON.stringify(ch)} stored ${afterCharge.rating}`,
+    );
+    // ...and INTERLEAVED with a write in flight: the queries of the two promises alternate on
+    // PGlite's one connection, which is exactly where the old read-then-write lost one of them
+    await db.query(`update elo_ratings set rating = 1200 where user_id = 'race-a' and mode = '1v1' and act = 5`);
+    await Promise.all([
+      repo.chargeRatingForBehaviour('race-a', '1v1', 5, 50, 100, 'decode'),
+      db.query(`update elo_ratings set rating = rating + 15 where user_id = 'race-a' and mode = '1v1' and act = 5`),
+    ]);
+    const both = (await repo.getRatingFull('race-a', '1v1', 5, 'decode')).rating;
+    check('\u26a0\ufe0f rating charge: a concurrent result write and the charge BOTH land (1200 + 15 \u2212 50)', both === 1165, `stored ${both}`);
+    await db.query(`update elo_ratings set rating = 1165 where user_id = 'race-a' and mode = '1v1' and act = 5`);
+    const gamesKept = await db.query<{ games: number; rd: number }>(
+      `select games, rd from elo_ratings where user_id = 'race-a' and mode = '1v1' and act = 5 and game = 'decode'`,
+    );
+    check('rating charge: ...leaving games and RD alone', gamesKept.rows[0].games === 2 && Number(gamesKept.rows[0].rd) === 78);
+    await repo.chargeRatingForBehaviour('race-a', '1v1', 5, 5000, 100, 'decode');
+    check('rating charge: floored', (await repo.getRatingFull('race-a', '1v1', 5, 'decode')).rating === 100);
+    await db.query(`update elo_ratings set rating = 60 where user_id = 'race-a' and mode = '1v1' and act = 5`);
+    const under = await repo.chargeRatingForBehaviour('race-a', '1v1', 5, 10, 100, 'decode');
+    check(
+      'rating charge: a charge never RAISES a rating already under the floor',
+      under.after === 60 && (await repo.getRatingFull('race-a', '1v1', 5, 'decode')).rating === 60,
+      JSON.stringify(under),
+    );
+    await repo.ensureProfile('race-b', 'RaceB');
+    const seeded = await repo.chargeRatingForBehaviour('race-b', '2v2', 5, 30, 100, 'decode');
+    const seedRow = await db.query<{ rating: number; games: number }>(
+      `select rating, games from elo_ratings where user_id = 'race-b' and mode = '2v2' and act = 5`,
+    );
+    check(
+      'rating charge: a player with no row is seeded at the charged default, games 0',
+      seeded.before === 1000 && seeded.after === 970 && Number(seedRow.rows[0]?.rating) === 970 && seedRow.rows[0]?.games === 0,
+      JSON.stringify(seedRow.rows[0]),
+    );
+
+    // ---- the ranked result lands whole or not at all -----------------------------------
+    await repo.ensureSeason(640, 'chain', 1);
+    const actC = await repo.actForSeason(640, 'chain');
+    await repo.ensureProfile('atom-ok', 'AtomOk');
+    const part = (userId: string, alliance: 'red' | 'blue') => ({
+      clientId: userId, userId, handle: userId, alliance, drivetrain: 'tank' as const,
+      score: alliance === 'red' ? 90 : 40, spec: DEFAULT_SPEC, assists: DEFAULT_ASSISTS,
+    });
+    const atomOutcome = {
+      game: 'chain' as const,
+      config: { kind: 'versus' as const },
+      ranked: true,
+      mode: '1v1' as const,
+      result: { score: { red: 90, blue: 40 }, foulPoints: { red: 0, blue: 0 }, hash: 0, ticks: 60 },
+      replay: { format: 2, balanceVersion: 4, sim: 2, game: 'chain' as const, mode: 'match' as const, seed: 1, ticks: 60, setups: [], tracks: {} },
+      participants: [part('atom-ok', 'red'), part('atom-ghost', 'blue')],
+    };
+    const matchesBefore = (await db.query<{ n: number }>(`select count(*)::int as n from matches`)).rows[0].n;
+    // `atom-ghost` has no profile: the FIRST player's rating write succeeds, the second's is an
+    // FK violation — the exact half-written result the transaction exists to prevent
+    const threw = await persistVersusMatch(
+      atomOutcome.participants as never, atomOutcome as never, 640, null as unknown as string, true, 'chain',
+    ).then(() => false, () => true);
+    const okRow = await db.query(`select 1 from elo_ratings where user_id = 'atom-ok' and act = $1 and game = 'chain'`, [actC]);
+    const matchesAfter = (await db.query<{ n: number }>(`select count(*)::int as n from matches`)).rows[0].n;
+    check(
+      '⚠️ ranked result: a failure part-way moves NOBODY’s rating and writes no match row',
+      threw && okRow.rows.length === 0 && matchesAfter === matchesBefore,
+      `threw=${threw} okRows=${okRow.rows.length} matches ${matchesBefore}->${matchesAfter}`,
+    );
+    await repo.ensureProfile('atom-ghost', 'AtomGhost');
+    const ids: { matchId?: string } = {};
+    const elo = await persistVersusMatch(
+      atomOutcome.participants as never, atomOutcome as never, 640, null as unknown as string, true, 'chain', ids,
+    );
+    const parts2 = await db.query<{ n: number }>(`select count(*)::int as n from match_participants where match_id = $1`, [ids.matchId]);
+    check(
+      'ranked result: ...and the same result with both profiles writes ratings, match and participants together',
+      elo.length === 2 && !!ids.matchId && parts2.rows[0].n === 2 && elo.every((e) => e.games === 1),
+      JSON.stringify(elo),
+    );
+    const rankedSrc = readFileSync(join(ROOT, 'server/ranked.ts'), 'utf8');
+    check(
+      'ranked result: the ratings are READ LOCKED inside the transaction (the guard against a concurrent write)',
+      /await tx\(async \(query\)/.test(rankedSrc) && /getRatingsFull\(.*, game, query, true\)/.test(rankedSrc),
+    );
+
+    // ---- a standing charge takes its DELTA, not a stale absolute score -------------------
+    await repo.ensureProfile('st-race', 'StRace');
+    await db.query(`insert into account_standing (user_id, score, healed_at) values ('st-race', 50, now())`);
+    const verdict = {
+      kind: 'leave' as never, points: 8, scoreBefore: 50, scoreAfter: 42, tierBefore: 'good', tierAfter: 'good',
+      rung: 0, cooldownMin: 0, restrictedUntil: null, ratingCharge: 0, nextCooldownMin: 0,
+    } as never;
+    // a clean-match heal lands between the charge's read (50) and its write
+    await db.query(`update account_standing set score = 55 where user_id = 'st-race'`);
+    const storedScore = await repo.writeStandingEvent('st-race', verdict);
+    const ledger = await db.query<{ score_after: number }>(
+      `select score_after from standing_events where user_id = 'st-race' order by id desc limit 1`,
+    );
+    check(
+      '⚠️ standing: a heal that landed after the read is KEPT (55 − 8, not the stale 42)',
+      storedScore === 47 && ledger.rows[0]?.score_after === 47,
+      `stored ${storedScore}, ledger ${ledger.rows[0]?.score_after}`,
+    );
+
+    // ---- Ko-fi: a stored transaction under a new message id -------------------------------
+    await repo.ensureProfile('kofi-dup', 'KofiDup');
+    await db.query(`update profiles set kofi_email = 'dup@pay.er' where user_id = 'kofi-dup'`);
+    const dupEvt = {
+      messageId: 'dup-m1', kind: 'Subscription', email: 'dup@pay.er', transactionId: 'DUP-TXN',
+      amount: '3.00', currency: 'USD', isSubscription: true, tierName: 'Supporter', months: 1,
+    };
+    await repo.recordKofiPayment(dupEvt);
+    const second = await repo.recordKofiPayment({ ...dupEvt, messageId: 'dup-m2' }).catch((e: Error) => e);
+    const dupGrants = await db.query<{ n: number }>(
+      `select count(*)::int as n from supporter_grants where user_id = 'kofi-dup' and source = 'kofi'`,
+    );
+    check(
+      '⚠️ kofi: a known transaction under a NEW message id is a quiet duplicate, not a 500 Ko-fi retries forever',
+      !(second instanceof Error) && second.fresh === false && dupGrants.rows[0].n === 1,
+      second instanceof Error ? second.message : `fresh=${second.fresh} grants=${dupGrants.rows[0].n}`,
+    );
+
+    // ---- supporter extension and its audit row are one write ------------------------------
+    await repo.ensureProfile('sup-atom', 'SupAtom');
+    await db.exec(`alter table supporter_grants add constraint dbtest_no_boom check (note is distinct from 'boom')`);
+    const boom = await repo.grantSupporter('sup-atom', 3, 'admin', 'boom').then(() => false, () => true);
+    const supAfter = await db.query<{ supporter_until: string | null }>(
+      `select supporter_until from profiles where user_id = 'sup-atom'`,
+    );
+    await db.exec(`alter table supporter_grants drop constraint dbtest_no_boom`);
+    check(
+      'supporter: a grant whose audit row fails does not extend the membership either',
+      boom && supAfter.rows[0]?.supporter_until === null,
+    );
+
+    // ---- friends / challenges serialize per pair ------------------------------------------
+    const repoSrc = readFileSync(join(ROOT, 'server/db/repo.ts'), 'utf8');
+    const fnBody = (name: string): string => {
+      const at = repoSrc.indexOf(`export async function ${name}(`);
+      return repoSrc.slice(at, repoSrc.indexOf('\n}\n', at));
+    };
+    check(
+      'friends: request, block and challenge each take the pair lock (a mirror request raced to two rows without it)',
+      ['sendFriendRequest', 'blockUser', 'inviteToRoom'].every((f) => fnBody(f).includes('lockPair(')),
+    );
+    await repo.ensureProfile('inv-a', 'InvA');
+    await repo.ensureProfile('inv-b', 'InvB');
+    check('friends: a request still works under the lock', (await repo.sendFriendRequest('inv-a', 'inv-b')) === 'sent');
+    check('friends: ...and the mirror still folds into an accept', (await repo.sendFriendRequest('inv-b', 'inv-a')) === 'accepted');
+    await repo.inviteToRoom('inv-a', 'inv-b', 'TOKEN1', 'decode', 'versus', null, 'rated1v1');
+    await repo.inviteToRoom('inv-a', 'inv-b', 'TOKEN2', 'decode', 'versus', null, 'rated1v1');
+    const invRows = await db.query<{ room: string }>(`select room from room_invites where from_user_id = 'inv-a' and to_user_id = 'inv-b'`);
+    check('challenge: a re-send REPLACES, one live token', invRows.rows.length === 1 && invRows.rows[0].room === 'TOKEN2');
+
+    // ---- query-string junk is a 404 / a default, not a Postgres cast error -----------------
+    check('replay: a non-uuid id is MISSING, not a throw', (await repo.replayAccess('abc', null)).access === 'missing');
+    check('replay: ...and getReplay answers null for it', (await repo.getReplay('not-a-uuid')) === null);
+    const nanPage = await repo.userMatchHistory('inv-a', { balanceVersion: 1, limit: NaN, offset: NaN }).catch(() => null);
+    check('history: a NaN limit/offset falls back to the defaults', nanPage?.limit === 25 && nanPage?.offset === 0);
+
+    // ---- a new season continues the game's act; initialAct is for the FIRST row only -------
+    await db.query(`insert into seasons (game, balance_version, act, active) values ('chain', 700, 3, true)`);
+    await repo.ensureSeason(701, 'chain', 1); // what a code BALANCE_VERSION bump does
+    check(
+      '⚠️ seasons: a season seeded by a balance bump stays in the CURRENT act, not the game’s initial one',
+      (await repo.actForSeason(701, 'chain')) === 3,
+      `act ${await repo.actForSeason(701, 'chain')}`,
+    );
+
+    // ---- the public season list memo ---------------------------------------------------------
+    repo.clearSeasonsCache();
+    const t0 = 5_000_000;
+    const firstList = await repo.listSeasonsCached('chain', t0);
+    await db.query(`insert into seasons (game, balance_version, act, active) values ('chain', 702, 3, false)`);
+    const cachedList = await repo.listSeasonsCached('chain', t0 + 30_000);
+    check('seasons: a second picker read inside the TTL is served from the memo', cachedList.length === firstList.length);
+    const laterList = await repo.listSeasonsCached('chain', t0 + 120_000);
+    check('seasons: ...and past the TTL it re-reads', laterList.length === firstList.length + 1);
+    await repo.ensureSeason(703, 'chain', 1);
+    const afterSeed = await repo.listSeasonsCached('chain', t0 + 130_000);
+    check('seasons: seeding a new season drops the memo at once', afterSeed.some((x) => x.season === 703));
+  }
+
   await db.close();
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);
