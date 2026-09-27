@@ -1,6 +1,6 @@
 # HANDOFF — 2026-09-27b (BIOBUZZ bots: stronger in 2v2, and a tuner)
 
-**State: pushed on `alpha`.** `build`, `server:check`, `npm test` (5142 BIOBUZZ checks + shared), `test:ai`, `docaudit` pass. Sim-side AI change: online bot seats (custom lobbies, LAN) run on the game server, so **dsim-alpha needs a redeploy** for them to play the new policy there; solo practice gets it from Vercel.
+**State: pushed on `alpha`.** `build`, `server:check`, `npm test` (5142 BIOBUZZ checks + shared), `test:ai`, `docaudit` pass. Sim-side AI change: online bot seats (custom lobbies, LAN) run on the game server, so **dsim-alpha needs a redeploy** for them to play the new policy there; solo practice gets it from Vercel. Not deployed: `fly-deploy.sh` now stops at `fetch-zenith.mjs` without `ZENITH_VENDOR_*`, so it rides with the Zenith section's step (4). Post-rebase, `npm test`/`build` here fail only on the missing Zenith packages (same on clean alpha); the AI + AIPLAY lanes (83 checks) pass on the rebased tree and the whole suite passed before the rebase.
 
 - **Result, head to head against the old bots** (2v2, each seed played twice with the policies swapped): HARD +9.7 ± 2.3 a match (105–84–3 of 192), MEDIUM +12.8 ± 3.0. Bench vs the old code: 2v2 hard +24.8, medium +17.0, easy +7.4; solo within noise.
 - **What changed** (`src/games/biobuzz/ai/`, details and every measurement in `docs/area/biobuzz.md` → AI DRIVERS):
