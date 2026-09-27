@@ -263,11 +263,35 @@ class BiobuzzAutoHost implements AutoHost {
  * nominal 144 in square (walls at ±72); DSIM's field is FIRST's CAD, whose inner wall faces sit at
  * ±70.674 (`BB_HALF_X`, `fieldDims.gen.ts`). Planned against 72, a footprint 1.3 in past DSIM's
  * wall reads as legal in Zenith and then wedges the robot here, so the copy DSIM hands Zenith
- * declares the walls DSIM simulates. Everything else in the file is Zenith's, unchanged.
+ * declares the walls DSIM simulates.
+ *
+ * The positions in it move with the walls. Zenith draws its full-bleed field picture over `sizeIn`,
+ * so shrinking only `sizeIn` shrank the picture and left every obstacle, zone and element at its
+ * 144 in place: the loading zones and the garden pollen sat 1.3 in outside the drawn wall and the
+ * HIVE frame drifted off its art. Scaling each plan-view POSITION by DSIM's wall over Zenith's puts
+ * them back on the picture and inside DSIM's walls (FIRST's CAD tiles are 23.528 in, the manual's
+ * 24, the same ratio to within 0.1 in at the wall). SIZES stay as written: a flower's hole or a
+ * pollen's radius is the object's, not the field's. Heights, targets and rules are untouched.
  */
+const TO_DSIM_X = BB_HALF_X / (biobuzzField.sizeIn.xIn / 2);
+const TO_DSIM_Y = BB_HALF_Y / (biobuzzField.sizeIn.yIn / 2);
+const toDsim = (v: number, k: number): number => Math.round(v * k * 1e4) / 1e4;
+
+/** One obstacle, zone or element with its plan-view position keys moved into DSIM's frame. */
+function inDsimFrame<T extends object>(item: T): T {
+  const out = { ...item } as Record<string, unknown>;
+  for (const key of ['xIn', 'minXIn', 'maxXIn']) if (typeof out[key] === 'number') out[key] = toDsim(out[key], TO_DSIM_X);
+  for (const key of ['yIn', 'minYIn', 'maxYIn']) if (typeof out[key] === 'number') out[key] = toDsim(out[key], TO_DSIM_Y);
+  if (typeof out.pivotIn === 'object' && out.pivotIn !== null) out.pivotIn = inDsimFrame(out.pivotIn);
+  return out as T;
+}
+
 const DSIM_FIELD = {
   ...biobuzzField,
-  sizeIn: { xIn: Math.round(BB_HALF_X * 2 * 1e4) / 1e4, yIn: Math.round(BB_HALF_Y * 2 * 1e4) / 1e4 },
+  sizeIn: { xIn: toDsim(BB_HALF_X * 2, 1), yIn: toDsim(BB_HALF_Y * 2, 1) },
+  obstacles: biobuzzField.obstacles.map(inDsimFrame),
+  zones: biobuzzField.zones.map(inDsimFrame),
+  elements: biobuzzField.elements.map(inDsimFrame),
 };
 
 export const BIOBUZZ_AUTO: GameAutoAdapter = {

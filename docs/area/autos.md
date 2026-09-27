@@ -40,7 +40,9 @@ contract. BIOBUZZ only: Zenith has no DECODE or Chain Reaction field, and DECODE
 - ⚠️ **THE FIELD DSIM HANDS ZENITH HAS DSIM'S WALLS.** Zenith's BIOBUZZ file is the manual's
   nominal 144 in (±72); DSIM is FIRST's CAD (±70.674). Against 72 a path 1.3 in past DSIM's wall
   plans clean and then wedges the robot, so the adapter overrides `sizeIn` and derives the season
-  rules (`loadSeason`) from that field.
+  rules (`loadSeason`) from that field. ⚠️ **The positions move with it** (obstacles, zones,
+  elements, scaled by DSIM's wall over 72; sizes kept): Zenith stretches its full-bleed picture
+  over `sizeIn`, so overriding `sizeIn` alone left every overlay 1.3 in off the art at the walls.
 - ⚠️ **ZENITH IS A LAZY CHUNK.** Only `types.ts`, `coerce.ts` and `library.ts` are in the main
   chunk, and none of them may import `@horizon36596/zenith-*` (types excepted). Everything else is
   reached through `import('./auto/zenithAutos')`, a facade NAMED so the chunk is not `index-*`

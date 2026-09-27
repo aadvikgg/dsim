@@ -176,6 +176,28 @@ export function autoChecks(check: Check): void {
       (simModuleFor(g).zenithAutos === true) === (autoAdapterFor(g) !== null),
     );
   }
+  // ── the field DSIM hands Zenith: positions move with DSIM's walls, sizes do not ─────────────
+  {
+    const field = adapter.field() as {
+      sizeIn: { xIn: number };
+      zones: Array<{ id: string; minXIn: number }>;
+      elements: Array<{ id: string; xIn: number; radiusIn?: number }>;
+    };
+    const wall = -field.sizeIn.xIn / 2;
+    const zone = field.zones.find((z) => z.id === 'loadingZoneRed');
+    check(
+      "AUTO: the handed field's red loading zone starts at DSIM's wall, not at Zenith's 72",
+      zone !== undefined && Math.abs(zone.minXIn - wall) < 1e-3,
+      `minXIn ${String(zone?.minXIn)}, wall ${String(wall)}`,
+    );
+    const pollen = field.elements.find((e) => e.id === 'gardenRed0');
+    check(
+      "AUTO: the handed field moves a garden pollen inside DSIM's wall and keeps its radius",
+      pollen !== undefined && pollen.xIn > -70.6 && pollen.radiusIn === 1.4,
+      `xIn ${String(pollen?.xIn)}, radiusIn ${String(pollen?.radiusIn)}`,
+    );
+  }
+
   const text = JSON.stringify(probeAuto());
   const kept = coerceSetup({ ...setup(0, 'blue'), zenithAuto: { auto: text } }, 'biobuzz');
   check('AUTO: coerceSetup keeps a BIOBUZZ auto byte for byte', kept.zenithAuto?.auto === text);
