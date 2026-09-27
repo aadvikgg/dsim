@@ -37,6 +37,8 @@ import {
 import { step } from '../src/sim/world';
 import { robotPenetration, robotSolids } from '../src/sim/artifactSolids';
 import { Keyboard } from '../src/input/keyboard';
+import { createTokenCache, readAccountSettings, sendWithTokenRetry } from '../src/net/authFetch';
+import { startPollLoop } from '../src/ui/pollLoop';
 import { updatePenalties } from '../src/sim/penalties';
 import { aimSolution, robotInLaunchZone } from '../src/sim/robot';
 import { updateHumanPlayers } from '../src/sim/humanPlayer';
@@ -286,7 +288,7 @@ import {
 import type { HudSnapshot } from '../src/game';
 import { DEFAULT_MOBILE_LAYOUT } from '../src/settings';
 import { PadCapture, PadChordResolver, PAD_CHORD_GRACE_MS, PAD_HOLD_REMOVE_MS, PAD_TAP_HOLD_MS } from '../src/input/padChords';
-import { GamepadInput } from '../src/input/gamepad';
+import { GamepadInput, padButtonDown, shape as padShape, shapeStick } from '../src/input/gamepad';
 import {
   awardBadge,
   awardBoardWord,
@@ -27931,6 +27933,451 @@ const dumperSetup = (): RobotSetup => {
       // -1 is less than any index, so the ordering test passed on the code it was written to catch.
       showFn[0].indexOf('screenRef.current !== from') < showFn[0].indexOf('shown = true'),
     'consumed before the bail, a player who moved during the 1.5s wait was left holding a live session and a held seat with no screen',
+  );
+}
+
+/**
+ * THE AUTHENTICATED-REQUEST RULES (`src/net/authFetch.ts`). All three fail SILENTLY when wrong:
+ *
+ * - `readAccountSettings` — `null` licenses `AccountSync` to SEED the account from this device.
+ *   It used to be `null` on any failure too, so a sign-in while the server cold-booted (a 502)
+ *   overwrote the account's real bindings, robots and starts with a fresh device's defaults.
+ * - `sendWithTokenRetry` — the once-on-401 retry `authedJson` always had and the ~35 helpers
+ *   that called `fetch` themselves never did.
+ * - `createTokenCache` — concurrent callers share one `/token` fetch, and a fetch that started
+ *   before a sign-out never lands in the cache after it.
+ */
+{
+  const resp = (ok: boolean, status: number, body: unknown) => ({ ok, status, json: async () => body });
+  const throws = async (p: Promise<unknown>): Promise<boolean> => p.then(() => false, () => true);
+  check(
+    '⚠️ account settings: a failed read THROWS, it never reads as "never saved"',
+    (await throws(readAccountSettings(resp(false, 502, {})))) &&
+      (await throws(readAccountSettings(resp(false, 401, { error: 'x' })))) &&
+      (await throws(readAccountSettings(null))),
+    'null here makes AccountSync seed the account from this device, overwriting it',
+  );
+  check(
+    'account settings: a real answer reads through, and an account with none reads null',
+    JSON.stringify(await readAccountSettings(resp(true, 200, { settings: { game: 'chain' } }))) === '{"game":"chain"}' &&
+      (await readAccountSettings(resp(true, 200, {}))) === null,
+  );
+
+  // the retry: one send on success, exactly one more on a 401 with a NEW token, none otherwise
+  const run = async (statuses: number[], fresh: string | null) => {
+    const sent: string[] = [];
+    const forced: boolean[] = [];
+    let n = 0;
+    const res = await sendWithTokenRetry(
+      'old',
+      async (force) => {
+        forced.push(!!force);
+        return fresh;
+      },
+      async (t) => {
+        sent.push(t);
+        return { status: statuses[Math.min(n++, statuses.length - 1)] };
+      },
+    );
+    return { sent, forced, status: res.status };
+  };
+  const ok = await run([200], 'new');
+  check('auth retry: a 200 is sent once and never refreshes', ok.sent.join() === 'old' && ok.forced.length === 0);
+  const re = await run([401, 200], 'new');
+  check(
+    '⚠️ auth retry: a 401 retries ONCE with a force-refreshed token',
+    re.sent.join() === 'old,new' && re.forced.join() === 'true' && re.status === 200,
+    `sent=${re.sent.join()} forced=${re.forced.join()}`,
+  );
+  const twice = await run([401, 401], 'new');
+  check('auth retry: ...and only once, however the retry is answered', twice.sent.length === 2 && twice.status === 401);
+  const gone = await run([401], null);
+  const same = await run([401], 'old');
+  check(
+    'auth retry: signed out, or the same token back, returns the 401 as-is without resending',
+    gone.sent.length === 1 && gone.status === 401 && same.sent.length === 1,
+  );
+
+  // the token cache
+  let fetches = 0;
+  const pending: ((t: string | null) => void)[] = [];
+  const cache = createTokenCache(
+    () =>
+      new Promise<string | null>((res) => {
+        fetches++;
+        pending.push(res);
+      }),
+    () => 1_000_000,
+  );
+  const a = cache.get();
+  const b = cache.get();
+  const c = cache.get();
+  pending.shift()!('tok-1');
+  const got = await Promise.all([a, b, c]);
+  check(
+    '⚠️ token cache: three callers on an empty cache share ONE /token fetch',
+    fetches === 1 && got.every((t) => t === 'tok-1'),
+    `fetches=${fetches}`,
+  );
+  const hit = await cache.get();
+  check('token cache: ...and the next caller is served from the cache', fetches === 1 && hit === 'tok-1');
+  const forcedGet = cache.get(true);
+  check('token cache: a forced get goes to the network', fetches === 2);
+  pending.shift()!('tok-2');
+  await forcedGet;
+  // a fetch that started under the OLD identity and lands after clear()
+  const stale = cache.get(true);
+  cache.clear();
+  const afterClear = cache.get();
+  check('token cache: a get after clear() does not join the old identity’s fetch', fetches === 4);
+  pending.shift()!('old-user');
+  pending.shift()!('new-user');
+  const [staleTok, freshTok] = await Promise.all([stale, afterClear]);
+  const next = await cache.get();
+  check(
+    '⚠️ token cache: a token fetched before a sign-out is never CACHED after it',
+    staleTok === 'old-user' && freshTok === 'new-user' && next === 'new-user' && fetches === 4,
+    `stale=${staleTok} fresh=${freshTok} next=${next} fetches=${fetches}`,
+  );
+  // a token with no readable `exp` is still served from the cache for its fallback TTL
+  let clock = 0;
+  let plainFetches = 0;
+  const plain = createTokenCache(async () => {
+    plainFetches++;
+    return 'no-exp';
+  }, () => clock);
+  await plain.get();
+  clock = 30_000;
+  await plain.get();
+  check(
+    'token cache: a token with no readable exp is cached, not refetched on every call',
+    plainFetches === 1,
+    `fetches=${plainFetches} (the fallback TTL equalled the refresh skew, so it expired on arrival)`,
+  );
+  // a network failure is not a miss: the cache keeps what it had
+  const flaky = createTokenCache(async () => {
+    throw new Error('offline');
+  });
+  check('token cache: a network failure reads as no token, never a throw', (await flaky.get()) === null);
+}
+
+/**
+ * THE FRIENDS POLL, WOKEN THREE TIMES AT ONCE (`src/ui/pollLoop.ts`).
+ *
+ * A tab coming forward fires `visibilitychange`, `focus` and the idle detector's wake together.
+ * The inline loop ran a poll per wake while one was already in flight, and each finished poll
+ * armed a timer over the handle of the last, so every return to the tab left another poll chain
+ * running forever against `/api/friends`. Driven here with a fake clock: whatever the wakes, one
+ * request in flight and one timer pending.
+ */
+{
+  let nextId = 1;
+  const timers = new Map<number, () => void>();
+  let requests = 0;
+  const settle: (() => void)[] = [];
+  const loop = startPollLoop<number>({
+    run: () => {
+      requests++;
+      return new Promise<number>((res) => settle.push(() => res(20_000)));
+    },
+    setTimer: (fn) => {
+      const id = nextId++;
+      timers.set(id, fn);
+      return id;
+    },
+    clearTimer: (id) => void timers.delete(id),
+    fallbackMs: 20_000,
+  });
+  check('poll loop: it polls once on start', requests === 1 && timers.size === 0);
+  loop.wake();
+  loop.wake();
+  loop.wake();
+  check(
+    '⚠️ poll loop: three wakes while a poll is in flight start NO second request',
+    requests === 1,
+    `requests=${requests}`,
+  );
+  settle.shift()!();
+  await Promise.resolve();
+  await Promise.resolve();
+  check('poll loop: the answer arms exactly ONE timer', timers.size === 1, `timers=${timers.size}`);
+  loop.wake();
+  loop.wake();
+  check(
+    '⚠️ poll loop: a wake between polls cancels the pending timer and polls once',
+    requests === 2 && timers.size === 0,
+    `requests=${requests} timers=${timers.size}`,
+  );
+  settle.shift()!();
+  await Promise.resolve();
+  await Promise.resolve();
+  const [fire] = [...timers.values()];
+  timers.clear();
+  fire();
+  check('poll loop: the timer firing polls again', requests === 3);
+  loop.stop();
+  settle.shift()!();
+  await Promise.resolve();
+  await Promise.resolve();
+  loop.wake();
+  check('poll loop: once stopped, nothing re-arms and a wake does nothing', timers.size === 0 && requests === 3);
+  // an idle page makes no request and just re-checks later
+  const idleTimers: number[] = [];
+  const idle = startPollLoop<number>({
+    run: () => 5_000,
+    setTimer: (_fn, ms) => (idleTimers.push(ms), idleTimers.length),
+    clearTimer: () => {},
+    fallbackMs: 20_000,
+  });
+  idle.stop();
+  check('poll loop: a synchronous answer (no request) just reschedules', idleTimers.join() === '5000');
+}
+
+/**
+ * THE REPLAY VIEWER FREES THE 3D WORLDS IT STOPS USING.
+ *
+ * A `'3d'` replay's world is solved in a Rapier world that lives in wasm linear memory, and the
+ * `WeakMap` holding it cannot return it (`disposeEngineFor`). The viewer built a fresh
+ * `ReplayPlayer` on every backward scrub, "play again", restart and video export, and dropped
+ * the old one — a whole 3D world leaked each time. Every swap now goes through ONE helper.
+ */
+{
+  const rv = readFileSync('src/ui/ReplayView.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const assigns = rv.match(/player\.current = /g) ?? [];
+  check(
+    '⚠️ replay viewer: the on-screen player is only ever swapped through replacePlayer',
+    assigns.length === 1 && /const replacePlayer = [\s\S]{0,200}?player\.current = next;[\s\S]{0,120}?disposePhysics3dFor\(prev\.world\)/.test(rv),
+    `${assigns.length} direct assignments (a bare one drops a 3D world without freeing it)`,
+  );
+  check(
+    'replay viewer: ...the export frees its own player, and leaving frees the on-screen one',
+    /disposePhysics3dFor\(shot\.world\)/.test(rv) && /\(\) => \(\) => \{\n\s*\/\/[^\n]*\n\s*replacePlayer\(null\);/.test(rv),
+  );
+  check(
+    'replay viewer: a PRELOADED replay still gets the unmount guard its async load relies on',
+    /use\(preloadReplay\);[\s\S]{0,200}?return \(\) => \{\s*dead = true;/.test(rv),
+    'the bare return left `dead` false, so a 3D chunk landing after the viewer closed built a player on a dead screen',
+  );
+}
+
+/**
+ * A KEY IS RELEASED AS THE PHYSICAL KEY IT WENT DOWN AS.
+ *
+ * `e.key` depends on the modifiers held at that moment, and Shift is the default INTAKE. Press
+ * `1`, hold Shift, let go of `1`: the keyup says `!`, and the old handler deleted `!` — so `1`
+ * stayed held, driving or firing, until the window lost focus. And macOS sends no keyup at all
+ * for a key released while ⌘ is down.
+ */
+{
+  const kb = new Keyboard();
+  const listeners: Record<string, ((e: unknown) => void)[]> = {};
+  const realWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = {
+    addEventListener: (t: string, fn: (e: unknown) => void) => {
+      (listeners[t] ??= []).push(fn);
+    },
+    removeEventListener: () => {},
+  };
+  kb.attach();
+  (globalThis as { window?: unknown }).window = realWindow;
+  const target = { tagName: 'CANVAS', isContentEditable: false };
+  const send = (type: string, key: string, code?: string, metaKey = false) => {
+    for (const fn of listeners[type] ?? []) fn({ key, code, metaKey, target, repeat: false, preventDefault: () => {} });
+  };
+  send('keydown', '1', 'Digit1');
+  send('keydown', 'Shift', 'ShiftLeft');
+  send('keyup', '!', 'Digit1'); // the same physical key, reported under the modifier now held
+  check(
+    '⚠️ keyboard: a digit released while Shift is held is RELEASED, not stuck down',
+    !kb.held('1') && kb.held('shift'),
+    `held(1)=${kb.held('1')} held(shift)=${kb.held('shift')}`,
+  );
+  send('keyup', 'Shift', 'ShiftLeft');
+  // the other order: pressed UNDER Shift, released after it
+  send('keydown', 'Shift', 'ShiftLeft');
+  send('keydown', '?', 'Slash');
+  send('keyup', 'Shift', 'ShiftLeft');
+  send('keyup', '/', 'Slash');
+  check('keyboard: ...and one pressed under Shift and released after it lets go too', !kb.held('?') && !kb.held('/'));
+  // no `code` at all (a synthetic event): the old by-key release still works
+  send('keydown', 'w');
+  send('keyup', 'w');
+  check('keyboard: an event with no code still releases by key', !kb.held('w'));
+  // ⌘ swallows the keyup of anything released under it
+  send('keydown', 'Meta', 'MetaLeft', true);
+  send('keydown', 'k', 'KeyK', true);
+  send('keyup', 'Meta', 'MetaLeft');
+  check(
+    'keyboard: a key pressed under ⌘ is let go when ⌘ is (macOS never sends its keyup)',
+    !kb.held('k') && !kb.held('meta'),
+    `held(k)=${kb.held('k')}`,
+  );
+  send('keydown', 'w', 'KeyW');
+  send('keydown', 'Meta', 'MetaLeft', true);
+  send('keyup', 'Meta', 'MetaLeft');
+  check('keyboard: ...but a key already held before ⌘ keeps driving', kb.held('w'));
+}
+
+/**
+ * THE STICK AND TRIGGER SETTINGS DO WHAT THEY SAY (a feel change, on purpose).
+ *
+ * - The deadzone is documented as RADIAL and was applied per AXIS — a cross-shaped deadzone
+ *   that zeroed the small component of any near-cardinal push, so at the default 0.12 no angle
+ *   under ~7° off straight ahead was reachable at full throw.
+ * - The trigger threshold was `pressed || value > threshold`, and Chrome reports an analog
+ *   trigger `pressed` from ~0.12 of travel, so raising the threshold did nothing.
+ */
+{
+  const DZ = DEFAULT_BINDINGS.pad.deadzone;
+  // 5° off straight ahead, full throw
+  const a = (5 * Math.PI) / 180;
+  const [x, y] = shapeStick(Math.sin(a), Math.cos(a), DZ, 1);
+  const perAxisX = padShape(Math.sin(a), DZ, 1);
+  check(
+    '⚠️ gamepad: a push 5° off straight ahead keeps its sideways component (radial deadzone)',
+    x > 0.05 && perAxisX === 0 && Math.abs(Math.atan2(x, y) - a) < 1e-9,
+    `radial x=${x.toFixed(3)} (per-axis gave ${perAxisX})`,
+  );
+  check(
+    'gamepad: inside the deadzone in any direction is dead centre',
+    shapeStick(DZ * 0.7, DZ * 0.7, DZ, 1).every((v) => v === 0) && shapeStick(0, 0, DZ, 1).every((v) => v === 0),
+  );
+  const [cx, cy] = shapeStick(1, 1, DZ, 1.8); // a square gate's corner reads past 1
+  check('gamepad: a square-gate corner is capped at full deflection, not more', Math.abs(Math.hypot(cx, cy) - 1) < 1e-9);
+  const [hx] = shapeStick(0.5, 0, DZ, 1);
+  check('gamepad: along an axis the radial shape equals the old 1D one', Math.abs(hx - padShape(0.5, DZ, 1)) < 1e-12);
+
+  const thr = 0.6;
+  check(
+    '⚠️ gamepad: a trigger Chrome calls "pressed" at 0.2 is NOT down under a 0.6 threshold',
+    !padButtonDown({ pressed: true, value: 0.2 }, 7, thr) && padButtonDown({ pressed: true, value: 0.7 }, 7, thr),
+  );
+  check(
+    'gamepad: a digital trigger (value 0 while pressed) and every other button still read pressed',
+    padButtonDown({ pressed: true, value: 0 }, 6, thr) && padButtonDown({ pressed: true, value: 0.2 }, 0, thr),
+  );
+}
+
+/**
+ * THE DOUBLE-TAP-ZOOM GUARD LETS A BUTTON'S TAP THROUGH. `preventDefault` on a touchend cancels
+ * the click it would have synthesized, so a thumb lifted off the joystick followed by a tap on
+ * MENU / RESET / REMATCH within 300 ms did nothing. (`touch-action: none` on the game surface
+ * and the touch pad is what keeps a control from zooming.)
+ */
+{
+  const gv = readFileSync('src/ui/GameView.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const fn = gv.match(/const onTouchEnd = \(e: TouchEvent\): void => \{[\s\S]*?\n    \};/);
+  check(
+    '⚠️ touch: the double-tap guard skips buttons, links and form controls',
+    !!fn &&
+      /closest\?\.\('button, a, input, select, textarea, \[role="button"\]'\)/.test(fn[0]) &&
+      /if \(!onControl && now - lastTouchEnd <= 300\) e\.preventDefault\(\)/.test(fn[0]),
+    'a tap on MENU within 300 ms of lifting a joystick thumb was swallowed',
+  );
+}
+
+/**
+ * ONE OWNER FOR A DOWNLOAD'S OBJECT URL (`src/ui/saveBlob.ts`). `a.click()` only starts a
+ * download; the account export and the admin CSVs revoked the URL on the very next line, which
+ * can cut the transfer off before the browser has taken the blob.
+ */
+{
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+      d.isDirectory() ? walk(joinPath(dir, d.name)) : /\.tsx?$/.test(d.name) ? [joinPath(dir, d.name)] : [],
+    );
+  const revokers = walk('src').filter((f) => /revokeObjectURL/.test(readFileSync(f, 'utf8')));
+  const sb = readFileSync('src/ui/saveBlob.ts', 'utf8');
+  check(
+    '⚠️ downloads: only saveBlob revokes an object URL, and it waits well past the hand-off',
+    revokers.length === 1 && /saveBlob\.ts$/.test(revokers[0]) && /setTimeout\(\(\) => URL\.revokeObjectURL\(url\), BLOB_URL_TTL_MS\)/.test(sb),
+    revokers.join(', '),
+  );
+}
+
+/**
+ * BINDING THE LEFT MOUSE BUTTON FINISHES. The free-camera capture binds on `mousedown`, and the
+ * same press's `click` then landed on the tile that armed it — whose toggle saw no capture and
+ * armed it again.
+ */
+{
+  const gs = readFileSync('src/ui/GraphicsSection.tsx', 'utf8').replace(/\r\n/g, '\n');
+  check(
+    '⚠️ free camera: the press that was bound is swallowed before the capture clears',
+    /bindFreeCamCustom\(cur\.custom, capture, b\) \}\);\s*swallowRestOfPress\(\);\s*setCapture\(null\);/.test(gs) &&
+      /function swallowRestOfPress\(\)[\s\S]{0,700}?'click', 'auxclick', 'contextmenu'/.test(gs),
+  );
+}
+
+/**
+ * STALE STATE ACROSS A CHANGE THE SCREEN OUTLIVES — each of these read the wrong value silently.
+ */
+{
+  const rd = (f: string) => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  const gv = rd('src/ui/GameView.tsx');
+  const bootAt = gv.indexOf('controllerRef.current = controller;');
+  const bootTail = gv.slice(bootAt, bootAt + 1400);
+  check(
+    '⚠️ game view: boot registers the practice-run and restart callbacks itself',
+    /controller\.setRestartRequest\(restartRunRef\.current \?\? null\);/.test(bootTail) &&
+      /controller\.onPracticeRun = practiceRunRef\.current/.test(bootTail),
+    'the effects that keep them current ran before an async (3D) boot built the controller, and registered nothing',
+  );
+  check(
+    'game view: Escape leaves through the live onExit, not the mount-time copy',
+    /if \(e\.key === 'Escape'\) exitRef\.current\(\);/.test(gv) && !/if \(e\.key === 'Escape'\) onExit\(\);/.test(gv),
+  );
+  for (const [file, gameExpr] of [
+    ['src/ui/Leaderboard.tsx', 'game'],
+    ['src/ui/CareerView.tsx', 'nav.game'],
+  ] as const) {
+    const src = rd(file);
+    const esc = gameExpr.replace('.', '\\.');
+    check(
+      `⚠️ ${file.split('/').pop()}: switching game drops the selected period during render`,
+      new RegExp(`if \\(periodGame !== ${esc}\\) \\{\\s*setPeriodGame\\(${esc}\\);\\s*setSeason\\(null\\);`).test(src),
+      'an archived DECODE period was sent as a Chain Reaction query',
+    );
+  }
+  check(
+    'practice replays: the cloud list is cleared when the account or game changes',
+    /setLocal\(listPracticeRuns\(\)\);[\s\S]{0,300}?setRemote\(\[\]\);[\s\S]{0,40}?if \(!signedIn\)/.test(rd('src/ui/PracticeReplays.tsx')),
+  );
+  const app = rd('src/ui/App.tsx');
+  check(
+    'practice flush: a trigger that arrives mid-flush asks for another pass instead of being dropped',
+    /if \(flushingPractice\.current\) \{\s*flushPracticeAgain\.current = true;\s*return;/.test(app) &&
+      /\} while \(flushPracticeAgain\.current && signedInRef\.current\);/.test(app),
+  );
+  const spe = rd('src/ui/StartPositionEditor.tsx');
+  const onMove = spe.match(/const onMove = \(e: React\.PointerEvent\) => \{[\s\S]*?\n  \};/);
+  check(
+    'start editor: a drag saves on release, not on every pointermove',
+    !!onMove && !/\bedit\(|commit\(/.test(onMove[0]) && /setDraft\(next\)/.test(onMove[0]),
+    'each save is a whole-settings localStorage write',
+  );
+}
+
+/**
+ * THREE LOOPS THAT KEPT RUNNING, OR STOPPED, FOR THE WRONG REASON.
+ */
+{
+  const rd = (f: string) => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  const main = rd('src/main.tsx');
+  check(
+    '⚠️ stale chunk: the reload guard is once PER BUILD, not once per tab forever',
+    /if \(sessionStorage\.getItem\(CHUNK_RELOAD_KEY\) === build\) return;\s*sessionStorage\.setItem\(CHUNK_RELOAD_KEY, build\);/.test(main),
+    "a bare '1' never cleared: a long-lived tab reloaded for the first deploy and showed the error page for every one after",
+  );
+  const aa = rd('src/ui/AdminAnalytics.tsx');
+  check(
+    'admin analytics: an older load landing after a newer one is discarded',
+    /const seq = \+\+loadSeq\.current;/.test(aa) && /if \(seq !== loadSeq\.current\) return;\s*setReport\(r\);/.test(aa),
+  );
+  const wl = rd('src/ui/WatchLive.tsx');
+  check(
+    'watch live: an unattended page does not poll /api/live, and catches up when someone is back',
+    /const load = \(\): void => \{[\s\S]{0,600}?if \(userIdle\(\)\) return;/.test(wl) && /onUserActive\(load\)/.test(wl),
   );
 }
 
