@@ -50,6 +50,7 @@ import {
   BB_AI_AUTO_MARGIN,
   BB_AI_CLUSTER_R,
   BB_AI_CONTACT,
+  BB_AI_DUMP_FLOOR,
   BB_AI_ESCAPE_LEN,
   BB_AI_LAST_CALL_S,
   BB_AI_NECTAR_FETCH_S,
@@ -416,9 +417,12 @@ function perceive(world: World, r: RobotState, t: BbAiTierSpec, bb: BiobuzzState
     tipLoaded,
     partners,
     opponents,
-    // a DUMPER's far edge is its throw, not a habit: past ~42 in there is no dump solution at all, so a
-    // sloppy tier widens the band inward and hardly outward
-    dRange: turreted ? [dBase[0] - t.envPad * 0.5, dBase[1] + t.envPad] : [dBase[0] - t.envPad * 0.6, dBase[1] + Math.min(2, t.envPad)],
+    // a DUMPER's far edge is its throw, not a habit: past ~44 in there is no dump solution at all, and
+    // the tuned band already reaches 45.5, so a sloppy tier widens it inward only — and not past
+    // `BB_AI_DUMP_FLOOR`: from 25 in a dump lands 25–75 % (medium forager −15 a solo match at 25.5)
+    dRange: turreted
+      ? [dBase[0] - t.envPad * 0.5, dBase[1] + t.envPad]
+      : [Math.min(dBase[0], Math.max(BB_AI_DUMP_FLOOR, dBase[0] - t.envPad * 0.6)), dBase[1]],
     envAng: t.envAng + (launcher.kind === 'dumper' ? 0.2 : 0),
     placeWindow: teleop && world.match.phaseTimeLeft <= BB_FLOWER_UNLOCK_S,
     hoard: false,
@@ -1017,9 +1021,17 @@ function parkEta(c: Ctx): number {
   return d / (c.vmax * 0.8) + 0.4;
 }
 
+/**
+ * seconds to the nearest point of the aim cell's envelope, BY ROAD. It used to be the straight line
+ * to the cell less the band's far edge, which is right only on the cell's own side: from the far
+ * end of the field the envelope is ~100 in round the HIVE, not ~40, and a bot 2.8 s from the buzzer
+ * walked off to score one element instead of parking (5 points lost, seed 7000).
+ */
 function standEta(c: Ctx): number {
-  const d = hyp(c.aimCell.pos.x - c.r.pos.x, c.aimCell.pos.y - c.r.pos.y);
-  return Math.max(0, d - c.dRange[1]) / (c.vmax * 0.8);
+  if (inEnvelope(c, c.r.pos)) return 0;
+  const cell = c.aimCell;
+  const s = insideFor(envelopeStand(c.r.pos, cell.pos, cell.mouth ?? { x: 0, y: 1 }, c.dRange[0], c.dRange[1], c.envAng), c.fp.circ + 1);
+  return routeLength(c.r.pos, s, c.fp.narrow + 1) / (c.vmax * 0.8);
 }
 
 /**

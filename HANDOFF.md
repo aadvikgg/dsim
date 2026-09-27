@@ -1,3 +1,18 @@
+# HANDOFF — 2026-09-27b (BIOBUZZ bots: stronger in 2v2, and a tuner)
+
+**State: pushed on `alpha`.** `build`, `server:check`, `npm test` (5142 BIOBUZZ checks + shared), `test:ai`, `docaudit` pass. Sim-side AI change: online bot seats (custom lobbies, LAN) run on the game server, so **dsim-alpha needs a redeploy** for them to play the new policy there; solo practice gets it from Vercel.
+
+- **Result, head to head against the old bots** (2v2, each seed played twice with the policies swapped): HARD +9.7 ± 2.3 a match (105–84–3 of 192), MEDIUM +12.8 ± 3.0. Bench vs the old code: 2v2 hard +24.8, medium +17.0, easy +7.4; solo within noise.
+- **What changed** (`src/games/biobuzz/ai/`, details and every measurement in `docs/area/biobuzz.md` → AI DRIVERS):
+  - FLOWER tour starts by rate near the end (`hoardingNow`/`flowerTour`/`tipRate`), not hoarding from 1:12.
+  - `standFor` searches a grid of the envelope and skips stands a robot is parked on.
+  - 3D: rolling spill elements are candidates (they stay `flight` ~2.8 s after a TIP).
+  - `standEta` routes to the envelope (it measured the straight line, so a bot at the far end left its park to score one element).
+  - Every hand-set weight is in `BB_AI_WEIGHTS` (`ai/tuning.ts`); tuned values applied (dumper band 28.5–45.5 with a 27-in floor for sloppy tiers, robot tangent 0.3, tour margin 2.3).
+- **New tool:** `npm run tune:ai` (`scripts/aitune.mjs` + `aitune-worker.ts`), a (1+λ) search over `BB_AI_WEIGHTS` scored head to head. 40 generations took ~4 h; it has converged for this policy. Its own gains read high (selection bias) — re-measure independently.
+- **Measured worse, reverted, written down in the guide:** velocity-obstacle avoidance (−47 head to head), ferrying by `bbPass` (−38), NECTAR priced by POLLEN saved, hopper top-up before crossing, drive-through pickups, HARD speed 1.0.
+- **Next if more strength is wanted:** the ceiling is geometric — the two stands are ~95 in apart and each spill lands at the far end, so a TIP costs ~3 crossings. Gains now need new behaviour (2v2 roles, spill anticipation), not tuning.
+
 # HANDOFF — 2026-09-27 (Zenith autos on `alpha`, vendored, no Zenith release)
 
 **READ FIRST.** Branch `claude/zenith-dsim-auto-pathing-g29xta` is merged into `alpha` and pushed.

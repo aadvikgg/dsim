@@ -1612,6 +1612,13 @@ four bots of one tier, points per alliance.
 |---|---|---|---|---|
 | before (every bot on the default chassis) | 25.8 / 48.0 / 62.4 | 55.1 / 88.9 / 90.3 | 24–76 s | 1–14.5 pts |
 | after (roster builds) | 95.5 / 181.4 / 247.6 | 137.0 / 230.3 / 260.2 | ≤ 4 s | 0–2 pts |
+| 2026-09-26 pass (FLOWER by rate, stand grid, rolling elements, tuned weights) | 102.5 / 186.4 / 252.8 | 134.4 / 244.0 / 287.9 | ≤ 4 s | 0–2.5 pts |
+
+The 2026-09-26 pass, paired on the same 20 seeds against the code before it: 2v2 hard +24.8 ± 6.2,
+medium +17.0 ± 5.5, easy +7.4 ± 3.8; solo within noise (hard +3.0 ± 5.5). **Head to head** against
+the previous policy — the measurement that matters for a 2v2, because both alliances draw on one
+pool of elements — HARD wins by 9.7 ± 2.3 a match (105–84–3 over 192 matches, each seed played
+twice with the policies swapped), MEDIUM by 12.8 ± 3.0 (57–37–2 over 96).
 
 The old HARD bot was stuck for 63 s of every match on average (a 12-s corner press in almost every
 one) and EASY stood idle for 113 s of 150. Head to head now, 12 seeded 2v2s each: HARD beats EASY
@@ -1699,6 +1706,9 @@ one) and EASY stood idle for 113 s of 150. Head to head now, 12 seeded 2v2s each
   - *HARD `speedCap` 1.0*: no effect (−4 ± 6). The bot averages ~30 in/s against a ~88 top speed;
     top speed is not what binds.
   - *halving the push off opponents in TELEOP*: solo +5, 2v2 same-policy −14, head-to-head +4 ± 4.
+  - *the tuner's own numbers are inflated*: it accepted +8.6 and +5.4, and the same weights measured
+    +3.0 ± 3.1 head to head on seeds it never saw. Picking the best of λ on 24 seeds biases the
+    screen upward even with a confirmation stage; re-measure any tuned table independently.
   - *ferrying by `bbPass`* (a turret at the wrong end throws its load past the HIVE and keeps
     collecting there, crossing once per TIP): solo −30, 2v2 −40, head-to-head −38 (20–76). In 3D a
     `pastGoal` pass aimed at y ∓32.5 comes to rest at ∓60…∓69, against the audience wall and 35 in

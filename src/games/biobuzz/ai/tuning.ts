@@ -30,6 +30,8 @@
  */
 export const BB_AI_TURRET_D: readonly [number, number] = [31, 49];
 export const BB_AI_DUMP_D: readonly [number, number] = [30, 40];
+/** the nearest a lower tier's sloppiness may widen a DUMPER's band to (in) — see `perceive` */
+export const BB_AI_DUMP_FLOOR = 27;
 /** how far off the mouth normal (rad) the TOP tier will stand. Lower tiers widen it. */
 export const BB_AI_ENVELOPE_ANG = 0.52; // 30°
 
@@ -139,11 +141,18 @@ export interface BbAiWeights {
   tourMargin: number;
 }
 
+/**
+ * `npm run tune:ai`, 2026-09-26, 40 generations (~4 h on 12 cores) from the hand-set values: two
+ * steps survived their fresh-seed confirmation — the DUMPER's band 30–40 → 28.5–45.5 with the
+ * turret's far edge 49 → 48.5 (+8.6 ± 2.6 a match head to head), then the robot-avoidance tangent
+ * 0.6 → 0.3 and the tour margin 3 → 2.3 (+5.4 ± 2.7). The next 35 generations found nothing that
+ * held up on fresh seeds: the rest of the table is at a local optimum for this policy.
+ */
 export const BB_AI_WEIGHTS: Readonly<BbAiWeights> = {
   turretD0: BB_AI_TURRET_D[0],
-  turretD1: BB_AI_TURRET_D[1],
-  dumpD0: BB_AI_DUMP_D[0],
-  dumpD1: BB_AI_DUMP_D[1],
+  turretD1: 48.5,
+  dumpD0: 28.5,
+  dumpD1: 45.5,
   turnW: 0.6,
   legLast: 0.9,
   legOther: 0.25,
@@ -157,10 +166,10 @@ export const BB_AI_WEIGHTS: Readonly<BbAiWeights> = {
   brake: 0.55,
   robotClear: 6,
   robotPush: 1.2,
-  robotTan: 0.6,
+  robotTan: 0.3,
   maxClosing: BB_AI_MAX_CLOSING,
   stall: 20,
   herd: 12,
   parkMargin: BB_AI_PARK_MARGIN,
-  tourMargin: BB_AI_TOUR_MARGIN,
+  tourMargin: 2.3,
 };
