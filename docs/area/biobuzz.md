@@ -1699,6 +1699,11 @@ one) and EASY stood idle for 113 s of 150. Head to head now, 12 seeded 2v2s each
   - *HARD `speedCap` 1.0*: no effect (−4 ± 6). The bot averages ~30 in/s against a ~88 top speed;
     top speed is not what binds.
   - *halving the push off opponents in TELEOP*: solo +5, 2v2 same-policy −14, head-to-head +4 ± 4.
+  - *ferrying by `bbPass`* (a turret at the wrong end throws its load past the HIVE and keeps
+    collecting there, crossing once per TIP): solo −30, 2v2 −40, head-to-head −38 (20–76). In 3D a
+    `pastGoal` pass aimed at y ∓32.5 comes to rest at ∓60…∓69, against the audience wall and 35 in
+    wide; `centre` scatters from ∓17 to ∓52 and loses some past 60 in. Picking the throws back up
+    costs more than the crossings they save.
 - **Why solo tops out where it does:** the two cells of a HIVE face ±y, so the two firing stands are
   ~95 in apart, and every spill lands at the end OPPOSITE the cell that takes next. With a 4-element
   hopper a TIP is two loads, so every TIP costs about three field-length crossings. A faster TIP
