@@ -96,3 +96,71 @@ export const BB_AI_TIP_PRIOR_S = 12;
 export const BB_AI_ROLL_V = 60;
 export const BB_AI_ROLL_VZ = 15;
 export const BB_AI_ROLL_LEAD = 0.3;
+
+/**
+ * THE POLICY'S WEIGHTS, in one place — every hand-set number the decision multiplies, so an
+ * offline search (`scratch/`-side harnesses, the bench) can move them per seat. The defaults ARE
+ * the policy: `BotDriver.create` never passes weights, so what ships is exactly this table.
+ * Distances in inches, costs in seconds, clocks in decisions.
+ */
+export interface BbAiWeights {
+  /** turret / dumper firing-envelope distance bands (see `BB_AI_TURRET_D`, `BB_AI_DUMP_D`) */
+  turretD0: number;
+  turretD1: number;
+  dumpD0: number;
+  dumpD1: number;
+  /** candidate cost: turn time weight, next-leg weight (last pick / other picks) */
+  turnW: number;
+  legLast: number;
+  legOther: number;
+  /** candidate cost: per-neighbour cluster bonus, per-element over-room penalty */
+  cluster: number;
+  overRoom: number;
+  /** candidate cost: own-NECTAR bonus, partner-nearer penalty, opponent-on-it penalty */
+  nectar: number;
+  partner: number;
+  opponent: number;
+  /** target commitment: a new best must beat the held one by this factor and this margin */
+  switchFrac: number;
+  switchAbs: number;
+  /** braking: the fraction of the drivetrain's acceleration the stop profile assumes */
+  brake: number;
+  /** robot avoidance: clearance (in), radial and tangential push */
+  robotClear: number;
+  robotPush: number;
+  robotTan: number;
+  /** a turret does not fire while closing on the cell faster than this (in/s) */
+  maxClosing: number;
+  /** stall and herd clocks (decisions) */
+  stall: number;
+  herd: number;
+  /** seconds of margin on the park and on the FLOWER tour */
+  parkMargin: number;
+  tourMargin: number;
+}
+
+export const BB_AI_WEIGHTS: Readonly<BbAiWeights> = {
+  turretD0: BB_AI_TURRET_D[0],
+  turretD1: BB_AI_TURRET_D[1],
+  dumpD0: BB_AI_DUMP_D[0],
+  dumpD1: BB_AI_DUMP_D[1],
+  turnW: 0.6,
+  legLast: 0.9,
+  legOther: 0.25,
+  cluster: 0.12,
+  overRoom: 0.6,
+  nectar: 0.4,
+  partner: 2.5,
+  opponent: 1.2,
+  switchFrac: 0.6,
+  switchAbs: 0.6,
+  brake: 0.55,
+  robotClear: 6,
+  robotPush: 1.2,
+  robotTan: 0.6,
+  maxClosing: BB_AI_MAX_CLOSING,
+  stall: 20,
+  herd: 12,
+  parkMargin: BB_AI_PARK_MARGIN,
+  tourMargin: BB_AI_TOUR_MARGIN,
+};

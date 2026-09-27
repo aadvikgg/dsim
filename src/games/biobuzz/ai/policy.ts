@@ -12,8 +12,6 @@ import {
   BB_AI_GRAB_TOL,
   BB_AI_LZ_GUARD,
   BB_AI_PIN_DECISIONS,
-  BB_AI_ROBOT_CLEAR,
-  BB_AI_SWITCH_FRAC,
   BB_AI_TARGET_COOLDOWN,
   BB_AI_TURN_GAIN,
   BB_AI_WALL_NEAR,
@@ -52,15 +50,11 @@ import {
   BB_AI_AUTO_MARGIN,
   BB_AI_CLUSTER_R,
   BB_AI_CONTACT,
-  BB_AI_DUMP_D,
   BB_AI_ESCAPE_LEN,
   BB_AI_LAST_CALL_S,
-  BB_AI_MAX_CLOSING,
   BB_AI_NECTAR_FETCH_S,
   BB_AI_PLACE_S,
   BB_AI_TIP_PRIOR_S,
-  BB_AI_TOUR_MARGIN,
-  BB_AI_PARK_MARGIN,
   BB_AI_ROLL_LEAD,
   BB_AI_ROLL_V,
   BB_AI_ROLL_VZ,
@@ -68,7 +62,8 @@ import {
   BB_AI_STUCK_MOVE,
   BB_AI_STUCK_STICK,
   BB_AI_STUCK_WINDOW,
-  BB_AI_TURRET_D,
+  BB_AI_WEIGHTS,
+  type BbAiWeights,
 } from './tuning';
 
 /**
@@ -129,6 +124,8 @@ type Mode = 'collect' | 'score' | 'park' | 'place' | 'defend' | 'wait';
 
 /** one bot's private memory — the thing that must never be on the `World`. */
 interface BbBotMemory {
+  /** this seat's weights (`BB_AI_WEIGHTS` unless a harness passed its own) */
+  w: BbAiWeights;
   rngState: number;
   /** a per-seat salt for the stable choice noise (`noiseOf`) */
   salt: number;
@@ -213,10 +210,12 @@ export function createBiobuzzBot(
   robotId: number,
   tier: string,
   seed: number,
+  weights?: Partial<BbAiWeights>,
 ): BotSeat & { peek(): string } {
   void world;
   const t = bbTierSpec(tier);
   const mem: BbBotMemory = {
+    w: weights ? { ...BB_AI_WEIGHTS, ...weights } : BB_AI_WEIGHTS,
     // MIX THE SEAT INTO THE SEED, so two seats handed one match seed do not dither in lockstep.
     rngState: (Math.imul(seed | 0, 0x9e3779b1) ^ Math.imul(robotId + 1, 0x85ebca6b)) | 0,
     salt: (Math.imul(seed | 0, 0x27d4eb2f) ^ Math.imul(robotId + 7, 0x165667b1)) >>> 0,
@@ -295,6 +294,7 @@ function noiseOf(mem: BbBotMemory, id: number): number {
 
 interface Ctx {
   world: World;
+  w: BbAiWeights;
   r: RobotState;
   t: BbAiTierSpec;
   bb: BiobuzzState;
@@ -383,11 +383,12 @@ function perceive(world: World, r: RobotState, t: BbAiTierSpec, bb: BiobuzzState
   }
   const aimCell = hiveCellTarget(a, aimSide);
   const needFromHopper = aimSide === taking && !tipping ? hopperTipCount(r.hopper, load.pollen + inFlight, load.nectar) : Infinity;
-  const dBase = turreted ? BB_AI_TURRET_D : BB_AI_DUMP_D;
+  const dBase = turreted ? [mem.w.turretD0, mem.w.turretD1] : [mem.w.dumpD0, mem.w.dumpD1];
   const carriesNectar = bbCarriesNectar(launcher);
   const lift = bbLiftOf(r.spec) !== null;
   const ctx: Ctx = {
     world,
+    w: mem.w,
     r,
     t,
     bb,
@@ -518,7 +519,7 @@ function decideCommand(world: World, r: RobotState, t: BbAiTierSpec, mem: BbBotM
       !mem.last.fire;
     mem.stall = still ? mem.stall + 1 : 0;
     mem.stallHopper = r.hopper.length;
-    if (mem.stall >= 20) {
+    if (mem.stall >= mem.w.stall) {
       mem.stall = 0;
       if (mem.mode === 'collect' && mem.target !== null) giveUpOn(world, mem, mem.target);
       else mem.badStands.push({ x: r.pos.x, y: r.pos.y, until: mem.decisions + BB_AI_STAND_COOLDOWN });
@@ -537,7 +538,7 @@ function decideCommand(world: World, r: RobotState, t: BbAiTierSpec, mem: BbBotM
    */
   const herded = r.hopper.length >= c.cap ? herdedBy(c) : null;
   mem.herd = herded ? mem.herd + 1 : 0;
-  if (herded && mem.herd >= 12) {
+  if (herded && mem.herd >= mem.w.herd) {
     mem.herd = 0;
     const dx = r.pos.x - herded.x;
     const dy = r.pos.y - herded.y;
@@ -610,8 +611,8 @@ function chooseMode(c: Ctx, mem: BbBotMemory, cands: Cand[]): Mode {
   const { r, t } = c;
   const hop = r.hopper.length;
   // THE PARKS — the clock every driver can see, and the drive the bot would need
-  if (c.auto && t.autoPark && c.phaseLeft <= parkEta(c) + BB_AI_PARK_MARGIN) return 'park';
-  if (c.teleop && t.parks && c.phaseLeft <= parkEta(c) + BB_AI_PARK_MARGIN) {
+  if (c.auto && t.autoPark && c.phaseLeft <= parkEta(c) + c.w.parkMargin) return 'park';
+  if (c.teleop && t.parks && c.phaseLeft <= parkEta(c) + c.w.parkMargin) {
     /**
      * …UNLESS THE HOPPER HOLDS A TIP. A TIP is 20 and PARK is 5, and a swing still moving at the
      * buzzer is scored as the TIP it must become (§10.5 A; `score.ts`), so a bot that can reach
@@ -685,7 +686,7 @@ function hoardingNow(c: Omit<Ctx, 'hoard'>, world: World, mem: BbBotMemory): boo
   if (plan.value <= 0) return false;
   // once started it runs: the tour was worth it when it began and the NECTAR is already aboard
   if (mem.mode === 'place' || (mem.mode === 'wait' && held > 0)) return true;
-  if (left > plan.time + BB_AI_TOUR_MARGIN) return false;
+  if (left > plan.time + mem.w.tourMargin) return false;
   return plan.value / Math.max(1, plan.time) > tipRate(c, mem);
 }
 
@@ -800,10 +801,10 @@ function candidates(c: Ctx, mem: BbBotMemory): Cand[] {
     if (!ap) continue;
     if (auto && c.side * ap.goal.x < c.fp.circ * 0.75 + BB_AI_AUTO_MARGIN) continue;
     const dist = routeLength(r.pos, ap.goal, c.fp.narrow + 1);
-    let cost = dist / c.vmax + Math.abs(wrapAngle(ap.heading - r.heading)) / c.turnRate * 0.6;
+    let cost = dist / c.vmax + Math.abs(wrapAngle(ap.heading - r.heading)) / c.turnRate * c.w.turnW;
     // PLAN THE NEXT LEG: the element picked last before a volley is the one the robot drives to
     // the envelope FROM
-    if (stand) cost += (lastPick ? 0.9 : 0.25) * (hyp(stand.x - bp.x, stand.y - bp.y) / c.vmax);
+    if (stand) cost += (lastPick ? c.w.legLast : c.w.legOther) * (hyp(stand.x - bp.x, stand.y - bp.y) / c.vmax);
     // CLUSTERS: a pile is cheaper per element than a scatter
     let near = 0;
     let tight = 0;
@@ -814,27 +815,27 @@ function candidates(c: Ctx, mem: BbBotMemory): Cand[] {
       if (dq < 8) tight++;
     }
     const room = c.cap - r.hopper.length;
-    cost -= Math.min(4, near) * 0.12 * Math.min(1, room - 1);
+    cost -= Math.min(4, near) * c.w.cluster * Math.min(1, room - 1);
     /**
      * …but NOT a pile the hopper cannot take. Driving into five elements with room for one is
      * CONTROL of six: G407's hold clock LEAKS rather than clearing, so the ones the roller shoved
      * aside stay counted for seconds after they stop touching, and a sweep through a pile measured
      * at six-plus for three seconds with nothing within 25 in of the chassis — a MAJOR.
      */
-    if (tight + 1 > room) cost += (tight + 1 - room) * 0.6;
+    if (tight + 1 > room) cost += (tight + 1 - room) * c.w.overRoom;
     // NECTAR is worth more to a build that carries it: three in a cell make a TIP cost three POLLEN
-    if (b.color === c.a) cost -= c.hoard ? 2 : 0.4;
+    if (b.color === c.a) cost -= c.hoard ? 2 : c.w.nectar;
     // 2v2: an element the PARTNER is clearly closer to is the partner's
     if (t.coordinates) {
       for (const p of c.partners) {
         if (p.hopper.length >= bbHopperCap(p.spec)) continue;
         const pd = hyp(bp.x - p.pos.x, bp.y - p.pos.y);
-        if (pd + 6 < pre[i].d * 0.8) cost += 2.5;
+        if (pd + 6 < pre[i].d * 0.8) cost += c.w.partner;
       }
     }
     // an opponent sitting on it will get there first, or shove us off it
     for (const o of c.opponents) {
-      if (hyp(bp.x - o.pos.x, bp.y - o.pos.y) < 16) cost += 1.2;
+      if (hyp(bp.x - o.pos.x, bp.y - o.pos.y) < 16) cost += c.w.opponent;
     }
     // the misjudgement is of the elements it is NOT already going for: once picked, an element is
     // judged honestly, or a re-rolled estimate turns a worse choice into no choice at all (a tank
@@ -920,7 +921,7 @@ function collectRoute(c: Ctx, mem: BbBotMemory, buttons: BbAiButtons, cands: Can
   // cheaper — a greedy rule re-evaluated every decision does not converge
   const held = mem.target !== null ? cands.find((x) => x.ball.id === mem.target) : undefined;
   if (held && pick && held.ball.id !== pick.ball.id) {
-    if (pick.cost > held.cost * BB_AI_SWITCH_FRAC - 0.2 || pick.cost > held.cost - 0.6) pick = held;
+    if (pick.cost > held.cost * c.w.switchFrac - 0.2 || pick.cost > held.cost - c.w.switchAbs) pick = held;
   }
   // REACTION DELAY on a target change
   if (pick && held && pick.ball.id !== held.ball.id && t.react > 0) {
@@ -1224,7 +1225,7 @@ function turretFire(c: Ctx): boolean {
   const toCell = { x: cell.pos.x - r.pos.x, y: cell.pos.y - r.pos.y };
   const d = hyp(toCell.x, toCell.y);
   const closing = d > 1e-6 ? (r.vel.x * toCell.x + r.vel.y * toCell.y) / d : 0;
-  if (closing > BB_AI_MAX_CLOSING) return false;
+  if (closing > c.w.maxClosing) return false;
   if (!t.moveFire && hyp(r.vel.x, r.vel.y) > 12) return false;
   // the flower hoard: a double turret fires NECTAR out of its second turret on the same beat,
   // so a bot keeping its NECTAR for the flowers does not hold the trigger with any aboard
@@ -1400,7 +1401,7 @@ function route(
   // OTHER ROBOTS — radial-heavy, tangent-light, scaled to both chassis
   for (const o of c.world.robots) {
     if (o.id === r.id) continue;
-    const clear = c.fp.circ * 0.8 + footprintOf(o.spec).circ * 0.8 + BB_AI_ROBOT_CLEAR;
+    const clear = c.fp.circ * 0.8 + footprintOf(o.spec).circ * 0.8 + c.w.robotClear;
     const ox = r.pos.x - o.pos.x;
     const oy = r.pos.y - o.pos.y;
     const d = hyp(ox, oy);
@@ -1412,11 +1413,11 @@ function route(
     const ny = oy / d;
     const toward = -(nx * dirX + ny * dirY);
     if (toward < -0.2 && d > clear * 0.6) continue; // it is behind us: ignore
-    dirX += nx * w * 1.2;
-    dirY += ny * w * 1.2;
+    dirX += nx * w * c.w.robotPush;
+    dirY += ny * w * c.w.robotPush;
     const sign = -ny * dirX + nx * dirY >= 0 ? 1 : -1;
-    dirX += -ny * sign * w * 0.6;
-    dirY += nx * sign * w * 0.6;
+    dirX += -ny * sign * w * c.w.robotTan;
+    dirY += nx * sign * w * c.w.robotTan;
   }
   // IN AUTO nothing — not a robot push, not a tangent — steers toward the centre line near it,
   // and a chassis that has DRIFTED toward it (an x-drive sliding, a shove) is steered back out:
@@ -1437,7 +1438,7 @@ function route(
   // SPEED: a braking profile the drivetrain can stop on, with one decision of look-ahead
   const v = hyp(r.vel.x, r.vel.y);
   const stopDist = Math.max(0, dist - arriveTol * 0.5 - v * SIM_DT * BB_AI_DECIDE_TICKS);
-  const vWant = Math.min(c.vmax, Math.sqrt(2 * c.accel * 0.55 * stopDist) + 6);
+  const vWant = Math.min(c.vmax, Math.sqrt(2 * c.accel * c.w.brake * stopDist) + 6);
   let speed = clamp(vWant / Math.max(1, c.vmax / t.speedCap), 0.12, t.speedCap);
 
   let heading = wantHeading;
