@@ -1,3 +1,15 @@
+# HANDOFF — 2026-09-27 (history rewritten; the lag fix on main with contact + BIOBUZZ prediction)
+
+**State: pushed on `main` and `alpha`.** `build`, `server:check`, `docaudit`, `uiaudit`, `bundleaudit`, `test:mm`, `dbtest`, `npm test` (shared + BIOBUZZ) pass. ⚠️ **SERVER CHANGE not yet deployed to production:** `HOLD_TICKS` 15 → 36 (`server/room.ts`) and the DB-integrity fixes with migration 0054 (#87). Deploy from a `main` worktree with `./scripts/fly-deploy.sh` when the owner says so.
+
+- ⚠️ **THE WHOLE HISTORY WAS REWRITTEN** to remove every Claude signature (owner). Every hash quoted below this section is pre-rewrite and will not resolve on origin; match by subject. A checkout or worktree made before today still holds the old history: never push one of its branches. Backup bundle: `D:/Projects/dsim-backup-2026-09-27.bundle`. `claude/*` branches were renamed without the prefix, PRs #90–#96 are now #97–#103.
+- **Lag fix (was #90, now #97):** the client runs ahead by the round trip (`src/net/leadControl.ts`), steps online in rAF, and the server holds a quiet command 36 ticks. Inputs land on their tick 100% (was ~1%), judder ~10% → ~0%, input lag −50 to −170 ms. Industry-standard (client ahead by ~RTT/2 + a frame, reached by nudging the sim rate).
+- **What running ahead exposed, fixed in the same push:**
+  - 2D rooms: a remote robot near yours is drawn from the prediction, and held balls ride the robot as drawn (`src/net/contactDraw.ts`). Drawn overlap in contact p95 3.4–4.7 in → 0.2–0.8 in.
+  - BIOBUZZ: both 3D predictors step the other robots on their held commands (FULL as dynamic bodies, LIGHT with `separateLight`), and FULL carries every MOVING element (owner: "balls ... laggy and behind"; median 7–8 → 2–3 ticks). FULL contact correction p95 0.7–1.3 → 0.2–0.3 in.
+- **Known leftover:** LIGHT (slow machines) has no solver, so its contact corrections are p95 ~3 in against ~1.4 before, though its drawn overlap went 2.0 → 0.04 in. Elements seated in a HIVE/FLOWER stay on the interpolation clock with their tray.
+- **Measurement harness** (real `GameController` + `Room` on a virtual clock over modelled links; before/after on the same seeds) lives in the session scratchpad, not the repo. Reconcile CPU is now 1–3 ms per snapshot (was 0.3).
+
 # HANDOFF — 2026-09-27c (dsim-alpha redeployed; Vercel alpha still needs the owner)
 
 **State.** `f765925f` (= `origin/alpha`) is on **dsim-alpha**: `/health` ok, machine `87e003b021d278` 1/1, so online bot seats run the 09-27b policy. The deploy fetched the tarballs from `Horizon-36596/zenith-dev@dsim-vendor` with the gh CLI token in the shell only; all three matched the lockfile, so the vendor branch is correct. The machine is now `shared-cpu-2x:1024MB` (what `fly.alpha.toml` says). Before this deploy it was `performance-1x:2048MB`.
