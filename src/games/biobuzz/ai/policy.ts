@@ -45,7 +45,7 @@ import {
 } from '../robot';
 import { bbKindIndex, bbParkedNow } from '../score';
 import { bbOwnSide } from '../start';
-import type { BbCellSide, BiobuzzState, ScoreTarget } from '../state';
+import { biobuzzPhysics, type BbCellSide, type BiobuzzState, type ScoreTarget } from '../state';
 import { OBSTACLES, envelopeStand, footprintOf, insideFor, nextWaypoint, poseClear, polarOf, routeLength, type Footprint } from './geom';
 import { bbTierSpec, type BbAiTierSpec } from './tiers';
 import {
@@ -61,6 +61,9 @@ import {
   BB_AI_TIP_PRIOR_S,
   BB_AI_TOUR_MARGIN,
   BB_AI_PARK_MARGIN,
+  BB_AI_ROLL_LEAD,
+  BB_AI_ROLL_V,
+  BB_AI_ROLL_VZ,
   BB_AI_STAND_COOLDOWN,
   BB_AI_STUCK_MOVE,
   BB_AI_STUCK_STICK,
@@ -102,7 +105,8 @@ import {
  * Positions and the DERIVED lists, and nothing else:
  *   `world.match.phase` / `.phaseTimeLeft`      the clock every driver can see
  *   `world.robots[*]`  pos, heading, vel, alliance, spec, hopper, turret yaw/pitch
- *   `world.balls[*]`   pos, z, state.kind (+ `by` on a flight), color
+ *   `world.balls[*]`   pos, vel, z, vz, state.kind (+ `by` on a flight), color
+ *   `world.biobuzz.spill`  whether a spilled element has touched anything yet (G409)
  *   `world.biobuzz`    `hives[a].up/tipping/released/contents`, `flowers[i].stack`,
  *                      `nectarDue`, `nectarStock`
  * That list is what lets ONE policy drive under BOTH physics — `derive.ts` fills the same fields
@@ -751,10 +755,26 @@ function candidates(c: Ctx, mem: BbBotMemory): Cand[] {
   const wantPollen = !c.hoard;
   const wantNectar = c.carriesNectar;
   const auto = c.auto || t.homeOnly;
-  const pre: { b: Artifact; d: number }[] = [];
+  const pre: { b: Artifact; d: number; p: Vec2 }[] = [];
+  const rolling = biobuzzPhysics(world) === '3d';
   for (const b of world.balls) {
-    if (b.state.kind !== 'ground') continue;
     if (b.z > BB3_INTAKE_Z) continue;
+    let p = b.pos;
+    if (b.state.kind !== 'ground') {
+      /**
+       * A ROLLING ELEMENT IS AN ELEMENT. Under the 3D solve a TIP's spill stays `flight` for ~2.8 s
+       * after the release (measured over 548 spilled elements: bouncing and rolling on the tiles,
+       * mean 50–58 in out from the HIVE, sd ~20), and the intake takes a low flight element in 3D
+       * (`bbIntakeAct`'s `lowFlight`). A policy that only read `ground` was blind to the most
+       * contested pile on the field for three seconds after every TIP. Low, slow, and already
+       * off the tray — one still carrying its spill tag has touched nothing yet, and touching it
+       * first is G409 — and aimed where it will be a moment from now.
+       */
+      if (!rolling || b.state.kind !== 'flight') continue;
+      if (Math.abs(b.vz) > BB_AI_ROLL_VZ || hyp(b.vel.x, b.vel.y) > BB_AI_ROLL_V) continue;
+      if (c.bb.spill && c.bb.spill[b.id] !== undefined) continue;
+      p = insideFor({ x: b.pos.x + b.vel.x * BB_AI_ROLL_LEAD, y: b.pos.y + b.vel.y * BB_AI_ROLL_LEAD }, BB_POLLEN_R);
+    }
     const nectar = b.color === 'red' || b.color === 'blue';
     if (nectar ? !wantNectar : !wantPollen) continue;
     if (!bbIntakeAccepts(r.spec, r.alliance, b.color)) continue;
@@ -766,7 +786,7 @@ function candidates(c: Ctx, mem: BbBotMemory): Cand[] {
     if (until !== undefined && mem.decisions < until) continue;
     // an element sitting in THIS alliance's GARDEN scores 1 at the end; leave it there late
     if (c.matchLeft < 12 && inOwnGarden(b, c.a)) continue;
-    pre.push({ b, d: hyp(b.pos.x - r.pos.x, b.pos.y - r.pos.y) });
+    pre.push({ b, d: hyp(p.x - r.pos.x, p.y - r.pos.y), p });
   }
   if (pre.length === 0) return [];
   pre.sort((x, y) => x.d - y.d || x.b.id - y.b.id);
@@ -775,20 +795,21 @@ function candidates(c: Ctx, mem: BbBotMemory): Cand[] {
   const stand = t.lookahead ? standFor(c, mem, c.aimCell) : null;
   for (let i = 0; i < pre.length && out.length < 10; i++) {
     const b = pre[i].b;
-    const ap = approach(c, b.pos, b.id === mem.apId ? mem.apPhi : undefined);
+    const bp = pre[i].p;
+    const ap = approach(c, bp, b.id === mem.apId ? mem.apPhi : undefined);
     if (!ap) continue;
     if (auto && c.side * ap.goal.x < c.fp.circ * 0.75 + BB_AI_AUTO_MARGIN) continue;
     const dist = routeLength(r.pos, ap.goal, c.fp.narrow + 1);
     let cost = dist / c.vmax + Math.abs(wrapAngle(ap.heading - r.heading)) / c.turnRate * 0.6;
     // PLAN THE NEXT LEG: the element picked last before a volley is the one the robot drives to
     // the envelope FROM
-    if (stand) cost += (lastPick ? 0.9 : 0.25) * (hyp(stand.x - b.pos.x, stand.y - b.pos.y) / c.vmax);
+    if (stand) cost += (lastPick ? 0.9 : 0.25) * (hyp(stand.x - bp.x, stand.y - bp.y) / c.vmax);
     // CLUSTERS: a pile is cheaper per element than a scatter
     let near = 0;
     let tight = 0;
     for (const q of pre) {
       if (q.b.id === b.id) continue;
-      const dq = hyp(q.b.pos.x - b.pos.x, q.b.pos.y - b.pos.y);
+      const dq = hyp(q.p.x - bp.x, q.p.y - bp.y);
       if (dq < BB_AI_CLUSTER_R) near++;
       if (dq < 8) tight++;
     }
@@ -807,13 +828,13 @@ function candidates(c: Ctx, mem: BbBotMemory): Cand[] {
     if (t.coordinates) {
       for (const p of c.partners) {
         if (p.hopper.length >= bbHopperCap(p.spec)) continue;
-        const pd = hyp(b.pos.x - p.pos.x, b.pos.y - p.pos.y);
+        const pd = hyp(bp.x - p.pos.x, bp.y - p.pos.y);
         if (pd + 6 < pre[i].d * 0.8) cost += 2.5;
       }
     }
     // an opponent sitting on it will get there first, or shove us off it
     for (const o of c.opponents) {
-      if (hyp(b.pos.x - o.pos.x, b.pos.y - o.pos.y) < 16) cost += 1.2;
+      if (hyp(bp.x - o.pos.x, bp.y - o.pos.y) < 16) cost += 1.2;
     }
     // the misjudgement is of the elements it is NOT already going for: once picked, an element is
     // judged honestly, or a re-rolled estimate turns a worse choice into no choice at all (a tank

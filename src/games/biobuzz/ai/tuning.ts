@@ -90,3 +90,9 @@ export const BB_AI_TOUR_MARGIN = 3;
 
 /** the prior on a bot's own TIP rate — one TIP per this many seconds (`tipRate`) */
 export const BB_AI_TIP_PRIOR_S = 12;
+
+/** ROLLING ELEMENTS (3D, `candidates`): a low `flight` element slower than `V` (in/s) in plan and
+ * `VZ` vertically is collectable, aimed `LEAD` seconds ahead along its roll */
+export const BB_AI_ROLL_V = 60;
+export const BB_AI_ROLL_VZ = 15;
+export const BB_AI_ROLL_LEAD = 0.3;
