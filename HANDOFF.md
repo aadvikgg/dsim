@@ -1,4 +1,16 @@
-# HANDOFF — 2026-09-27f (BIOBUZZ 3D: NECTAR no longer wedges behind the hive; SIM_PATCH 2)
+# HANDOFF — 2026-09-27g (Zenith autos: gated Zenith is live, alpha Vercel build retried)
+
+**State: pushed on `alpha`, NOT on `main`.** Docs only; tests not run. This push is also what re-runs the alpha Vercel build now that the owner has entered `ZENITH_VENDOR_TOKEN` (an env edit alone does not rebuild).
+
+- **Zenith with host mode is live at https://zenith-dev-xi.vercel.app/**, behind Zenith's password page. That is the `VITE_ZENITH_URL` for Preview on the `alpha` branch. `/?host=dsim` keeps the `host=dsim` through login.
+- **The vendor fetch works against the real GitHub API.** `scripts/fetch-zenith.mjs` with a read token downloaded all three tarballs, each `integrity ok` against this lockfile. So an HTTP 404 in the Vercel build means the owner's token cannot see the vendor repository (fine-grained, resource owner Horizon-36596, Contents: read, org approval if the org requires it), not a script, ref or lockfile problem.
+- The private vendor repository's name is removed from the 09-27b and 09-27c sections below (this repository is public). `main`'s HANDOFF still names it in 09-27b; it goes away when `main` next takes `alpha`.
+- **Open:**
+  1. The alpha build log should show three `fetch-zenith: … integrity ok` lines and a green build. If `VITE_ZENITH_URL` is not set on Preview/`alpha`, the build still goes green but New in Zenith opens the public Zenith, which has no host mode.
+  2. End-to-end on https://alpha.playdsim.com: BIOBUZZ → Configure → Match → Autonomous → New in Zenith (allow popups) → password → "Editing for DSIM" → start pose on a wall in your own half, add steps → Save to DSIM (Ctrl S) → "Saved … from Zenith" → Play it in AUTO on, Solo practice, Enter.
+  3. Online custom rooms: `dsim-alpha` already runs with the Zenith packages (09-27c). Another Fly deploy is only needed for a server change.
+
+# 2026-09-27f (BIOBUZZ 3D: NECTAR no longer wedges behind the hive; SIM_PATCH 2)
 
 **State: pushed on `alpha` (d3282ba4), NOT on `main`.** `npm test` (5215), `build`, `server:check`, `docaudit`, `bundleaudit` pass. `dsim-alpha` DEPLOYED from d3282ba4, `/health` ok, one machine. Production not deployed: that needs the owner's go, and main has to take the commit first.
 
@@ -39,7 +51,7 @@
 
 # 2026-09-27b (BIOBUZZ 3D: an element on the floor in a FLOWER's retrieval opening is not in the FLOWER)
 
-**State: pushed on `main` and `alpha`; DEPLOYED 2026-09-27** to production (announced 5 min, all 8 machines healthy) and to `dsim-alpha`. `npm test`, `build`, `server:check` pass. Silent patch: no patch notes, no `SIM_VERSION` bump (owner). The alpha deploy needs `ZENITH_VENDOR_REPO=Horizon-36596/zenith-dev` with the token from `.env`.
+**State: pushed on `main` and `alpha`; DEPLOYED 2026-09-27** to production (announced 5 min, all 8 machines healthy) and to `dsim-alpha`. `npm test`, `build`, `server:check` pass. Silent patch: no patch notes, no `SIM_VERSION` bump (owner). The alpha deploy needs the `ZENITH_VENDOR_*` variables with the token from `.env`.
 
 - **Bug:** in 3D, `derive.ts` adopted any element whose centre was inside a FLOWER's bore, so a POLLEN or NECTAR pushed across the tiles into the retrieval opening became the stack's bottom element. `flowerStackZ` then seats a bottom NECTAR on the middle ring, so a floor NECTAR paid the 5-point Bottom NECTAR Bonus, could take ownership, and billed a false G410 MAJOR during the lock.
 - **Fix:** a flower latch like the cells' — an element stays in the flower it is already tagged into, and a new one is admitted only while its centre is above the opening's top (`BB_FLOWER_RETRIEVE_Z[1]`), i.e. it came in through the top (§10.5.2). Smoke: FLOWER3D "pushed into the retrieval opening along the floor" (bonus/owner/stack) and "bills no G410", both failing before the fix.
@@ -59,9 +71,9 @@
 
 # HANDOFF — 2026-09-27c (dsim-alpha redeployed; Vercel alpha still needs the owner)
 
-**State.** `f765925f` (= `origin/alpha`) is on **dsim-alpha**: `/health` ok, machine `87e003b021d278` 1/1, so online bot seats run the 09-27b policy. The deploy fetched the tarballs from `Horizon-36596/zenith-dev@dsim-vendor` with the gh CLI token in the shell only; all three matched the lockfile, so the vendor branch is correct. The machine is now `shared-cpu-2x:1024MB` (what `fly.alpha.toml` says). Before this deploy it was `performance-1x:2048MB`.
+**State.** `f765925f` (= `origin/alpha`) is on **dsim-alpha**: `/health` ok, machine `87e003b021d278` 1/1, so online bot seats run the 09-27b policy. The deploy fetched the tarballs from the private vendor repository (`dsim-vendor` ref) with the gh CLI token in the shell only; all three matched the lockfile, so the vendor branch is correct. The machine is now `shared-cpu-2x:1024MB` (what `fly.alpha.toml` says). Before this deploy it was `performance-1x:2048MB`.
 
-**Still blocked: the Vercel alpha build.** Nobody is signed into Vercel here, and the vendor token has to be created and entered by the owner. Open steps: (1) a fine-grained token, Contents: read on `zenith-dev` only; (2) Preview env on the `alpha` branch: `ZENITH_VENDOR_REPO=Horizon-36596/zenith-dev`, `ZENITH_VENDOR_TOKEN`, `VITE_ZENITH_URL`; (3) redeploy alpha. `zenith-dev` has no GitHub deployment records, so the gated Zenith URL for `VITE_ZENITH_URL` has to come from the owner.
+**Still blocked: the Vercel alpha build.** Nobody is signed into Vercel here, and the vendor token has to be created and entered by the owner. Open steps: (1) a fine-grained token, Contents: read on the vendor repository only; (2) Preview env on the `alpha` branch: the `ZENITH_VENDOR_*` variables, `ZENITH_VENDOR_TOKEN`, `VITE_ZENITH_URL`; (3) redeploy alpha. The vendor repository has no GitHub deployment records, so the gated Zenith URL for `VITE_ZENITH_URL` has to come from the owner.
 
 ---
 
