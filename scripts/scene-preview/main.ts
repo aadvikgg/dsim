@@ -63,7 +63,7 @@ import { hiveCellLocalBox, hivePivotX } from '../../src/games/biobuzz/sim3d/bodi
 import { hiveTiltAngle } from '../../src/games/biobuzz/sim3d/hive3d';
 import { rotate2 } from '../../src/games/biobuzz/sim3d/math3';
 import { BB3_HIVE_PIVOT_Z, BB_HIVE_UP_STAGED, BB_POLLEN_R } from '../../src/games/biobuzz/config';
-import { setGraphicsPreset } from '../../src/games/biobuzz/graphics/settings';
+import { GFX_TIERS, setGraphicsPreset, type GraphicsTier } from '../../src/games/biobuzz/graphics/settings';
 import { BB_TIP_SWING_S } from '../../src/games/biobuzz/hive';
 import { bbFootprint } from '../../src/games/biobuzz/robot';
 
@@ -98,8 +98,8 @@ const parkAtFlower = urlParams.get('park') === 'flower';
 const parkOpen = urlParams.get('park') === 'open'; // robot 0 alone on open tiles, facing −x
 const deployRamp = urlParams.get('ramp') === '1';
 // DRIVETRAIN PICTURES (2026-09-21, the goBILDA wheel pass): `?drivetrain=mecanum|tank|swerve|
-// xdrive|butterfly` builds every robot on that drivetrain, and `&gfx=low|medium|high|ultra` picks
-// a graphics COLUMN before the scene is created — which is how the wheels' two tessellation
+// xdrive|butterfly` builds every robot on that drivetrain, and `&gfx=<tier>` (any of `GFX_TIERS`:
+// low, medium, high, ultra, extreme) picks a graphics COLUMN before the scene is created — which is how the wheels' two tessellation
 // levels (`bbWheelDetail`) can be photographed side by side. `&tank=1` drops a butterfly's
 // traction set instead of its mecanum set.
 const drivetrainParam = urlParams.get('drivetrain');
@@ -188,8 +188,9 @@ async function main(): Promise<void> {
   // the scene mounted would only take effect on the next rebuild. Writing the real store (rather
   // than a private override) is also what makes the two tiers photographable through the same
   // path a player's own preset takes.
-  if (gfxParam === 'low' || gfxParam === 'medium' || gfxParam === 'high' || gfxParam === 'ultra') {
-    setGraphicsPreset(gfxParam);
+  // read off `GFX_TIERS`, not a literal list, so a new column is photographable the day it lands
+  if ((GFX_TIERS as readonly string[]).includes(gfxParam ?? '')) {
+    setGraphicsPreset(gfxParam as GraphicsTier);
     status(`graphics preset forced to ${gfxParam}`);
   }
   status('booting 2D physics...');

@@ -305,14 +305,20 @@ import { createCameras, setCameraTuning, setDriverHeightIn } from '../../src/gam
 import type { SceneFrame } from '../../src/games/module';
 import { viewAngleOf } from '../../src/sim/field';
 import {
+  GFX_AUTO_MAX_TIER,
+  GFX_NOT_OFFERED,
   GFX_PIXEL_BUDGET,
   GFX_PRESETS,
+  GFX_PRESETS_ALL,
   GFX_TIERS,
   getGraphics,
   resetGraphicsToAuto,
+  setGraphicsPreset,
   setGraphicsTier,
   coerceGraphicsSettings,
+  coerceGraphicsState,
   coerceMaxFps,
+  contextLossTier,
   effectivePixelRatio,
   fpsFromSliderPos,
   frameIntervalMs,
@@ -326,8 +332,12 @@ import {
   MAX_FPS_UNLIMITED,
   MAX_FPS_VSYNC,
   msaaSamples,
+  shadowBlurRadius,
+  shadowBlurSamples,
   shadowMapSize,
   sliderPosFromFps,
+  wantsPost,
+  type GraphicsTier,
 } from '../../src/games/biobuzz/graphics/settings';
 import {
   SLIP_MS,
@@ -3399,10 +3409,98 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
     GFX_TIERS.every((t) => GFX_PRESETS[t].minimap === false),
     GFX_TIERS.map((t) => `${t}=${GFX_PRESETS[t].minimap}`).join(' '),
   );
-  check('no preset turns on a feature this build does not implement (AO)', GFX_TIERS.every((t) => GFX_PRESETS[t].ao === 'off'));
+  // A COUPLING CHECK, not a fixed list: GFX_NOT_OFFERED is a claim about every OTHER row in the
+  // table (\u00a74.4 minus this one list), so it is checked against the table rather than transcribed
+  // a second time. AO moved off the list when Extreme started implementing it (2026-09-27); SMAA
+  // is still refused, and still no `aa` value equal to it.
+  check(
+    'GFX_NOT_OFFERED names a row iff no column enables it (SMAA still refused, AO no longer \u2014 Extreme turns it on)',
+    GFX_NOT_OFFERED.some((n) => n.label === 'SMAA') &&
+      !GFX_NOT_OFFERED.some((n) => n.label === 'Ambient occlusion') &&
+      GFX_TIERS.every((t) => (GFX_PRESETS[t].aa as string) !== 'smaa'),
+    GFX_NOT_OFFERED.map((n) => n.label).join(', '),
+  );
+  check(
+    'only Extreme turns ambient occlusion and bloom on',
+    GFX_TIERS.filter((t) => t !== 'extreme').every((t) => GFX_PRESETS[t].ao === 'off' && GFX_PRESETS[t].bloom === false) &&
+      GFX_PRESETS.extreme.ao === 'ssao' &&
+      GFX_PRESETS.extreme.bloom === true,
+  );
   check(
     'every preset is exactly itself (matchesPreset is the `custom` test and must not misfire)',
     GFX_TIERS.every((t) => matchesPreset(GFX_PRESETS[t], t)) && !matchesPreset({ ...GFX_PRESETS.high, shadows: 'off' }, 'high'),
+  );
+  // A TOGGLE MUST LAND ON CUSTOM, NEVER ON A NEIGHBOUR. If two columns differed in only one
+  // setting, flipping it would silently rename the tier (and re-budget it) instead of falling to
+  // `custom`, which is exactly the failure mode `GFX_PRESETS_ALL` was written to catch one level
+  // up (a preset the picker cannot even NAME) \u2014 this is the same argument about the table's rows.
+  {
+    const keys = Object.keys(GFX_PRESETS.low) as (keyof typeof GFX_PRESETS.low)[];
+    const diffs = (a: GraphicsTier, b: GraphicsTier): number => keys.filter((k) => GFX_PRESETS[a][k] !== GFX_PRESETS[b][k]).length;
+    const thin: string[] = [];
+    for (let i = 0; i < GFX_TIERS.length; i++) {
+      for (let j = i + 1; j < GFX_TIERS.length; j++) {
+        const d = diffs(GFX_TIERS[i], GFX_TIERS[j]);
+        if (d < 2) thin.push(`${GFX_TIERS[i]}/${GFX_TIERS[j]}: ${d}`);
+      }
+    }
+    check('every pair of tier columns differs in at least two settings', thin.length === 0, thin.join(', '));
+  }
+  check(
+    'Extreme differs from Ultra in renderScale, shadows, ao and bloom',
+    GFX_PRESETS.extreme.renderScale !== GFX_PRESETS.ultra.renderScale &&
+      GFX_PRESETS.extreme.shadows !== GFX_PRESETS.ultra.shadows &&
+      GFX_PRESETS.extreme.ao !== GFX_PRESETS.ultra.ao &&
+      GFX_PRESETS.extreme.bloom !== GFX_PRESETS.ultra.bloom,
+  );
+  check(
+    'wantsPost is false for every column except Extreme, and true for Extreme',
+    GFX_TIERS.filter((t) => t !== 'extreme').every((t) => !wantsPost(GFX_PRESETS[t])) && wantsPost(GFX_PRESETS.extreme),
+  );
+  check(
+    'wantsPost reads the SETTINGS, never the tier: a Custom branched from High with AO or bloom on still wants the chunk',
+    wantsPost({ ...GFX_PRESETS.high, ao: 'ssao' }) && wantsPost({ ...GFX_PRESETS.high, bloom: true }),
+  );
+  {
+    // A LOST CONTEXT drops Extreme-class SETTINGS, not the Extreme LABEL (review, 2026-09-27)
+    const st = (preset: GraphicsTier | 'custom' | 'auto', tier: GraphicsTier, over: Partial<typeof GFX_PRESETS.high> = {}) => ({
+      preset,
+      tier,
+      settings: { ...GFX_PRESETS[tier], ...over },
+    });
+    check('context loss: Extreme drops to Ultra', contextLossTier(st('extreme', 'extreme')) === 'ultra');
+    check(
+      'context loss: a Custom branched from Ultra with AO and Max shadows on drops to Ultra (its own column, without them)',
+      contextLossTier(st('custom', 'ultra', { ao: 'ssao', shadows: 'max' })) === 'ultra',
+    );
+    check(
+      'context loss: a Custom branched from High with bloom on drops to High, never UP to Ultra',
+      contextLossTier(st('custom', 'high', { bloom: true })) === 'high',
+    );
+    check(
+      'context loss: a Custom branched from Extreme with every heavy setting turned back off keeps the player’s settings',
+      contextLossTier(st('custom', 'extreme', { renderScale: 100, ao: 'off', bloom: false, shadows: 'soft', hfov: 110, maxFps: 144 })) === null,
+    );
+    check(
+      'context loss: every column below Extreme is left alone',
+      GFX_TIERS.filter((t) => t !== 'extreme').every((t) => contextLossTier(st(t, t)) === null),
+    );
+  }
+  // GFX_PRESETS_ALL ROUND TRIP. A literal preset list type-checks with a tier missing from it \u2014
+  // see the type's own note \u2014 so a stored Extreme reading back as `auto` is exactly the bug this
+  // catches, for every tier the table has, not just the newest one.
+  for (const t of GFX_TIERS) {
+    const out = coerceGraphicsState({ preset: t, tier: t, settings: GFX_PRESETS[t] });
+    check(
+      `coerceGraphicsState: a stored '${t}' reads back as '${t}', not 'auto'`,
+      out.preset === t && out.tier === t,
+      `${out.preset}/${out.tier}`,
+    );
+  }
+  check(
+    'GFX_PRESETS_ALL is auto, every tier, then custom \u2014 the exact set the picker and the coercer both trust',
+    GFX_PRESETS_ALL.length === GFX_TIERS.length + 2 && GFX_PRESETS_ALL[0] === 'auto' && GFX_PRESETS_ALL[GFX_PRESETS_ALL.length - 1] === 'custom',
+    GFX_PRESETS_ALL.join(', '),
   );
 
   // ---- the pixel budget actually binds ---------------------------------------------------
@@ -3417,8 +3515,23 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
     const ultra = effectivePixelRatio({ ...GFX_PRESETS.ultra }, 'ultra', 1280, 720, 1);
     check('a small window at 100 % is NOT capped (the budget is a ceiling, not a target)', Math.abs(ultra - 1) < 1e-9, String(ultra));
     check(
-      'the budgets are the spec table\u2019s own four numbers',
-      GFX_PIXEL_BUDGET.low === 0.6e6 && GFX_PIXEL_BUDGET.medium === 1.2e6 && GFX_PIXEL_BUDGET.high === 2.2e6 && GFX_PIXEL_BUDGET.ultra === 4.0e6,
+      'the budgets are the spec table\u2019s own five numbers',
+      GFX_PIXEL_BUDGET.low === 0.6e6 &&
+        GFX_PIXEL_BUDGET.medium === 1.2e6 &&
+        GFX_PIXEL_BUDGET.high === 2.2e6 &&
+        GFX_PIXEL_BUDGET.ultra === 4.0e6 &&
+        GFX_PIXEL_BUDGET.extreme === 8.3e6,
+    );
+    check('Extreme\u2019s budget sits above Ultra\u2019s (it is the tier meant to ask for more, not just look different)', GFX_PIXEL_BUDGET.extreme > GFX_PIXEL_BUDGET.ultra);
+    check('Extreme renders at 150 %', GFX_PRESETS.extreme.renderScale === 150);
+    const extreme1080 = effectivePixelRatio(GFX_PRESETS.extreme, 'extreme', 1920, 1080, 1);
+    check('a 1920\u00d71080 dpr-1 window at Extreme actually supersamples, past 1x', extreme1080 > 1, extreme1080.toFixed(3));
+    const extremeR4k = effectivePixelRatio(GFX_PRESETS.extreme, 'extreme', 3840, 2160, 2);
+    const px4k = 3840 * 2160 * extremeR4k * extremeR4k;
+    check(
+      'a 3840\u00d72160 dpr-2 window at Extreme is capped at the budget, not left at 3x',
+      px4k <= GFX_PIXEL_BUDGET.extreme * 1.001,
+      `${(px4k / 1e6).toFixed(2)} MP`,
     );
   }
 
@@ -3525,6 +3638,18 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
     'soft shadows reuse the high map size (they are a wider blur, not a fourth resolution)',
     shadowMapSize('soft') === shadowMapSize('high') && shadowMapSize('low') === 1024,
   );
+  check(
+    'max is its own 4096 map — twice soft/high’s texels per inch, not a fifth resolution shared with either',
+    shadowMapSize('max') === 4096 && shadowMapSize('soft') === 2048 && shadowMapSize('high') === 2048 && shadowMapSize('low') === 1024,
+  );
+  check(
+    'max blurs wider and with twice the taps — 8 elsewhere would band at a 4096 map’s finer texel',
+    shadowBlurRadius('max') > shadowBlurRadius('soft') &&
+      shadowBlurSamples('max') === 16 &&
+      shadowBlurSamples('soft') === 8 &&
+      shadowBlurSamples('high') === 8 &&
+      shadowBlurSamples('low') === 8,
+  );
 
   // ---- coercion: a stored blob from another build keeps what it can ------------------------
   {
@@ -3533,6 +3658,12 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
     check('coercion keeps a value it understands', out.shadows === 'off');
     check('coercion drops a value it does not (an `aa` from a build that offered SMAA)', out.aa === GFX_PRESETS.high.aa);
     check('coercion clamps rather than resets (render scale, FOV)', out.renderScale === 200 && out.hfov === 60, `${out.renderScale}/${out.hfov}`);
+    check('a stored {shadows: "max"} survives coercion — Extreme’s own value, not folded into soft', coerceGraphicsSettings({ shadows: 'max' }, GFX_PRESETS.high).shadows === 'max');
+    check(
+      'bloom round-trips as a boolean, both ways',
+      coerceGraphicsSettings({ bloom: true }, GFX_PRESETS.low).bloom === true && coerceGraphicsSettings({ bloom: false }, GFX_PRESETS.extreme).bloom === false,
+    );
+    check('junk in bloom falls back to the base column, same as any other boolean row', coerceGraphicsSettings({ bloom: 'yes' }, GFX_PRESETS.high).bloom === GFX_PRESETS.high.bloom);
     // THE FOV SLIDER WENT HORIZONTAL (owner, 2026-09-24: "keep human fov in mind"). A blob from
     // before carries a VERTICAL `fov`: the old default becomes the new one (an untouched preset
     // still reads as that preset), anything else is what it showed across a 16:9 screen, and
@@ -3572,7 +3703,38 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
       'an unrecognised string is not a guess, it is Medium/High by the machine around it',
       firstGuess({ ...base, renderer: '', cores: 2, memoryGb: 2 }) === 'medium' && firstGuess(base) === 'high',
     );
-    check('stepping clamps at both ends', stepTier('low', -1) === 'low' && stepTier('ultra', 1) === 'ultra' && stepTier('high', -1) === 'medium');
+    check(
+      'stepping clamps at both ends, and an explicit ceiling stops an up-step without walking a hand pick down',
+      stepTier('low', -1) === 'low' &&
+        stepTier('extreme', 1) === 'extreme' &&
+        stepTier('high', -1) === 'medium' &&
+        stepTier('ultra', 1, GFX_AUTO_MAX_TIER) === 'ultra' &&
+        stepTier('extreme', 1, GFX_AUTO_MAX_TIER) === 'extreme' &&
+        stepTier('extreme', -1) === 'ultra',
+    );
+    // AUTO NEVER PICKS EXTREME (`GFX_AUTO_MAX_TIER`'s own note). Every probe above, plus the top
+    // of the market: `deviceMemory` caps at 8 in the real API, so nothing in `firstGuess`'s inputs
+    // can tell a monster machine apart from a merely fast discrete GPU.
+    {
+      const monster: GpuProbe = { ...base, renderer: 'NVIDIA GeForce RTX 4090', memoryGb: 8, cores: 32, dpr: 1 };
+      const probes: GpuProbe[] = [
+        { ...base, renderer: 'Google SwiftShader', software: true },
+        { ...base, webgl2: false },
+        { ...base, renderer: 'NVIDIA GeForce RTX 4070' },
+        { ...base, renderer: 'NVIDIA GeForce RTX 4070', memoryGb: 4, cores: 4 },
+        { ...base, renderer: 'Intel(R) UHD Graphics 620' },
+        { ...base, renderer: 'Intel(R) UHD Graphics 620', dpr: 2 },
+        { ...base, renderer: '', cores: 2, memoryGb: 2 },
+        base,
+        monster,
+      ];
+      const offenders = probes.filter((p) => firstGuess(p) === 'extreme');
+      check(
+        'firstGuess never returns extreme, across every probe in this file and a monster machine',
+        offenders.length === 0,
+        String(offenders.length),
+      );
+    }
   }
 
   // ---- p95 is nearest-rank, and does not reorder the caller's buffer ----------------------
@@ -3624,6 +3786,19 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
       check('warm-up: comfortably inside the budget steps the preset UP one', getGraphics().tier === 'high', getGraphics().tier);
     }
 
+    // AUTO NEVER CLIMBS INTO EXTREME, even off a warm-up that would otherwise step up
+    {
+      setGraphicsTier('ultra', true);
+      const clock = { t: 0 };
+      const gov = createQualityGovernor(() => clock.t);
+      drive(gov, clock, 200, 3); // 3 ms frames: comfortably inside WARMUP_UP_MS
+      check(
+        'warm-up: an Auto device already at Ultra with 3 ms frames stays at Ultra, not Extreme',
+        getGraphics().tier === 'ultra' && getGraphics().preset === 'auto',
+        getGraphics().tier,
+      );
+    }
+
     // a HAND-PICKED preset is not moved by detection
     {
       setGraphicsTier('ultra', false);
@@ -3631,6 +3806,30 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
       const gov = createQualityGovernor(() => clock.t);
       drive(gov, clock, 200, 40);
       check('warm-up: a hand-picked preset is left alone', getGraphics().tier === 'ultra' && getGraphics().preset === 'ultra');
+    }
+
+    // a HAND-PICKED EXTREME is left alone by the warm-up too, good frames or bad
+    {
+      setGraphicsTier('extreme', false);
+      const clock = { t: 0 };
+      const gov = createQualityGovernor(() => clock.t);
+      drive(gov, clock, 200, 40);
+      check(
+        'warm-up: a hand-picked Extreme is left alone',
+        getGraphics().tier === 'extreme' && getGraphics().preset === 'extreme',
+      );
+    }
+
+    // AUTO, PICKED WHILE ON EXTREME, DROPS TO ULTRA — `setGraphicsPreset('auto')` clamps to the
+    // ceiling rather than leaving "Auto" sitting on a tier Auto would never have chosen itself.
+    {
+      setGraphicsTier('extreme', false);
+      setGraphicsPreset('auto');
+      check(
+        "setGraphicsPreset('auto') while on Extreme leaves the tier at Ultra, not Extreme",
+        getGraphics().tier === 'ultra' && getGraphics().preset === 'auto',
+        `${getGraphics().preset}/${getGraphics().tier}`,
+      );
     }
 
     // a warm-up with almost no frames in it decides nothing
@@ -3659,6 +3858,39 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
       drive(gov, clock, 600, 60);
       check('slip: and it fires ONCE, however bad it gets after', getGraphics().tier === once, getGraphics().tier);
       check('slip: it writes exactly one line, and the line says what happened', lines.filter((l) => /lowered/i.test(l)).length === 1, lines.join(' | '));
+    }
+
+    // THE SLIP RULE ON A HAND-PICKED EXTREME: it still lowers (§4.6's own exception — a
+    // measurement overrides a choice), but it lands on a NAMED Ultra, never back on Auto.
+    {
+      setGraphicsTier('extreme', false);
+      const clock = { t: 0 };
+      const lines: string[] = [];
+      const gov = createQualityGovernor(() => clock.t, (l) => lines.push(l));
+      drive(gov, clock, 200, 8); // clear the warm-up window; a hand pick is untouched either way
+      check('slip: a hand-picked Extreme survives a clean warm-up unchanged', getGraphics().tier === 'extreme' && getGraphics().preset === 'extreme');
+      drive(gov, clock, 250, 40); // past SLIP_WINDOW_MS of bad frames
+      check(
+        'slip: a hand-picked Extreme slips once to a NAMED Ultra, not to Auto',
+        getGraphics().tier === 'ultra' && getGraphics().preset === 'ultra',
+        `${getGraphics().preset}/${getGraphics().tier}`,
+      );
+      check('slip: ...and says so', lines.some((l) => /lowered to ultra/i.test(l)), lines.join(' | '));
+    }
+
+    // A GOVERNOR WITH decide=false MEASURES BUT NEVER WRITES — the replay export and the
+    // gallery's fixed-High scenes (`renderScene.ts` passes `!this.fixedTier`).
+    {
+      setGraphicsTier('high', true); // Auto, so a decide=true governor fed these frames WOULD move it
+      const clock = { t: 0 };
+      const gov = createQualityGovernor(() => clock.t, undefined, false);
+      drive(gov, clock, 625, 40); // 10 s of frames well over the slip threshold
+      check(
+        'decide=false: the preset is untouched after a 2 s warm-up AND ~8 s of 40 ms frames past it',
+        getGraphics().tier === 'high' && getGraphics().preset === 'auto',
+        `${getGraphics().preset}/${getGraphics().tier}`,
+      );
+      check('decide=false: it still reports a p95 for the overlay', gov.p95Ms > 0, String(gov.p95Ms));
     }
 
     // A BACKGROUNDED TAB IS NOT A SLOW MACHINE (the stall guard)
@@ -3755,6 +3987,91 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
         sceneSrc.includes('applyEnvironmentRig(') &&
         !/new THREE\.HemisphereLight\(/.test(sceneSrc),
     );
+
+    // ══ THE POST PIPELINE (Extreme, 2026-09-27) — AO and bloom's lazy chunk ═══════════════
+    //
+    // `renderPost.ts` is its own chunk on the same reasoning as `scene/` itself: a static import
+    // anywhere else would hoist three's postprocessing classes into a shared chunk with no marker
+    // string `bundleaudit` routes by. The rule is checked the same way the scene/sim3d boundaries
+    // above are — read the source, not run it — because "only reached one way" is a property of
+    // the import graph, not of any one execution.
+    {
+      const postSrc = readFileSync(join(SCENE_DIR, 'renderPost.ts'), 'utf8');
+      const postImportRx = /from\s+['"][^'"]*renderPost['"]|import\(\s*['"][^'"]*renderPost['"]\s*\)/;
+      const staticPostImports: string[] = [];
+      const dynamicPostImports: string[] = [];
+      for (const p of walkTs(join(root, 'src'))) {
+        if (p === join(SCENE_DIR, 'renderPost.ts')) continue; // the file does not import itself
+        codeLines(p).forEach((line, i) => {
+          if (!postImportRx.test(line)) return;
+          const loc = `${relPosix(p)}:${i + 1}`;
+          if (/import\(/.test(line)) dynamicPostImports.push(loc);
+          else staticPostImports.push(loc);
+        });
+      }
+      check('nothing imports renderPost.ts STATICALLY (the post chunk must stay lazy)', staticPostImports.length === 0, staticPostImports.join(', '));
+      check(
+        'renderPost.ts is reached only from renderScene.ts — its dynamic import, the prefetch, and the type-only alias',
+        dynamicPostImports.length >= 2 && dynamicPostImports.every((l) => l.startsWith('src/games/biobuzz/scene/renderScene.ts:')),
+        dynamicPostImports.join(', '),
+      );
+
+      {
+        // the per-frame raise is looked for INSIDE render(), before its scene pass: `applyQuality`
+        // has always carried the same line, so a whole-file grep passed with the raise deleted
+        const renderBody = sceneSrc.slice(sceneSrc.indexOf('  render(world: World, frame: SceneFrame): void {'));
+        const raise = renderBody.indexOf('this.renderer.shadowMap.needsUpdate = true;');
+        const scenePass = renderBody.indexOf('this.renderer.render(this.scene, camera);');
+        check(
+          'the sun’s shadow map is drawn once per FRAME, not once per renderer.render call (autoUpdate off, needsUpdate raised in render() before the scene pass)',
+          sceneSrc.includes('this.renderer.shadowMap.autoUpdate = false;') && raise > 0 && scenePass > raise,
+          `raise@${raise} scenePass@${scenePass}`,
+        );
+      }
+      check(
+        'the bloom emissive raise and the panel cap are restored in a finally (shared materials must never stay raised)',
+        /try \{\s*this\.renderer\.render\(this\.scene, camera\);\s*\} finally \{[\s\S]{0,400}?this\.setGlow\(1\);\s*setClearPanelCap\(null\);/.test(sceneSrc),
+      );
+      check(
+        'a context loss asks contextLossTier (the settings), not the Extreme label',
+        sceneSrc.includes('lowered = contextLossTier(g);') && !sceneSrc.includes("g.tier === 'extreme'"),
+      );
+      check(
+        'a post pass that throws puts back what the passes change (override material, hidden glass, background, autoClear)',
+        postSrc.includes('gtao?.recoverFromThrow();') && postSrc.includes('scene.overrideMaterial = null;') && postSrc.includes('renderer.autoClear = autoClear;'),
+      );
+      check(
+        'the governor is created with the fixed-tier decide flag, so a replay export never rewrites the device preset',
+        sceneSrc.includes('createQualityGovernor(() => performance.now(), this.onQualityEvent, !this.fixedTier)'),
+      );
+      check(
+        'a failed post chunk, or a pass that throws mid-frame, drops back to the plain picture instead of throwing onward',
+        /catch \(err\) \{\s*this\.dropPost\('failed while drawing', err\);/.test(sceneSrc),
+      );
+
+      const previewSrc3 = readFileSync(join(SCENE_DIR, 'renderPreview.ts'), 'utf8');
+      check(
+        'the builder preview clamps its shadow map at 2048, even for Extreme’s 4096 `max`',
+        previewSrc3.includes('Math.min(2048, shadowMapSize(q))'),
+      );
+
+      check(
+        'the GTAO pass hides depthWrite:false meshes from its own G-buffer pass (glass and decals would otherwise occlude)',
+        postSrc.includes('m.depthWrite === false || m.visible === false'),
+      );
+      check(
+        '...and the venue’s BackSide enclosures too: from above, the DoubleSide override drew the hall ceiling over the field and the clip box threw all of AO away',
+        postSrc.includes('m.side === THREE.BackSide'),
+      );
+      check(
+        'studio softboxes are on the overhead-excluded layer, like the hall fittings and the truss (they covered the field corners from above)',
+        /function buildSoftboxes[\s\S]*?m\.layers\.set\(VENUE_OVERHEAD_LAYER\);/.test(readFileSync(join(SCENE_DIR, 'renderVenue.ts'), 'utf8')),
+      );
+      check(
+        '...and its normal material is DOUBLE-SIDED, so a single-sided open sheet does not leave a hole',
+        postSrc.includes('this.normalMaterial.side = THREE.DoubleSide;'),
+      );
+    }
 
     const moduleSrc = readFileSync(join(root, 'src', 'games', 'module.ts'), 'utf8');
     check(
@@ -6105,11 +6422,12 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
           // ...and the tier mapping itself: Low+Medium cheap, High+Ultra full, and `meshDetail`
           // honoured wherever it is set by hand
           check(
-            'tier/map: Low and Medium take the cheap wheel, High and Ultra the full one',
+            'tier/map: Low and Medium take the cheap wheel, High, Ultra and Extreme the full one',
             bbWheelDetail(GFX_PRESETS.low, 'low') === 'low' &&
               bbWheelDetail(GFX_PRESETS.medium, 'medium') === 'low' &&
               bbWheelDetail(GFX_PRESETS.high, 'high') === 'high' &&
-              bbWheelDetail(GFX_PRESETS.ultra, 'ultra') === 'high',
+              bbWheelDetail(GFX_PRESETS.ultra, 'ultra') === 'high' &&
+              bbWheelDetail(GFX_PRESETS.extreme, 'extreme') === 'high',
           );
           check(
             'tier/map: a hand-set meshDetail of `low` is honoured on any column',
@@ -8043,7 +8361,10 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
       // tier alone.
       check('the markings are built on the HIGH LOD only', /quality === 'high' \? buildFieldMarkings\(/.test(glbSrc));
       check('...and the low LOD gets a zeroed record rather than a partial one', /: NO_MARKINGS;/.test(glbSrc));
-      check('mesh detail is `low` on the LOW tier alone', GFX_PRESETS.low.meshDetail === 'low' && (['medium', 'high', 'ultra'] as const).every((t) => GFX_PRESETS[t].meshDetail === 'high'));
+      check(
+        'mesh detail is `low` on the LOW tier alone',
+        GFX_PRESETS.low.meshDetail === 'low' && GFX_TIERS.filter((t) => t !== 'low').every((t) => GFX_PRESETS[t].meshDetail === 'high'),
+      );
     }
 
     // == THE 2026-09-19 OWNER PASS, ITEMS 6 AND 8, AND THE STICKER LABEL ===================
@@ -9716,7 +10037,8 @@ function environmentAndReadoutChecks(check: Check): void {
           bbVenueDetail(GFX_PRESETS.low, 'low') === 'low' &&
             bbVenueDetail(GFX_PRESETS.medium, 'medium') === 'high' &&
             bbVenueDetail(GFX_PRESETS.high, 'high') === 'high' &&
-            bbVenueDetail(GFX_PRESETS.ultra, 'ultra') === 'high');
+            bbVenueDetail(GFX_PRESETS.ultra, 'ultra') === 'high' &&
+            bbVenueDetail(GFX_PRESETS.extreme, 'extreme') === 'high');
         check('meshDetail: low keeps its promise here too',
           bbVenueDetail({ meshDetail: 'low' }, 'ultra') === 'low');
 
@@ -9738,15 +10060,14 @@ function environmentAndReadoutChecks(check: Check): void {
     // choices must not quietly become one of them.
     check('the fixed-High export tier still renders in the school hall', GFX_PRESETS.high.environment === 'school-hall');
     check('...and Ultra with it', GFX_PRESETS.ultra.environment === 'school-hall');
+    check('...and Extreme renders in the school hall too', GFX_PRESETS.extreme.environment === 'school-hall');
     check(
       'Low and Medium still default to the generated room',
       GFX_PRESETS.low.environment === 'room' && GFX_PRESETS.medium.environment === 'room',
     );
     check(
       'every preset column names a real environment',
-      (['low', 'medium', 'high', 'ultra'] as const).every((t) =>
-        (ENVIRONMENT_IDS as readonly string[]).includes(GFX_PRESETS[t].environment),
-      ),
+      GFX_TIERS.every((t) => (ENVIRONMENT_IDS as readonly string[]).includes(GFX_PRESETS[t].environment)),
     );
 
     // AND NO GPU-ONLY DEPENDENCY CREPT INTO `graphics/`. It is read by `src/ui/GraphicsSection.tsx`

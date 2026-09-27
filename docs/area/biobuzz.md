@@ -536,15 +536,55 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
   at all. The real defect is the exporter's, and `public/models/biobuzz/README.md` carries the
   note; this is a no-op the day `convert.py` orients its tessellation before merging.
 - **GRAPHICS SETTINGS ARE PER DEVICE, AND THE SCENE SUBSCRIBES TO THEM** (Day 3, plan §4.4–§4.6).
-  `graphics/settings.ts` is the model — the seventeen dials (§4.4's sixteen plus
-  `elementDetail`, below), the four preset columns, the 0.6/1.2/2.2/4.0 MP pixel budgets,
+  `graphics/settings.ts` is the model — the eighteen dials (§4.4's sixteen plus
+  `elementDetail`, below, and `bloom`), the five preset columns, the 0.6/1.2/2.2/4.0/8.3 MP pixel budgets,
   `localStorage['decodesim.graphics']` with field-by-field coercion. `graphics/auto.ts` is the POLICY (first guess → two-second warm-up → the in-match
   slip rule) and takes its clock as a PARAMETER, because `smoke.ts`'s determinism guard greps
   this whole directory for `performance.now()`. Nothing under `graphics/` may import `three` or
   `scene/` — it is read by `src/ui/GraphicsSection.tsx` and `src/contributors.ts`, both ordinary
   main-bundle files, and the RENDER lane asserts it. All but one apply LIVE; mesh detail
-  needs the next 3D view (it picks the GLB) and SSAO/SMAA are **not offered on this build**
+  needs the next 3D view (it picks the GLB) and SMAA is **not offered on this build**
   (`GFX_NOT_OFFERED` carries the reason, and the UI prints it).
+  - ⚠️ **EXTREME (2026-09-27) IS A HAND PICK, AND ITS EFFECTS ARE A LAZY CHUNK.** The fifth column:
+    150 % render scale under an 8.3 MP budget, MSAA 4x, a 4096 VSM map (`shadows: 'max'`, a value
+    of its own so a stored `soft` still means 2048), ambient occlusion and bloom. The rules:
+    - **Auto never picks it** (`GFX_AUTO_MAX_TIER`): the warm-up measures CPU submit time and
+      Extreme's cost is GPU fill, nothing corrects between 16.7 and 25 ms afterwards, and it
+      downloads a chunk. `stepTier` takes the ceiling on the way up and never walks a hand pick
+      down to it; `setGraphicsPreset('auto')` clamps. A lost WebGL context on Extreme lowers the
+      stored tier to Ultra before the 2D fallback, or the next reload loses it again.
+    - **AO and bloom are asked of the SETTINGS (`wantsPost`), never the tier**, so a Custom with
+      AO on gets AO. `scene/renderPost.ts` is fetched by `renderScene.ts`'s `import('./renderPost')`
+      the first time one is on and freed when both go off. It is the ONLY importer (a second one
+      hoists three.js out of the scene chunk; see ONE DYNAMIC SPECIFIER below). `bundleaudit`
+      routes it as `postfx` by filename, since it carries no three.js markers.
+    - **The passes are driven by hand, not through `EffectComposer`.** The blit stays the one
+      place tone mapping and sRGB happen; the stats read stays right after the scene pass; the
+      composer's `setSize` would square the pixel ratio. Nothing may draw INTO the multisampled
+      scene target after its resolve (three invalidates it), so bloom copies an MSAA input to a
+      0-sample target first. A throw inside post drops post for the scene's life, never to 2D.
+    - **GTAO is in INCHES** (radius 12, thickness 12; the defaults are metres) at half resolution,
+      clipped to the field. Its G-buffer pass hides every `depthWrite: false` mesh (the clear
+      panels, blobs, reticle), or the driver view gets AO on the glass it looks through, and
+      draws normals `DoubleSide`. Do not use `setGBuffer`: three 0.186 dereferences a target it
+      skipped creating. The perspective define is flipped when the overhead (ortho) shot is active.
+    - **Bloom is SELECTIVE.** A lit white panel (1.2–1.7 raw) is as bright as a lamp (1.0–1.95),
+      so no threshold separates them. Materials tagged `userData.bloomBase` (the hall, arena and
+      night lamp fittings, the robots' front bar) are raised ×3.5 for the match's own scene pass only and put
+      back after it, because the front-bar material is shared with the builder preview. The
+      threshold is divided by each environment's exposure. The clear panels' output is capped
+      (`setClearPanelCap`, a shared uniform, a no-op at rest) for the same pass, or a lit
+      perimeter wall blooms into a haze. Studio softboxes are untagged: a diffuser, not a lamp.
+    - **Match only.** The builder preview has no post chain and caps its shadow map at 2048; the
+      replay export and the gallery stay fixed at High, and a fixed-tier scene's governor
+      (`decide = false`) never writes the device preset.
+    - **The sun's shadow map is drawn once per frame, on every tier** (`shadowMap.autoUpdate =
+      false`, `needsUpdate` raised before the scene pass). Every `renderer.render` redrew it
+      before: the minimap's pass did, and AO's G-buffer pass would have. A directional shadow
+      does not depend on the view camera.
+    - ⚠️ The scene pass leaves a few NaN texels on robots at high resolution (4 of 7.9 M at
+      3744 × 2106). Bloom's high pass zeroes them; without that one blurred NaN blacked out the
+      whole frame. The source is still unfound.
   - ⚠️ **THE SCORING ELEMENTS ARE THE REAL PERFORATED CAD SOLID ON HIGH AND ULTRA** (owner,
     2026-09-21: "For higher graphics settings, model the balls accurately with the holes.
     Consider grabbing the actual accurate cad"). `public/models/biobuzz/elements.glb` is a REAL
@@ -794,8 +834,9 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
 - **Client:** `graphics/store.ts` holds the per-device view pref (`localStorage['decodesim.view']`);
   `GameView`/`game.ts` await `initPhysics3d()` before a 3D practice (fallback to 2D with an
   event-log line) and mount the lazily imported `scene` under the 2D canvas (`overlayOnly`).
-  LAZY chunks — physics ≈ 1.12 MB gz (the wasm glue plus the implementation), scene ≤ 250 KB gz —
-  ratcheted by `npm run bundleaudit` (needs a build; not in `npm test`).
+  LAZY chunks — physics ≈ 1.12 MB gz (the wasm glue plus the implementation), scene ≤ 250 KB gz,
+  post effects ≈ 12 KB gz (only with AO or bloom on) — ratcheted by `npm run bundleaudit` (needs a
+  build; not in `npm test`).
 - ⚠️ **`sim3d/` IS LAZY, AND ONLY TWO OF ITS MODULES MAY BE IMPORTED FROM OUTSIDE IT** (done
   2026-09-18; it used to be otherwise, and the implementation sat in the main chunk). `engine.ts`
   is the LOADER — `initPhysics3d` / `physics3dReady` / `rapier3d` / `physics3dImpl` — and
@@ -888,8 +929,8 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
     simplification should depend on graphics settings"). `bbWheelDetail(settings, tier)` reads two
     settings that already exist — `meshDetail` set by hand, and otherwise the preset COLUMN, the
     same input `GFX_PIXEL_BUDGET` uses and for the same reason (nothing separates Medium from High
-    but AA and shadows). Low/Medium get the cheap one, High/Ultra and the fixed-High replay export
-    the full one; **no seventeenth dial was added**, and the RENDER lane asserts that. A LOW mecanum
+    but AA and shadows). Low/Medium get the cheap one, High/Ultra/Extreme and the fixed-High replay
+    export the full one; **no seventeenth dial was added**, and the RENDER lane asserts that. A LOW mecanum
     still has eleven real 45° rollers — measured, not promised. It is baked at build time, so
     `sync` folds it into its own rebuild key beside `bbSpecKey` (NOT into `bbSpecKey`, which the
     main chunk's thumbnail cache reads and which must not carry a per-device setting).

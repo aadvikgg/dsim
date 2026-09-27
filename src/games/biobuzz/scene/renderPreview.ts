@@ -8,6 +8,7 @@ import {
   frameIntervalMs,
   getGraphics,
   shadowBlurRadius,
+  shadowBlurSamples,
   shadowMapSize,
   subscribeGraphics,
   type GraphicsSettings,
@@ -280,7 +281,19 @@ export const createRobotPreviewScene: RobotPreviewFactory = (host, options) => {
     renderer.shadowMap.enabled = on;
     sun.castShadow = on;
     if (on) {
-      const size = shadowMapSize(s.shadows);
+      /**
+       * CAPPED AT 2048, and Extreme's `max` drawn as `soft`. `max` is a 4096 map because the
+       * match's shadow camera spans the whole field plus a margin (184 in); this one is fitted to ONE robot, so
+       * 2048 already puts several texels on every rail edge, and a 4096 VSM map (two of them,
+       * counting the blur's own target) behind a 300-px card would be memory spent on nothing. The blur follows the map, so it takes `soft`'s
+       * radius and sample count too: `max`'s wider radius is in texels of a map twice as fine.
+       *
+       * AO and bloom are MATCH-ONLY on purpose. This scene has its own renderer and no post
+       * chain, and loading `renderPost.ts` from here would make it a second importer of that
+       * chunk (see the header of `renderPost.ts`), so the builder draws Extreme without them.
+       */
+      const q = s.shadows === 'max' ? 'soft' : s.shadows;
+      const size = Math.min(2048, shadowMapSize(q));
       if (sun.shadow.mapSize.x !== size) {
         sun.shadow.mapSize.set(size, size);
         // A SHADOW MAP IS ALLOCATED ONCE, AT ITS FIRST SIZE — changing `mapSize` on a light whose
@@ -289,7 +302,8 @@ export const createRobotPreviewScene: RobotPreviewFactory = (host, options) => {
         sun.shadow.map?.dispose();
         sun.shadow.map = null;
       }
-      sun.shadow.radius = shadowBlurRadius(s.shadows);
+      sun.shadow.radius = shadowBlurRadius(q);
+      sun.shadow.blurSamples = shadowBlurSamples(q);
     }
     renderer.shadowMap.needsUpdate = true;
     hemi.intensity = s.envLighting ? SCENE_HEMI_INTENSITY : SCENE_HEMI_INTENSITY_NO_IBL;

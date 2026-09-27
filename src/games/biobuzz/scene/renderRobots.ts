@@ -190,6 +190,10 @@ function frontBarMat(): THREE.MeshStandardMaterial {
       roughness: 0.35,
       metalness: 0,
     });
+    // BLOOM's tag (Extreme): the match scene raises this emissive for its own pass while bloom is
+    // on and restores it straight after, because this material is SHARED — with every scene and
+    // with the builder preview, which has no bloom. See `renderScene.ts`'s `glowMats`.
+    FRONT_BAR_MAT.userData.bloomBase = FRONT_BAR_MAT.emissiveIntensity;
     SHARED_MAT.add(FRONT_BAR_MAT);
   }
   return FRONT_BAR_MAT;

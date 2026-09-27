@@ -170,15 +170,24 @@ function surface(color: number, map?: THREE.Texture): THREE.MeshStandardMaterial
 
 /** a lit fitting. `emissive` rather than a light: three has no area lights in this renderer and
  * the RIG is what actually lights the field (`applyEnvironmentRig`) — this is the FIXTURE, the
- * thing that makes a ceiling read as a ceiling with lights in it. */
-function fitting(color: number, power: number): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({
+ * thing that makes a ceiling read as a ceiling with lights in it.
+ *
+ * `userData.bloomBase` tags it for BLOOM (Extreme, `renderPost.ts`): at 1.0–1.95 raw a lamp is no
+ * brighter than a sunlit white panel, so no threshold could pick one without the other. The match
+ * scene raises a tagged emissive by `BLOOM_EMISSIVE_GAIN` for its own pass while bloom is on and
+ * puts it back after; `power` itself is the lamp's data and is never changed. `glow` is false for
+ * a studio's SOFTBOXES: four 116-in panels are a diffuser, not a lamp, and at the gain a whole
+ * softbox in frame bloomed into a haze over the field. */
+function fitting(color: number, power: number, glow = true): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
     color: 0x000000,
     emissive: color,
     emissiveIntensity: power,
     roughness: 1,
     metalness: 0,
   });
+  if (glow) mat.userData.bloomBase = power;
+  return mat;
 }
 
 /**
@@ -473,7 +482,13 @@ function buildSoftboxes(spec: VenueSpec): THREE.InstancedMesh | null {
       specs.push({ x: sx * 105, y: sy * 105, z: spec.ceil * 0.78, w: 116, d: 116, h: 5 });
     }
   }
-  return boxes('bb-venue:softbox', fitting(spec.lamp, spec.lampPower), specs);
+  const m = boxes('bb-venue:softbox', fitting(spec.lamp, spec.lampPower, false), specs);
+  // ON THE OVERHEAD LAYER, like the truss and the hall fittings, and for the same reason: the rig
+  // is straight over the field, so the top-down camera looked THROUGH it and four white 116-in
+  // squares covered the field's corners in every studio environment (seen in the Extreme
+  // captures, 2026-09-27, where bloom turned them into a white haze over the whole shot).
+  m.layers.set(VENUE_OVERHEAD_LAYER);
+  return m;
 }
 
 /**

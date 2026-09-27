@@ -602,6 +602,8 @@ export interface SceneOptions {
    * preference. A video export is the case this exists for: §4.7 fixes exports at High so the
    * file does not come out at whatever the machine that made it happened to be set to, and so
    * that a settings change mid-encode cannot change the resolution of a video halfway through.
+   * No `'extreme'`: every caller that fixes a tier pins it to High, and none is ever going to
+   * ask for a tier above what a hand pick on the live device can reach.
    */
   quality?: 'low' | 'medium' | 'high' | 'ultra';
   /**
@@ -625,7 +627,9 @@ export type GameSceneFactory = (host: HTMLElement, options?: SceneOptions) => Ga
  */
 export interface RobotPreviewOptions {
   /** FIX the quality tier, ignoring the device's graphics preference — a cached thumbnail must
-   * not change because a settings screen was opened somewhere else. */
+   * not change because a settings screen was opened somewhere else. No `'extreme'`: the same
+   * ceiling as `SceneOptions.quality` above — a fixed preview stays at High at most (plan §4.7),
+   * never at a tier nobody on this device actually chose. */
   quality?: 'low' | 'medium' | 'high' | 'ultra';
   /** `false` binds no pointer handlers: a scene nobody is driving (a thumbnail). */
   interactive?: boolean;
@@ -645,7 +649,9 @@ export interface RobotPreviewScene {
   readonly element: HTMLCanvasElement;
   /** show this build. Cheap to call on every render — an unchanged build rebuilds nothing. */
   setSpec(spec: RobotSpec, alliance: Alliance): void;
-  /** fix or release the quality tier (`null` follows the device preference again). */
+  /** fix or release the quality tier (`null` follows the device preference again). No
+   * `'extreme'`, same reason as `RobotPreviewOptions.quality` above: a fixed tier tops out at
+   * High, and Extreme is a hand pick on a live device, never a tier this is asked to pin to. */
   setQuality(tier: 'low' | 'medium' | 'high' | 'ultra' | null): void;
   resize(width: number, height: number, dpr: number): void;
   /** ONE frame at `size`x`size` CSS pixels, synchronously, as a PNG data URL. */

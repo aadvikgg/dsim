@@ -61,6 +61,11 @@
  *                content scans. ⚠️ THIS BUCKET IS WHY THE SPLIT HOLDS: without a route of its
  *                own the console's growth would land in `other`, whose near-zero baseline is
  *                meant to catch a chunk nobody meant to create.
+ *   postfx     — BIOBUZZ 3D's POST-PROCESSING (`renderPost-*.js`, 2026-09-27): ambient occlusion and
+ *                bloom, the Extreme tier's two effects, reached only through `renderScene.ts`'s
+ *                `import('./renderPost')` and fetched only when one of them is on. It imports
+ *                three.js from the scene chunk rather than carrying it, so it has none of the
+ *                `scene` markers and would otherwise land in `other`. Matched by FILENAME.
  *   other      — everything else. In practice this is empty: `@dimforge/rapier2d-compat` is a
  *                STATIC import (`src/sim/physicsEngine.ts`), so the 2D physics engine lives
  *                inside `main` already and always has (that is existing, unchanged behavior,
@@ -151,6 +156,11 @@ function routeFor(file, buf) {
   // because the console imports the SEASONS registry and the standing model and a future
   // marker could otherwise claim it.
   if (/^Admin[A-Za-z]*-[^/]*\.js$/.test(base)) return 'admin';
+  // The post-processing chunk (AO + bloom), by FILENAME: Vite names it after `renderPost.ts`, and
+  // it imports three.js from `renderScene-*.js` instead of containing it, so no content marker
+  // here would recognise it. If a future chunking ever merged it into the scene chunk, the name
+  // would change and the `scene` marker below would claim it, which is the right answer.
+  if (/^renderPost-[^/]*\.js$/.test(base)) return 'postfx';
   // filename-first for a standalone `.wasm` asset (cheap, and a real one would be named after
   // its source module, e.g. `rapier_wasm3d_bg-<hash>.wasm`), then a content scan for both .js
   // and .wasm alike — content is what actually decided this in the measured build, where the
@@ -409,6 +419,13 @@ const BASELINE = {
   // bar, the deck arrow, the ribbed hazard bar, one emissive material), the tube's smoothstep ease
   // and yaw/pitch/extension slew, and the rim-aim backoff. Nothing new is imported into the chunk;
   // the route list is unchanged. 29 KB of ceiling left.
+  //
+  // 2026-09-27, THE EXTREME TIER: measured at 223.86, under the 4.42 KB tolerance, so the number
+  // is NOT moved; recorded for the next pass that crosses it. Main at 023dc75e, built the same
+  // hour with no change, measured 222.62, so +1.56 of the overhang predates this and +1.24 is the
+  // tier: the lazy loader for `renderPost` (which carries the passes themselves, see `postfx`),
+  // the three.js core classes only those passes use (Rollup keeps three's own module in this
+  // chunk, so they are emitted here), the emissive and panel-cap wiring, and the preview clamp.
   scene: { gzip: 221.06 * 1000, budgetCeiling: 250 * 1000 },
   // 2026-09-21, THE EIGHT PAINTED ENVIRONMENTS: 4.01 -> 5.56 (+1.55), well inside the 4 KB
   // tolerance, so the number below is deliberately NOT moved — recorded here for the same reason
@@ -418,7 +435,18 @@ const BASELINE = {
   // which would have cost this route nothing and the PLAYER 13 MB. The PAINTING lives in
   // `scene/renderEnvironment.ts` and lands in the `scene` route, which did not move (216.61 ->
   // 216.60): a few hundred bytes of canvas calls against a 217 KB chunk.
+  //
+  // 2026-09-27, THE EXTREME TIER: measured at 6.68, still inside the tolerance, number not moved.
+  // Main at 023dc75e measured 6.52, so +0.16 is this pass (the Extreme tile, the AO and bloom rows,
+  // the Max shadow tile) and 2.51 was already over the 4.01 before it.
   graphics: { gzip: 4.01 * 1000 },
+  // 2026-09-27: NEW. `renderPost-*.js`, the post-processing chunk: three's GTAO pass (with its
+  // shaders and the simplex noise it seeds from) and UnrealBloom, plus `renderPost.ts`'s own
+  // subclass, high-pass shader and ping target, measured on the build that introduced it. Lazy:
+  // fetched only when ambient occlusion or bloom is on, which is the Extreme column and any Custom
+  // that turns one on. SMAA is deliberately not in it (its pass alone is 38 KB of lookup
+  // textures; `GFX_NOT_OFFERED`).
+  postfx: { gzip: 12.3 * 1000 },
   gallery: { gzip: 7.33 * 1000 },
   // 2026-09-24: the Zenith autos chunk, MEASURED on the build that introduced it — Zenith's
   // planner, follower and schema (zod) plus `src/auto/`. Lazy: see the `autos` route.

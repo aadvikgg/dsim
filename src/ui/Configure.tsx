@@ -10,7 +10,7 @@ import { moduleFor } from '../games';
 /**
  * LAZY, unlike its five siblings — and the reason is the bundle, not the screen.
  *
- * `GraphicsSection` carries the whole seventeen-setting model (`graphics/settings.ts`: the preset
+ * `GraphicsSection` carries the whole eighteen-setting model (`graphics/settings.ts`: the preset
  * table, the coercion, the store), which nothing else in the MAIN chunk reads — the renderer
  * reads it from the scene chunk, and the scene chunk is already lazy. Statically importing it
  * here put ~5 KB gzipped of 3D graphics settings into the bundle every player of every game

@@ -12,7 +12,7 @@ An FTC driver-practice sim hosting **more than one game**:
 Vite + React + TypeScript, Canvas 2D. The CLIENT bundle is React + **Rapier 2D**
 (`@dimforge/rapier2d-compat`, wasm) and nothing else; the rest of `dependencies`
 (`ws`, `tsx`, `pg`, `jose`, `@neondatabase/auth`) exists for the SERVER and auth — keep the
-client that lean. BIOBUZZ 3D adds two LAZY chunks (Rapier 3D deterministic, Three.js), fetched
+client that lean. BIOBUZZ 3D adds LAZY chunks (Rapier 3D deterministic, Three.js, post FX), fetched
 only when a 3D world is stepped or drawn locally; `npm run bundleaudit` ratchets every chunk. Deploys to Vercel zero-config; a Node/`ws` authoritative game server on
 Fly; Electron wrapper for the desktop build.
 

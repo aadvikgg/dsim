@@ -19,18 +19,24 @@ import { freeCamGesture, subscribeFreeCamReset, type FreeCamNav } from '../graph
 import {
   GFX_PRESETS,
   effectivePixelRatio,
+  contextLossTier,
   frameIntervalMs,
+  GFX_PRESET_LABEL,
   getGraphics,
   msaaSamples,
+  setGraphicsTier,
   shadowBlurRadius,
+  shadowBlurSamples,
   shadowMapSize,
   subscribeGraphics,
+  wantsPost,
   type GraphicsSettings,
   type GraphicsTier,
 } from '../graphics/settings';
 import { applyFirstGuess, createQualityGovernor, probeAdapter, type QualityGovernor } from '../graphics/auto';
 import { installViewKey, viewActionOf } from '../graphics/viewKey';
 import { buildBiobuzzField, updateBiobuzzField, type BbFieldHandles } from './renderField';
+import { setClearPanelCap } from './renderFieldGlb';
 import { buildBiobuzzElements, setElementDetail, setElementShadows, updateBiobuzzElements, type BbElements } from './renderElements';
 import { loadElementGeometries } from './renderElementsGlb';
 import { bbWheelDetail, buildBiobuzzRobots, updateBiobuzzRobots, type BbRobots } from './renderRobots';
@@ -68,6 +74,16 @@ import {
  */
 export { SceneUnsupportedError } from './renderCore';
 export { createRobotPreviewScene, type RobotPreviewScene } from './renderPreview';
+
+/**
+ * THE POST-PROCESSING CHUNK'S TYPE, NAMED WITHOUT AN IMPORT STATEMENT. `renderPost.ts` (AO and
+ * bloom, Extreme's two effects) is reached ONLY through the `import('./renderPost')` in
+ * `syncPost`, so a player who never turns either on never downloads it. A static import (even
+ * `import type`, which a later edit could quietly turn into a value import) is the first step to
+ * a second importer, and a second importer is what hoists three.js out of this chunk.
+ */
+type PostModule = typeof import('./renderPost');
+type BbPost = ReturnType<PostModule['createPost']>;
 
 /**
  * ⚠️ `SceneQuality` / `QUALITY` ARE GONE. They were a module CONSTANT at "Medium", with a header
@@ -178,9 +194,28 @@ class BiobuzzScene implements GameScene {
   // ── graphics state ────────────────────────────────────────────────────────────────────────
   private settings: GraphicsSettings;
   private tier: GraphicsTier;
-  /** the MSAA render target, or null when anti-aliasing is off (which renders straight to the
-   * canvas and costs no blit at all). */
+  /** the scene's HDR render target: multisampled for MSAA, 0-sample when only the post chain
+   * needs one, or null when neither does (which renders straight to the canvas and costs no
+   * blit at all). */
   private target: THREE.WebGLRenderTarget | null = null;
+  /**
+   * THE POST CHAIN (`renderPost.ts`, AO + bloom), or null until its chunk has arrived and while
+   * no setting wants it. `postLoad` is the fetch in flight, so a burst of settings changes starts
+   * one download. `postFailed` is sticky for the life of the scene: a chunk that would not load
+   * or a pass that threw is not retried every frame, and the picture carries on without post.
+   */
+  private post: BbPost | null = null;
+  private postLoad: Promise<void> | null = null;
+  private postFailed = false;
+  /** set first thing in `dispose`, so a post chunk that lands after teardown allocates nothing */
+  private disposed = false;
+  /**
+   * The materials tagged `userData.bloomBase` (venue lamp fittings, the robots' front light bar),
+   * collected by `tuneMaterials`. While bloom is on their emissive is raised for THIS scene's
+   * pass and put back straight after it: the robot material is shared with the builder preview
+   * and every other scene, so a value left raised would leak into pictures that have no bloom.
+   */
+  private glowMats: THREE.MeshStandardMaterial[] = [];
   private readonly blitScene = new THREE.Scene();
   private readonly blitCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   private readonly blitMesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
@@ -251,6 +286,15 @@ class BiobuzzScene implements GameScene {
     // two places this game draws it.
     this.renderer = createSceneRenderer(canvas, { antialias: false, alpha: false });
     /**
+     * THE SUN'S SHADOW MAP IS DRAWN ONCE PER FRAME, not once per `renderer.render`. With
+     * `autoUpdate` on, every call that sees the shadow-casting sun redraws the whole VSM map: the
+     * scene pass, the PiP minimap's pass, and AO's G-buffer pass would each pay for it again, for
+     * a map that cannot differ between them (a directional light's shadow does not depend on the
+     * view camera). `render` raises `needsUpdate` once per DRAWN frame, just before the scene
+     * pass, which consumes it; `applyQuality` still raises it on a settings change.
+     */
+    this.renderer.shadowMap.autoUpdate = false;
+    /**
      * A LOST CONTEXT TAKES THE SAME EXIT AS AN UNSUPPORTED ONE — `fallBackTo2d()` plus an
      * event-log line, exactly what the factory below does for a failed WebGL2 probe or a
      * software renderer. One host path, because a player cannot tell the three apart and
@@ -263,8 +307,27 @@ class BiobuzzScene implements GameScene {
      */
     this.teardown.push(
       watchContextLoss(canvas, () => {
+        /**
+         * EXTREME-CLASS SETTINGS DO NOT GET TO LOSE THE CONTEXT TWICE. A GPU that cannot hold
+         * them (the post chain's targets, a 4096 shadow map, a supersampled 8.3 MP target) loses
+         * the context, the player reloads, the stored settings are unchanged, and it is lost
+         * again: a loop that ends in 2D every time. `contextLossTier` says which column to drop
+         * to, asked of the SETTINGS. A fixed-tier scene (export, gallery) never touches the
+         * device preset.
+         */
+        let lowered: GraphicsTier | null = null;
+        if (!this.fixedTier) {
+          try {
+            const g = getGraphics();
+            lowered = contextLossTier(g);
+            if (lowered) setGraphicsTier(lowered, g.preset === 'auto');
+          } catch {
+            /* a settings listener failing on a dead context must not stop the fallback below */
+          }
+        }
         fallBackTo2d();
         this.onQualityEvent?.('Lost the graphics context. Showing the 2D view.');
+        if (lowered) this.onQualityEvent?.(`Graphics set to ${GFX_PRESET_LABEL[lowered]}, so the 3D view fits the GPU next time.`);
       }),
     );
 
@@ -327,8 +390,10 @@ class BiobuzzScene implements GameScene {
     this.cameras = createCameras();
     this.stats = createStats(host, this.settings.perfOverlay);
     // the clock this scene's own frame loop already reads — `graphics/auto.ts` takes it as a
-    // parameter rather than reading one itself (see its note on the determinism guard)
-    this.governor = createQualityGovernor(() => performance.now(), this.onQualityEvent);
+    // parameter rather than reading one itself (see its note on the determinism guard). A
+    // FIXED-TIER scene (the replay export, the gallery) measures without deciding: a warm-up
+    // timed on an export drawn at High must not step the player's own stored tier.
+    this.governor = createQualityGovernor(() => performance.now(), this.onQualityEvent, !this.fixedTier);
 
     this.applyQuality();
     this.bindTheme();
@@ -355,7 +420,9 @@ class BiobuzzScene implements GameScene {
    *   anti-aliasing         → `syncTarget`    shadows        → below
    *   element shadows       → `setElementShadows`
    *   element detail        → `setElementDetail` (fetches `elements.glb` behind the spheres)
-   *   ambient occlusion     → NOT OFFERED (`GFX_NOT_OFFERED`, and the UI says so)
+   *   ambient occlusion + bloom → `syncPost`: the lazy post chunk (`renderPost.ts`), fetched
+   *                           the first time `wantsPost` is true and freed when it turns false;
+   *                           bloom also raises the tagged emissives (`glowMats`) in `render`
    *   anisotropy            → `tuneMaterials` reflections    → `tuneMaterials`
    *   mesh detail           → the ONE setting that needs a rebuild: it selects which GLB
    *                           `buildBiobuzzField` loads, and the field is built before the scene
@@ -385,6 +452,7 @@ class BiobuzzScene implements GameScene {
         this.sun.shadow.map = null;
       }
       this.sun.shadow.radius = shadowBlurRadius(s.shadows);
+      this.sun.shadow.blurSamples = shadowBlurSamples(s.shadows);
     }
     this.renderer.shadowMap.needsUpdate = true;
     setElementShadows(this.elements, s.elementShadows);
@@ -463,8 +531,63 @@ class BiobuzzScene implements GameScene {
     this.tuneMaterials();
     setCameraTuning(s.hfov, s.cameraMotion);
     this.stats.setMode(s.perfOverlay);
+    this.syncPost();
     this.syncTarget();
     this.syncSize();
+  }
+
+  /**
+   * AO AND BLOOM: fetch the post chunk the first time a setting wants it, free it the moment none
+   * does. Fire-and-forget, like `env.apply` and `setElementDetail`: frames keep drawing without
+   * post until the chunk lands, then `syncTarget`/`syncSize` give it a target at the right size.
+   *
+   * It asks `wantsPost(settings)`, never the tier, so a Custom preset branched from High with AO
+   * turned on gets AO. Dropping out (Extreme to Ultra, Reset to Auto) disposes the chain, which
+   * hands back a G-buffer, a ping target and five bloom mips of VRAM at once.
+   */
+  private syncPost(): void {
+    if (!wantsPost(this.settings)) {
+      if (this.post) {
+        this.post.dispose();
+        this.post = null;
+      }
+      return;
+    }
+    if (this.post || this.postLoad || this.postFailed) return;
+    this.postLoad = import('./renderPost')
+      .then((m) => {
+        this.postLoad = null;
+        if (this.disposed || this.post || !wantsPost(this.settings)) return;
+        this.post = m.createPost(this.scene);
+        this.syncTarget();
+        this.syncSize();
+      })
+      .catch((err: unknown) => {
+        this.postLoad = null;
+        if (this.disposed) return;
+        this.dropPost('could not be loaded', err);
+      });
+  }
+
+  /** the post chain failed (the chunk fetch, or a pass threw): stop asking, say so once, and
+   * carry on with the plain picture. Never thrown onward: a throw out of `render` drops the
+   * player to 2D (`game.ts`), a far worse answer to "no bloom" than no bloom. */
+  private dropPost(what: string, err: unknown): void {
+    if (this.postFailed) return;
+    this.postFailed = true;
+    try {
+      this.post?.dispose();
+    } catch {
+      /* already failing; the flag above is what matters */
+    }
+    this.post = null;
+    console.warn(`[renderScene] post-processing ${what}`, err);
+    this.onQualityEvent?.('Ambient occlusion and bloom are unavailable here. Showing the scene without them.');
+    // the target goes back to what anti-aliasing alone wants, but AFTER this frame: from inside
+    // `render` the scene has just been drawn into it and the blit still has to read it
+    queueMicrotask(() => {
+      if (!this.disposed) this.syncTarget();
+    });
   }
 
   /**
@@ -485,6 +608,7 @@ class BiobuzzScene implements GameScene {
     const max = this.renderer.capabilities.getMaxAnisotropy();
     const aniso = Math.min(this.settings.anisotropy, max);
     const refl = this.settings.reflections ? 1 : 0;
+    const glow = new Set<THREE.MeshStandardMaterial>();
     this.scene.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
@@ -496,15 +620,23 @@ class BiobuzzScene implements GameScene {
           std.map.needsUpdate = true;
         }
         if (typeof std.metalness === 'number' && std.metalness >= 0.3) std.envMapIntensity = refl;
+        if (typeof std.userData.bloomBase === 'number') glow.add(std);
       }
     });
+    this.glowMats = [...glow];
     this.robotChildren = this.robots.group.children.length;
   }
 
-  /** create/resize/destroy the multisampled target for the current AA setting. */
+  /**
+   * create/resize/destroy the scene target for the current AA setting, and for the post chain,
+   * which needs the scene in a texture even with anti-aliasing off (a 0-sample target, then).
+   * Sized from the CURRENT pixel ratio, which may be about to change: `syncSize` runs after it
+   * and is the one that sizes the post chain.
+   */
   private syncTarget(): void {
     const samples = msaaSamples(this.settings.aa);
-    if (samples === 0) {
+    const forPost = wantsPost(this.settings) && !this.postFailed;
+    if (samples === 0 && !forPost) {
       if (this.target) {
         this.target.dispose();
         this.target = null;
@@ -540,7 +672,10 @@ class BiobuzzScene implements GameScene {
     const pr = effectivePixelRatio(this.settings, this.tier, this.cssW, this.cssH, this.hostDpr);
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(this.cssW, this.cssH, false);
-    if (this.target) this.target.setSize(Math.max(1, Math.round(this.cssW * pr)), Math.max(1, Math.round(this.cssH * pr)));
+    const w = Math.max(1, Math.round(this.cssW * pr));
+    const h = Math.max(1, Math.round(this.cssH * pr));
+    if (this.target) this.target.setSize(w, h);
+    this.post?.setSize(w, h);
   }
 
   // ─────────────────────────────────────────────────────────────────── live inputs (Day 2) ──
@@ -786,18 +921,48 @@ class BiobuzzScene implements GameScene {
 
     // ONE scene pass, into the MSAA target when anti-aliasing is on and straight to the canvas
     // when it is off (which costs no blit at all — that is the whole reason `off` is a real
-    // setting here rather than a 1-sample target).
+    // setting here rather than a 1-sample target). With AO or bloom on there is always a target.
     this.renderer.setRenderTarget(this.target);
-    this.renderer.render(this.scene, camera);
+    // the sun's map, once for this frame (see `shadowMap.autoUpdate` in the constructor)
+    this.renderer.shadowMap.needsUpdate = true;
+    const post = this.post !== null && wantsPost(this.settings) ? this.post : null;
+    const glow = post !== null && this.settings.bloom ? post.emissiveGain : 1;
+    if (post !== null && glow !== 1) {
+      this.setGlow(glow);
+      // and the clear panels stop feeding it: see `setClearPanelCap`
+      setClearPanelCap(post.panelCap / Math.max(0.05, this.renderer.toneMappingExposure));
+    }
+    try {
+      this.renderer.render(this.scene, camera);
+    } finally {
+      // ALWAYS put them back: the front-bar material and the panel cap are shared with every
+      // other scene, and a throw here tears this one down (game.ts) with them still raised
+      if (glow !== 1) {
+        this.setGlow(1);
+        setClearPanelCap(null);
+      }
+    }
     // THE SCENE'S OWN COUNTS, READ HERE — `info.render` is reset at the START of every
-    // `render()` call, and up to two more follow (the blit, the minimap), so a read taken after
-    // them reports the blit's two triangles.
+    // `render()` call, and more follow (the post passes, the blit, the minimap), so a read taken
+    // after them reports the blit's two triangles.
     const calls = this.renderer.info.render.calls;
     const tris = this.renderer.info.render.triangles;
     if (this.target) {
+      let image: THREE.WebGLRenderTarget = this.target;
+      if (post) {
+        try {
+          image = post.render(this.renderer, this.target, camera, { ao: this.settings.ao !== 'off', bloom: this.settings.bloom });
+        } catch (err) {
+          this.dropPost('failed while drawing', err);
+        }
+      }
+      this.blitMesh.material.map = image.texture;
       this.renderer.setRenderTarget(null);
       this.renderer.render(this.blitScene, this.blitCamera);
     }
+    // explicitly, whatever the passes above left bound: `renderMinimap` draws to the canvas and
+    // never binds it itself
+    this.renderer.setRenderTarget(null);
 
     if (this.settings.minimap) this.renderMinimap(frame);
 
@@ -818,6 +983,14 @@ class BiobuzzScene implements GameScene {
     const cost = performance.now() - t0;
     this.governor.sample(cost);
     this.stats.frame(cost, this.governor.p95Ms, calls, tris);
+  }
+
+  /** the tagged emissives at `gain` × their own base (`glowMats`). A uniform write per material
+   * and no program change, so raising and restoring it around one pass costs nothing. Both this
+   * and the panel cap are put back straight after the scene pass: the minimap, the builder
+   * preview and every other scene share these materials and have no bloom. */
+  private setGlow(gain: number): void {
+    for (const m of this.glowMats) m.emissiveIntensity = (m.userData.bloomBase as number) * gain;
   }
 
   /**
@@ -915,12 +1088,15 @@ class BiobuzzScene implements GameScene {
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const off of this.teardown) off();
     this.teardown.length = 0;
     this.governor.dispose();
     this.stats.dispose();
     this.reticle.dispose();
     this.env.dispose();
+    this.post?.dispose();
+    this.post = null;
     this.target?.dispose();
     this.blitMesh.geometry.dispose();
     this.blitMesh.material.dispose();
@@ -1015,9 +1191,15 @@ export const createBiobuzzScene: GameSceneFactory = async (host: HTMLElement, op
   // very first frame instead of spheres for however long a fetch takes. A live scene does not
   // depend on it: `buildBiobuzzElements` starts on spheres and swaps whenever the promise
   // lands, so this await is an optimisation and the `catch` is the whole error path.
+  //
+  // THE POST CHUNK rides along the same way, for a live scene whose settings want it: an Extreme
+  // scene's first frames then already have AO and bloom instead of popping them in a moment
+  // later. Allowed to fail for the same reason: `syncPost` asks again (from the module cache when
+  // this one landed) and owns the error path. A fixed-tier scene never wants it.
   const [field] = await Promise.all([
     buildBiobuzzField(quality.meshDetail),
     quality.elementDetail === 'cad' ? loadElementGeometries().catch(() => null) : null,
+    !opts.quality && wantsPost(quality) ? import('./renderPost').catch(() => null) : null,
   ]);
   host.appendChild(canvas);
   // `host` is handed on: the orbit camera's pointer listeners live on it (see the class's own
