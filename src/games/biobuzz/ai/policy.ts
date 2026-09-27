@@ -56,6 +56,10 @@ import {
   BB_AI_ESCAPE_LEN,
   BB_AI_LAST_CALL_S,
   BB_AI_MAX_CLOSING,
+  BB_AI_NECTAR_FETCH_S,
+  BB_AI_PLACE_S,
+  BB_AI_TIP_PRIOR_S,
+  BB_AI_TOUR_MARGIN,
   BB_AI_PARK_MARGIN,
   BB_AI_STAND_COOLDOWN,
   BB_AI_STUCK_MOVE,
@@ -169,6 +173,11 @@ interface BbBotMemory {
   apId: number | null;
   apPhi: number;
   pressP: boolean;
+  /** the alliance TIPs this bot has watched start (`tipRate`), the swing it saw last decision, and
+   * the tick of its first live decision */
+  tipsSeen: number;
+  wasTipping: boolean;
+  startTick: number;
   /** the last decision's summary, for `peek` (bench/trace only) */
   note: string;
 }
@@ -237,6 +246,9 @@ export function createBiobuzzBot(
     apId: null,
     apPhi: 0,
     pressP: false,
+    tipsSeen: 0,
+    wasTipping: false,
+    startTick: -1,
     note: '',
   };
   return {
@@ -318,7 +330,7 @@ interface Ctx {
   hoard: boolean;
 }
 
-function perceive(world: World, r: RobotState, t: BbAiTierSpec, bb: BiobuzzState): Ctx {
+function perceive(world: World, r: RobotState, t: BbAiTierSpec, bb: BiobuzzState, mem: BbBotMemory): Ctx {
   const a = r.alliance;
   const phase = world.match.phase;
   const auto = phase === 'auto';
@@ -406,7 +418,7 @@ function perceive(world: World, r: RobotState, t: BbAiTierSpec, bb: BiobuzzState
     placeWindow: teleop && world.match.phaseTimeLeft <= BB_FLOWER_UNLOCK_S,
     hoard: false,
   };
-  ctx.hoard = hoardingNow(ctx, world);
+  ctx.hoard = hoardingNow(ctx, world, mem);
   return ctx;
 }
 
@@ -450,6 +462,7 @@ function decideCommand(world: World, r: RobotState, t: BbAiTierSpec, mem: BbBotM
     return ZERO;
   }
   mem.decisions++;
+  if (mem.startTick < 0) mem.startTick = world.tick;
 
   // ---- SAFETY FIRST: an escape in progress is never hesitated over -------------------------
   if (mem.escape > 0) {
@@ -465,7 +478,10 @@ function decideCommand(world: World, r: RobotState, t: BbAiTierSpec, mem: BbBotM
     return mem.last;
   }
 
-  const c = perceive(world, r, t, bb);
+  const c = perceive(world, r, t, bb, mem);
+  const swinging = c.hive.tipping > 0;
+  if (swinging && !mem.wasTipping) mem.tipsSeen++;
+  mem.wasTipping = swinging;
   recordHist(r, mem, asksMotion(mem.last), asksTurn(mem.last));
 
   // ---- STUCK: measured at any speed --------------------------------------------------------
@@ -636,36 +652,76 @@ function chooseMode(c: Ctx, mem: BbBotMemory, cands: Cand[]): Mode {
 }
 
 /**
- * IS THE FLOWER PLAN LIVE — a Box Tube build that carries NECTAR, a tier that places, the 1:00
- * window open or twelve seconds off, a FLOWER still worth a NECTAR, and a NECTAR to be had (in
- * the hopper, on the tiles, or still in the human player's hand). Without the last clause a
- * build whose NECTAR is all gone would stand at the zone for the rest of the match.
+ * IS THE FLOWER PLAN LIVE — a RATE decision, not a clock.
+ *
+ * FLOWER points are PERMANENT and CONTESTABLE: a NECTAR placed early leaves the TIP cycle for the
+ * rest of the match (fewer NECTAR in the cells, more POLLEN per TIP) and an opponent's NECTAR
+ * placed on top takes the FLOWER over. So the plan is the LAST thing a bot does, started when the
+ * time left is about what the tour itself needs, and only when the tour pays more per second than
+ * the bot's own TIP rate (`tipRate`). The first version hoarded from 1:12 and measured 26–29
+ * points a solo match BELOW never placing at all: 52 FLOWER points for 30 s without a TIP.
+ *
+ * It still needs a Box Tube build that carries NECTAR, a tier that places, a FLOWER worth a
+ * NECTAR, and a NECTAR to be had (in the hopper, on the tiles, or in the human player's hand).
  */
-function hoardingNow(c: Omit<Ctx, 'hoard'>, world: World): boolean {
+function hoardingNow(c: Omit<Ctx, 'hoard'>, world: World, mem: BbBotMemory): boolean {
   if (!(c.t.places && c.lift && c.carriesNectar && c.teleop)) return false;
   const left = world.match.phaseTimeLeft;
   if (left > BB_FLOWER_UNLOCK_S + 12) return false;
-  let onField = c.r.hopper.some((x) => x === c.a);
-  if (!onField) {
-    for (const b of world.balls) {
-      if (b.state.kind === 'ground' && b.color === c.a && b.z <= BB3_INTAKE_Z) {
-        onField = true;
-        break;
-      }
-    }
-  }
-  /**
-   * NECTAR STILL IN THE HUMAN PLAYER'S HAND is only worth walking to the zone for once the drive
-   * there ends at the cue — before it an entry needs a TIP's entitlement the bot cannot count on,
-   * and a bot parked at the zone twelve seconds early is a TIP's worth of cycles spent standing
-   * still.
-   */
+  let held = 0;
+  for (const x of c.r.hopper) if (x === c.a) held++;
+  let floor = 0;
+  for (const b of world.balls) if (b.state.kind === 'ground' && b.color === c.a && b.z <= BB3_INTAKE_Z) floor++;
   const lz = BB_LZ[c.a];
   const lzEta = hyp((lz.x0 + lz.x1) / 2 - c.r.pos.x, (lz.y0 + lz.y1) / 2 - c.r.pos.y) / (c.vmax * 0.8) + 1;
-  const inHand = c.bb.nectarStock[c.a] > 0 && (c.placeWindow || left <= BB_FLOWER_UNLOCK_S + lzEta);
-  if (!onField && !inHand) return false;
-  for (let i = 0; i < BB_FLOWERS.length; i++) if (flowerValue(c, i) >= 4) return true;
-  return false;
+  const inHand = c.placeWindow || left <= BB_FLOWER_UNLOCK_S + lzEta ? c.bb.nectarStock[c.a] : 0;
+  const nectar = held + floor + inHand;
+  if (nectar === 0) return false;
+  const plan = flowerTour(c, Math.min(nectar, BB_FLOWERS.length), held);
+  if (plan.value <= 0) return false;
+  // once started it runs: the tour was worth it when it began and the NECTAR is already aboard
+  if (mem.mode === 'place' || (mem.mode === 'wait' && held > 0)) return true;
+  if (left > plan.time + BB_AI_TOUR_MARGIN) return false;
+  return plan.value / Math.max(1, plan.time) > tipRate(c, mem);
+}
+
+/**
+ * THE FLOWER TOUR a bot could still make: nearest-neighbour from where it stands through every
+ * FLOWER worth a NECTAR (`flowerValue` ≥ 4), at most `n` of them, with a NECTAR fetch priced in
+ * for each one beyond the `held` it already carries. Points, and seconds.
+ */
+function flowerTour(c: Omit<Ctx, 'hoard'>, n: number, held: number): { value: number; time: number } {
+  const left: number[] = [];
+  for (let i = 0; i < BB_FLOWERS.length; i++) if (flowerValue(c, i) >= 4) left.push(i);
+  let at: Vec2 = c.r.pos;
+  let value = 0;
+  let time = 0;
+  for (let k = 0; k < n && left.length > 0; k++) {
+    let bi = 0;
+    for (let j = 1; j < left.length; j++) {
+      const f = BB_FLOWERS[left[j]];
+      const g = BB_FLOWERS[left[bi]];
+      if (hyp(f.x - at.x, f.y - at.y) < hyp(g.x - at.x, g.y - at.y)) bi = j;
+    }
+    const i = left.splice(bi, 1)[0];
+    const f = BB_FLOWERS[i];
+    time += hyp(f.x - at.x, f.y - at.y) / (c.vmax * 0.7) + BB_AI_PLACE_S + (k >= held ? BB_AI_NECTAR_FETCH_S : 0);
+    value += flowerValue(c, i);
+    at = f;
+  }
+  return { value, time };
+}
+
+/**
+ * THIS BOT'S OWN TIP RATE, points per second, from what it has watched its alliance's HIVE do:
+ * a swing starting is a TIP. Shrunk toward a prior of one TIP per `BB_AI_TIP_PRIOR_S` so the
+ * first tip of a match does not swing it, and split across the alliance's working robots — a
+ * robot that stops tipping costs the alliance its own share, not the partner's.
+ */
+function tipRate(c: Omit<Ctx, 'hoard'>, mem: BbBotMemory): number {
+  const elapsed = Math.max(0, (c.world.tick - mem.startTick) * SIM_DT);
+  const share = 1 + c.partners.length;
+  return (20 * (mem.tipsSeen + 1)) / (elapsed + BB_AI_TIP_PRIOR_S) / share;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

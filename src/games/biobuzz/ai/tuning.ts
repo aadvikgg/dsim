@@ -76,3 +76,17 @@ export const BB_AI_AUTO_MARGIN = 2;
 
 /** below this many seconds left in the MATCH a bot stops collecting and fires what it has */
 export const BB_AI_LAST_CALL_S = 4;
+
+/**
+ * THE FLOWER TOUR'S PRICES (`flowerTour`, `hoardingNow`): seconds to place one NECTAR once the
+ * tube is at the ring, seconds to fetch a NECTAR the bot does not already carry, and the margin on
+ * top of the tour's own time at which the plan starts. The margin is the knob the start-time sweep
+ * measured: starting the tour 12–20 s from the end beat 30 s and beat 1:12 by 34–39 points a solo
+ * match for both tube builds.
+ */
+export const BB_AI_PLACE_S = 1.5;
+export const BB_AI_NECTAR_FETCH_S = 2.5;
+export const BB_AI_TOUR_MARGIN = 3;
+
+/** the prior on a bot's own TIP rate — one TIP per this many seconds (`tipRate`) */
+export const BB_AI_TIP_PRIOR_S = 12;
