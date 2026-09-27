@@ -679,6 +679,32 @@ The old P2P lockstep/mesh/TURN/Supabase-lobby is DELETED. Full roadmap: `docs/ne
   With that discipline you don't have to sync branches before deploying the server.
   **A new `RobotSpec` field is NOT a protocol change** — but an older server's `coerceSpec`
   will drop it, so mirror it onto an older field when one exists (see CR mounts).
+- **IDLE TRAFFIC GOES TO THE PRIMARY ROUTER, NOT THE ANYCAST HOST** (`src/net/primaryHost.ts`,
+  `router/`, 2026-09-27). The game host is Anycast: a request lands on the NEAREST region and Fly
+  starts that region's machine if it is stopped. Menu polls (`/api/status`, `/api/presence`,
+  the friends heartbeat, page views) kept satellites `started` 21-24 h a day against 4-104
+  match-hours a week. A server-side `fly-replay` cannot fix it (the satellite must be running
+  to send it), and a `fly-prefer-region` header makes the request CORS-preflighted, and the
+  preflight goes to the nearest region. So `dsim-primary` (`dsim-alpha-primary` for alpha) is
+  a separate app whose ONE machine is in iad; it answers every request, sockets included,
+  with `fly-replay: app=<game app>;region=iad`.
+  - `gameServerHttpUrl()` goes through the router. `nearestHttpUrl()` is the Anycast host and
+    is only for the `/health` latency probe (`ping.ts`), which measures the nearest region on
+    purpose. LAN signalling uses `primaryWsUrl()`. **Match, room, spectate and `?mm=1`
+    sockets stay on the Anycast host**: they must reach a room's region, and a replayed
+    `?mm=1` would report the router's region as the player's edge (`replaySrcRegion`).
+  - A request through the router arrives with a `fly-replay-src` header, so `/health?region=`
+    and `/api/lobbies?region=` answer locally there. Neither is sent through it (the Discord
+    Activity has no router: its `/gs` mapping is the only host its CSP allows).
+  - The router's `Host` reaches the game server; `siteHost()` folds any `*.fly.dev` name into
+    `<FLY_APP_NAME>.fly.dev` so the analytics visitor hash does not split old and new clients.
+    OAuth callbacks use `PUBLIC_ORIGIN`, set on both apps.
+  - `probePrimary()` (boot) falls back to the Anycast host for the page if the router does
+    not answer, so a missing router costs only the satellite wake-ups this was removing.
+  - Fly replays bodies up to 1 MB. `readBody` caps at 512 KB, so every upload fits.
+  - LAN rendezvous is per machine, so an OLD client (Anycast) and a new one (router) at the
+    same venue can miss each other until the old one reloads (the version gate).
+  - Deploy: `./scripts/fly-deploy.sh --router [--alpha]`. Its machines must stay in iad.
 - **A ROOM JOIN GOES WHERE THE ROOM IS** (`src/net/roomRegion.ts` `roomJoinRegion`). One app,
   many regions, and a CUSTOM room code is BARE: a matchmaker-staged room is `iad-abc123` and
   the proxy routes on the code alone, but a code two friends share carries nothing. A socket

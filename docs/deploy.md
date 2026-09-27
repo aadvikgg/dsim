@@ -349,6 +349,22 @@ the same thing manually). Check `GET /api/presence` first — if `online` is 0, 
 skip the wait. Keep `ADMIN_SECRET` out of git (it's only ever passed via env / the Fly
 secret; never commit it).
 
+### The primary router (`router/`)
+
+`dsim-primary` (production) and `dsim-alpha-primary` (alpha) are tiny separate apps with one
+`shared-cpu-1x`/256 MB machine in iad. They serve nothing: each request is answered with
+`fly-replay: app=<game app>;region=iad`. New clients send their HTTP APIs and LAN signalling
+there, so an idle tab no longer starts its nearest satellite (see `docs/area/netcode.md`).
+
+```bash
+./scripts/fly-deploy.sh --router --alpha   # dsim-alpha-primary (creates the app if missing)
+./scripts/fly-deploy.sh --router           # dsim-primary, production
+curl -sI https://dsim-primary.fly.dev/health   # x-region: iad, served by the game app
+```
+
+Order for production: deploy the game server first (it carries `siteHost`), then the router,
+then let the client reach `main`. A client that finds no router falls back to the Anycast host.
+
 ### Multi-region (one app, one machine per region)
 
 For a geographically spread player base, run the SAME app in several regions — this is
