@@ -24,6 +24,7 @@ import { DEFAULT_ASSISTS } from '../../src/sim/spawn';
 import { DEFAULT_SPEC } from '../../src/sim/specDefaults';
 import { BIOBUZZ_SIM } from '../../src/games/biobuzz/sim';
 import { bbScoreWorld } from '../../src/games/biobuzz/score';
+import type { BiobuzzState } from '../../src/games/biobuzz/state';
 import { bbBotBuildByKey } from '../../src/games/biobuzz/ai/builds';
 import { newSettleClock, settleStep } from '../../src/sim/settle';
 
@@ -77,6 +78,8 @@ export interface MatchRow {
   fouls: Record<Alliance, Record<string, number>>;
   warnings: Record<Alliance, number>;
   bots: BotRow[];
+  /** TELEOP seconds left when each alliance first had one of its own NECTAR in a FLOWER, or null */
+  firstPlaceLeftS: Record<Alliance, number | null>;
 }
 
 const MAX_TICKS = 16_000;
@@ -165,6 +168,7 @@ export function playBotMatch(job: BotJob): MatchRow {
 
   const cmds = new Map<number, RobotCommand>();
   const settle = newSettleClock();
+  const firstPlace: Record<Alliance, number | null> = { red: null, blue: null };
   let ticks = 0;
   let settledOut = false;
   while (ticks < MAX_TICKS && ticks < stopTicks && !settledOut) {
@@ -243,6 +247,15 @@ export function playBotMatch(job: BotJob): MatchRow {
         a.n = 0;
       });
     }
+    if (world.match.phase === 'teleop' && (firstPlace.red === null || firstPlace.blue === null)) {
+      const bb = world.biobuzz as BiobuzzState;
+      for (const f of bb.flowers) {
+        for (const id of f.stack) {
+          const c = world.balls.find((b) => b.id === id)?.color;
+          if ((c === 'red' || c === 'blue') && firstPlace[c] === null) firstPlace[c] = world.match.phaseTimeLeft;
+        }
+      }
+    }
     if (world.match.phase === 'post') settledOut = settleStep(settle, world, BIOBUZZ_SIM.settled);
   }
   for (const b of bots) b?.dispose?.();
@@ -269,6 +282,7 @@ export function playBotMatch(job: BotJob): MatchRow {
     fouls,
     warnings,
     bots: rows.filter((r) => r.tier !== 'idle'),
+    firstPlaceLeftS: firstPlace,
   };
 }
 
