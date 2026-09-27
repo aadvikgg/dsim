@@ -1,4 +1,16 @@
-# HANDOFF — 2026-09-27e (Prediction: Balanced is a pickable middle level)
+# HANDOFF — 2026-09-27f (BIOBUZZ 3D: NECTAR no longer wedges behind the hive; SIM_PATCH 2)
+
+**State: pushed on `alpha` (d3282ba4), NOT on `main`.** `npm test` (5215), `build`, `server:check`, `docaudit`, `bundleaudit` pass. `dsim-alpha` DEPLOYED from d3282ba4, `/health` ok, one machine. Production not deployed: that needs the owner's go, and main has to take the commit first.
+
+- **Owner:** "Often, nectar get stuck on top of the main beam that connects two CELLs and does not fall off. Try fixing this without breaking previous replays."
+- **Cause:** the exporter pads each tray slab 1.5 in outward. Behind the DOWN cell that took the drawn 4.2-in gap to the ACM panel under the pivot down to 3.3 in. A 3.6-in NECTAR sat in the V (back slab, then floor slab, against the panel), both narrow hulls, so the vibration gave up and froze it. POLLEN (2.8) fell through.
+- **Fix:** `cell_*_floor` / `cell_*_back` stand `BB3_TRAY_OUTER_SKIN` (0.5 in) outside the CAD face (`trayHullPoints`, `sim3d/bodies.ts`), in the authority and the predictor. NECTAR rained over both hives: 110/675 stuck → 0/675. No shot tunnels at any skin down to 0.02. Turret 62/75 → 62/75.
+- **Gameplay change to know about:** the dumper's close edge. At 24 in a FRONT+BACK dumper now scores 4/4 (was 2); the bottom row used to clip the padding under the mouth lip. 22 in still scores 0. The SIM3D check now pins 22 → 0, 24 → 4.
+- **Replays:** gated on `SIM_PATCH` 2; `trayOuterSkin(world)` builds the old slabs for a replay stamped below 2. Three bot matches recorded on the previous commit replay to the same world hash on this build; forced onto patch 2 one goes 265–263 → 60–85. Every recorder already stamps its own build's patch, so unlike patch 1 there is no backfill and no migration. The `replays.sim_patch` column default stays 1: nothing inserts without the column.
+- **Test fixture moved:** "roll 3d: an element at rest ON the HIVE frame" used that same wedge as its perch; no perch is left on either hive now, so it runs on the patch-1 tray (`w.simPatch = 1`). After the next `SIM_VERSION` bump deletes old branches it needs a new perch.
+- **Next:** promote to `main` and deploy production when the owner asks (`./scripts/fly-deploy.sh` from a main worktree).
+
+# 2026-09-27e (Prediction: Balanced is a pickable middle level)
 
 **State: pushed on `main` and `alpha`.** `build`, `uiaudit` (ui-components regenerated), `docaudit`, `npm test` pass. Client only.
 
@@ -7,7 +19,7 @@
 - Network screen: Auto spans the top row (`OptRow lead`, `.ds-opts.lead`), the four levels below it in order. Checked in light, dark and at 390 px.
 - Measured on one match and seed: CPU per second of play Light ~2 ms, Balanced ~40, Full ~80; corrections p95 ~2.7 / ~0.35 / ~0.26 in.
 
-# HANDOFF — 2026-09-27e (replays: SIM_PATCH keeps pre-fix BIOBUZZ 3D replays exact)
+# 2026-09-27e (replays: SIM_PATCH keeps pre-fix BIOBUZZ 3D replays exact)
 
 **State: pushed on `main` and `alpha`.** `npm test` (5147), `build`, `server:check`, `dbtest`, `bundleaudit`, `docaudit` pass. DEPLOYED to production and `dsim-alpha`; 0055 applied. Verified on production: the top eight pre-fix records and the two records saved after 17:16:30Z (backfilled to patch 1) all re-simulate to their stored scores.
 
