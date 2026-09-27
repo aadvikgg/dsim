@@ -1,3 +1,11 @@
+# HANDOFF — 2026-09-27c (dsim-alpha redeployed; Vercel alpha still needs the owner)
+
+**State.** `f765925f` (= `origin/alpha`) is on **dsim-alpha**: `/health` ok, machine `87e003b021d278` 1/1, so online bot seats run the 09-27b policy. The deploy fetched the tarballs from `Horizon-36596/zenith-dev@dsim-vendor` with the gh CLI token in the shell only; all three matched the lockfile, so the vendor branch is correct. The machine is now `shared-cpu-2x:1024MB` (what `fly.alpha.toml` says). Before this deploy it was `performance-1x:2048MB`.
+
+**Still blocked: the Vercel alpha build.** Nobody is signed into Vercel here, and the vendor token has to be created and entered by the owner. Open steps: (1) a fine-grained token, Contents: read on `zenith-dev` only; (2) Preview env on the `alpha` branch: `ZENITH_VENDOR_REPO=Horizon-36596/zenith-dev`, `ZENITH_VENDOR_TOKEN`, `VITE_ZENITH_URL`; (3) redeploy alpha. `zenith-dev` has no GitHub deployment records, so the gated Zenith URL for `VITE_ZENITH_URL` has to come from the owner.
+
+---
+
 # HANDOFF — 2026-09-27b (BIOBUZZ bots: stronger in 2v2, and a tuner)
 
 **State: pushed on `alpha`.** `build`, `server:check`, `npm test` (5142 BIOBUZZ checks + shared), `test:ai`, `docaudit` pass. Sim-side AI change: online bot seats (custom lobbies, LAN) run on the game server, so **dsim-alpha needs a redeploy** for them to play the new policy there; solo practice gets it from Vercel. Not deployed: `fly-deploy.sh` now stops at `fetch-zenith.mjs` without `ZENITH_VENDOR_*`, so it rides with the Zenith section's step (4). Post-rebase, `npm test`/`build` here fail only on the missing Zenith packages (same on clean alpha); the AI + AIPLAY lanes (83 checks) pass on the rebased tree and the whole suite passed before the rebase.
