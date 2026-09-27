@@ -1,4 +1,4 @@
-# HANDOFF — 2026-09-27k (idle traffic goes to a primary router so satellites can auto-stop)
+# HANDOFF — 2026-09-27l (idle traffic goes to a primary router so satellites can auto-stop)
 
 **State: pushed on `alpha`.** `build`, `server:check`, `docaudit`, `npm test` pass. Alpha game server and the new `dsim-alpha-primary` router DEPLOYED and measured. **Production not deployed** (owner): server change, no migration, plus a new app.
 
