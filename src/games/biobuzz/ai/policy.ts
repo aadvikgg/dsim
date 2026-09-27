@@ -1122,16 +1122,22 @@ function waitRoute(c: Ctx, mem: BbBotMemory, buttons: BbAiButtons): RobotCommand
 // THE ENVELOPE AND THE TRIGGER
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** is `p` inside this tier's firing envelope of the cell to line up on? */
-function inEnvelope(c: Ctx, p: Vec2): boolean {
-  const pol = polarOf(p, c.aimCell.pos, c.aimCell.mouth ?? { x: 0, y: 1 });
+/** is `p` inside this tier's firing envelope of the cell to line up on (or of `cell`)? */
+function inEnvelope(c: Ctx, p: Vec2, cell: ScoreTarget = c.aimCell): boolean {
+  const pol = polarOf(p, cell.pos, cell.mouth ?? { x: 0, y: 1 });
   return pol.d >= c.dRange[0] && pol.d <= c.dRange[1] && Math.abs(pol.th) <= c.envAng;
 }
 
 /**
- * THE STAND — the nearest point of the envelope, clear of the field, of every robot and of any
- * stand the bot recently got stuck at. In a 2v2 the lower id leans to one side of the mouth and
- * its partner to the other, so two partners do not queue for one spot.
+ * THE STAND — the cheapest point of the envelope to reach, clear of the field, of every robot and
+ * of any stand the bot recently got stuck at.
+ *
+ * Candidates are the nearest point of the envelope (leaning to one side of the mouth in a 2v2,
+ * the lower id to one side and its partner to the other) and a grid across the whole envelope,
+ * and the cheapest clear one wins on travel time. The first version tried four nearest-point
+ * variants and, when a partner stood on all of them, went to the blocked one anyway: the measured
+ * 2v2 case was a bot dithering beside its own partner, who was parked on the stand waiting for
+ * the tray, until the stuck test threw it off.
  */
 function standFor(c: Ctx, mem: BbBotMemory, cell: ScoreTarget): Vec2 {
   const { r } = c;
@@ -1144,12 +1150,23 @@ function standFor(c: Ctx, mem: BbBotMemory, cell: ScoreTarget): Vec2 {
   const d0 = c.dRange[0];
   const d1 = c.dRange[1];
   const ang = c.envAng;
-  const tries = [bias, bias + 0.9, bias - 0.9, 0];
+  const base = datan2(n.y, n.x);
+  const inner = Math.max(0.05, ang - 0.2);
+  const cands: { s: Vec2; pref: number }[] = [];
+  for (const b of [bias, bias + 0.9, bias - 0.9, 0]) cands.push({ s: envelopeStand(r.pos, cell.pos, n, d0, d1, ang, clamp(b, -1, 1)), pref: b === bias ? 0 : 0.15 });
+  for (const f of [-1, -0.5, 0, 0.5, 1]) {
+    for (const dd of [d0 + 4, (d0 + d1) / 2, d1 - 4]) {
+      const th = base + f * inner;
+      // the lean still applies across the grid: the partner's side of the mouth costs a little
+      cands.push({ s: { x: cell.pos.x + dcos(th) * dd, y: cell.pos.y + dsin(th) * dd }, pref: 0.2 + (bias !== 0 && f * bias < 0 ? 0.3 : 0) });
+    }
+  }
   let best: Vec2 | null = null;
-  for (const b of tries) {
-    let s = envelopeStand(r.pos, cell.pos, n, d0, d1, ang, clamp(b, -1, 1));
-    s = insideFor(s, c.fp.circ + 1);
+  let bestCost = Infinity;
+  for (const cand of cands) {
+    let s = insideFor(cand.s, c.fp.circ + 1);
     if (c.auto && c.side * s.x < c.fp.circ + BB_AI_AUTO_MARGIN) s = { x: c.side * (c.fp.circ + BB_AI_AUTO_MARGIN), y: s.y };
+    if (!inEnvelope(c, s, cell)) continue;
     if (mem.badStands.some((q) => q.until > mem.decisions && hyp(q.x - s.x, q.y - s.y) < 10)) continue;
     if (!poseClear(c.fp, s.x, s.y, r.heading, 0.3)) continue;
     let crowded = false;
@@ -1159,8 +1176,11 @@ function standFor(c: Ctx, mem: BbBotMemory, cell: ScoreTarget): Vec2 {
       if (hyp(o.pos.x - s.x, o.pos.y - s.y) < clear && hyp(o.vel.x, o.vel.y) < 20) crowded = true;
     }
     if (crowded) continue;
-    best = s;
-    break;
+    const cost = hyp(s.x - r.pos.x, s.y - r.pos.y) / c.vmax + cand.pref;
+    if (cost < bestCost) {
+      bestCost = cost;
+      best = s;
+    }
   }
   mem.badStands = mem.badStands.filter((q) => q.until > mem.decisions);
   return best ?? insideFor(envelopeStand(r.pos, cell.pos, n, d0, d1, ang, bias), c.fp.circ + 1);
