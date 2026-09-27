@@ -3572,13 +3572,46 @@ async function main(): Promise<void> {
       const advisory = async (): Promise<number> =>
         Number((await db.query<{ n: string }>(`select count(*) as n from pg_locks where locktype = 'advisory'`)).rows[0].n);
       await an.analyticsTick(mins(140).getTime()); // no traffic noted: must not touch the database
+      // cleared so the next check proves the pass took its lock, ran and COMMITTED: a pass that
+      // skipped (lock refused) or rolled back would leave the day whole all the same
+      await db.query(`delete from analytics_hourly where hour >= '2026-09-10' and hour < '2026-09-11'`);
       an.noteTraffic();
       await an.analyticsTick(mins(140).getTime());
+      const hour12 = (await db.query<{ views: number }>(
+        `select views from analytics_hourly where hour = '2026-09-10T12:00:00Z' and game = '*' and dim = 'total' and val = '*'`,
+      )).rows[0];
+      check('analytics/job: the pass runs under its lock and commits the hours it rolled', hour12?.views === 4, `views=${hour12?.views}`);
       check(
         'analytics/job: a pass three hours into the day leaves the day whole',
         (await daily('*', 'total', '*'))?.views === 5,
       );
       check('⚠️ analytics/job: the pass gives its advisory lock back', (await advisory()) === 0);
+      // Neon's transaction-mode pooler can leak a SESSION lock onto a backend another client
+      // keeps alive (it hung dsim-alpha's migrate() on 2026-09-27), and a leaked try-lock makes
+      // every machine skip the job for good. The pass takes a transaction lock, on a key the
+      // old session lock never used.
+      const src = readFileSync(join(ROOT, 'server/analytics.ts'), 'utf8');
+      check('analytics/job: the pass takes a TRANSACTION lock, never a session one',
+        /pg_try_advisory_xact_lock/.test(src) && !/pg_(try_)?advisory_lock\(|pg_advisory_unlock/.test(src));
+      check('analytics/job: the lock key is not the one older builds may have leaked', an.ANALYTICS_LOCK_KEY !== 0x414e4c59);
+      // One transaction means one failure rolls back the whole pass, so the daily half runs under
+      // a savepoint. Break it (the next hour's pass is due one) and the hourly rows must still land.
+      await db.query(`delete from analytics_hourly where hour >= '2026-09-10' and hour < '2026-09-11'`);
+      await db.query(`alter table analytics_daily rename to analytics_daily_off`);
+      const logged = console.error;
+      console.error = () => {};
+      an.noteTraffic();
+      try {
+        await an.analyticsTick(mins(200).getTime());
+      } finally {
+        console.error = logged;
+        await db.query(`alter table analytics_daily_off rename to analytics_daily`);
+      }
+      const kept = (await db.query<{ views: number }>(
+        `select views from analytics_hourly where hour = '2026-09-10T12:00:00Z' and game = '*' and dim = 'total' and val = '*'`,
+      )).rows[0];
+      check('analytics/job: a failing daily half does not roll back the hours before it', kept?.views === 4, `views=${kept?.views}`);
+      check('analytics/job: ...and the failed pass still gives its lock back', (await advisory()) === 0);
       an.stopAnalyticsJobs();
     }
 

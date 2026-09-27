@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # HANDOFF — 2026-09-27i (Zenith autos on alpha: login fixed, overlays on the art, start pose draggable)
 
 **State: pushed on `alpha`, NOT on `main`.** The alpha Vercel build is green with the vendored Zenith packages, and the owner-side flow works on https://alpha.playdsim.com: New in Zenith → password → "Editing for DSIM" → save back.
@@ -7,6 +8,19 @@
 - **No Fly deploy needed for it:** `dsim-alpha` uses the server copy of that field for findings only.
 
 # 2026-09-27h (ranked: team expectation, margin, calibration RD, partner absence, 2v2 balance)
+=======
+# HANDOFF — 2026-09-27g (analytics job: a transaction advisory lock)
+
+**State: pushed on `alpha`.** `dbtest`, `server:check` pass. ⚠️ **Server change, no migration**; production not deployed (needs the owner).
+
+- **Bug:** `analyticsTick` took a SESSION lock (`pg_try_advisory_lock`) through Neon's transaction-mode pooler, the same bug that hung `migrate()` on `dsim-alpha`. A leaked try-lock never hangs anything; every machine just skips the rollup, the concurrency sample and the retention sweep (the salt deletion included) from then on.
+- **Fix (`server/analytics.ts`):** each pass is one transaction (`tx`) under `pg_try_advisory_xact_lock`, new key `ANL2` (`0x414e4c32`) so a lock an older build leaked on `ANLY` cannot block it. The daily half (day rollup + sweep) runs under a savepoint, so its failure keeps the hourly rows as it did when each statement committed alone; `lastDailyAt` moves only after commit. `runRollupGrain`, `sweepAnalytics`, `sampleConcurrency` take an optional `Tx` (default `q`).
+- **Why one transaction is fine:** other machines try-lock and go back to sleep, the dashboard reads under MVCC, ingest only inserts fresh raw rows, the sweep only deletes rows past retention. Cost: one pooled connection for the pass.
+- **dbtest:** the pass commits the hours it rolled (hourly rows cleared first), a broken `analytics_daily` does not roll back the hourly rows (mutation-checked: fails without the savepoint), no advisory lock survives either pass, source pin on the xact lock, key is not `ANLY`.
+- **Rolling deploy:** old and new builds use different keys, so one pass of each can overlap once; both are idempotent upserts.
+
+# HANDOFF — 2026-09-27h (ranked: team expectation, margin, calibration RD, partner absence, 2v2 balance)
+>>>>>>> aa0ba84e (Analytics job: a transaction advisory lock, so a pooled backend cannot leak it)
 
 **State: pushed on `main` and `alpha`; DEPLOYED 2026-09-27** to production (announced 5 min, 8 machines healthy, satellite sizes re-applied, 0056 applied by iad 21:25Z) and to `dsim-alpha`. `npm test`, `test:mm` (222), `dbtest`, `server:check`, `build`, `docaudit` pass. ⚠️ **Server change + migration 0056** (nullable `match_participants.premade`). No ranked reset: no stored rating is rewritten, `BALANCE_VERSION`/`SIM_VERSION` untouched. Rules in `docs/area/accounts.md` ("RATING ADJUSTMENTS AND 2v2 BALANCE").
 
@@ -17,7 +31,7 @@
 - **Rejected by the owner:** a winning-streak RD boost (exploitable), a longer calibration window, per-game margins, a separate premade queue (pool too small; 0056 records the data to decide later).
 - **Not built:** a results-screen line explaining a voided or protected result (the delta just reads ±0 / smaller). Would need a cap-gated `EloDelta` field and client copy.
 - **Watch after deploy:** the podium awards at the next act rollover will reflect the new deltas from today on.
-- **Migration runner fix (found deploying this):** `migrate()` took a SESSION advisory lock through Neon's transaction-mode pooler, where the unlock can land on a different backend and leak the lock. `dsim-alpha`'s boot then waited on it indefinitely: 0056 unapplied, no "database ready", no staff sync or award job. It now takes `pg_advisory_xact_lock` per migration (new key `MIG2`) and re-checks `schema_migrations` under it. `dbtest` asserts no advisory lock survives `migrate()`. The analytics job's `pg_try_advisory_lock` has the same pooler problem (it can only skip runs, not hang); not fixed here.
+- **Migration runner fix (found deploying this):** `migrate()` took a SESSION advisory lock through Neon's transaction-mode pooler, where the unlock can land on a different backend and leak the lock. `dsim-alpha`'s boot then waited on it indefinitely: 0056 unapplied, no "database ready", no staff sync or award job. It now takes `pg_advisory_xact_lock` per migration (new key `MIG2`) and re-checks `schema_migrations` under it. `dbtest` asserts no advisory lock survives `migrate()`. The analytics job had the same pooler problem; fixed in 27g.
 
 # HANDOFF — 2026-09-27g (Zenith autos: gated Zenith is live, alpha Vercel build retried)
 
