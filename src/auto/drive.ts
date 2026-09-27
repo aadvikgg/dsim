@@ -31,7 +31,8 @@ export function powersToCommand(r: RobotState, p: DrivePowerTriple, buttons: Aut
   const f = Number.isFinite(p.forward) ? p.forward : 0;
   const s = Number.isFinite(p.strafe) ? p.strafe : 0;
   const t = Number.isFinite(p.turn) ? p.turn : 0;
-  const base = { intake: buttons.intake, fire: buttons.fire };
+  // `bbRamp` rides only while pressed, so a command that never presses it is the one it always was
+  const base = { intake: buttons.intake, fire: buttons.fire, ...(buttons.bbRamp ? { bbRamp: true } : {}) };
   if (dp.saturation === 'tank') {
     // `updateRobot`'s tank: forward = (ld + rd) / 2, turn = (rd - ld) / 2, in units of full
     // speed and full turn. A tank cannot strafe, so Pedro's strafe is dropped, and the pair is

@@ -26,8 +26,12 @@ export interface ZenithAutoSetup {
   waypoints?: string;
 }
 
-/** The buttons a running auto command holds this tick, ORed into the drive command. */
-export type AutoButtons = Pick<RobotCommand, 'intake' | 'fire'>;
+/**
+ * The buttons a running auto command holds this tick, ORed into the drive command. `bbRamp` is
+ * BIOBUZZ's ramp toggle, the driver's own button; absent reads false, and a host that never
+ * presses it leaves the command exactly as it was before the field existed.
+ */
+export type AutoButtons = Pick<RobotCommand, 'intake' | 'fire' | 'bbRamp'>;
 
 /**
  * A named command as a host runs it: the scheduler's life cycle, the one SolversLib and
@@ -73,6 +77,11 @@ export interface GameAutoAdapter {
   rules?(field: import('@horizon36596/zenith-schema').Field): import('@horizon36596/zenith-core').SeasonRules;
   /** the Zenith `robot.json` object for a DSIM build: footprint, speeds, mouths, registry */
   robot(spec: RobotSpec): unknown;
+  /**
+   * Commands this game runs that THIS BUILD cannot (BIOBUZZ's `setRamp` on a build with no ramp),
+   * each with the sentence the autonomous panel shows. The host still runs them, done at once.
+   */
+  notOnRobot?(spec: RobotSpec): Readonly<Record<string, string>>;
   /** this robot's mechanisms, for one seat */
   createHost(world: World, robotId: number): AutoHost;
   /**

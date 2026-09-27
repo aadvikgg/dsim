@@ -282,6 +282,12 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
                     <dd>{v.unsupported.join(', ')}. These end at once.</dd>
                   </>
                 )}
+                {v.notOnRobot.length > 0 && (
+                  <>
+                    <dt>Not on this robot</dt>
+                    <dd>{v.notOnRobot.map((c) => `${c.name}: ${c.why}`).join(' ')} {v.notOnRobot.length > 1 ? 'These end' : 'It ends'} at once.</dd>
+                  </>
+                )}
               </dl>
             )}
             <div className="ds-auto-tools">

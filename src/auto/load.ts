@@ -61,6 +61,8 @@ export interface LoadedAuto {
   findings: Finding[];
   /** named commands and conditions the file uses that this game does not run */
   unsupported: string[];
+  /** commands the file uses that this game runs and this build cannot, with the reason */
+  notOnRobot: { name: string; why: string }[];
 }
 
 const DSIM_ALLIANCE: Record<Alliance, Auto['alliance']> = { red: 'RED', blue: 'BLUE' };
@@ -184,5 +186,7 @@ export function loadZenithAuto(
     ...used.commands.filter((n) => !adapter.commands.includes(n)),
     ...used.conditions.filter((n) => !adapter.conditions.includes(n)),
   ];
-  return { written, running, mirrored, robot, field, plan: thePlan, estimate: est, findings, unsupported };
+  const cannot = adapter.notOnRobot?.(spec) ?? {};
+  const notOnRobot = used.commands.filter((n) => Object.hasOwn(cannot, n)).map((name) => ({ name, why: cannot[name] }));
+  return { written, running, mirrored, robot, field, plan: thePlan, estimate: est, findings, unsupported, notOnRobot };
 }

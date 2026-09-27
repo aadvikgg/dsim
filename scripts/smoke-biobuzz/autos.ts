@@ -4,7 +4,10 @@ import { fileURLToPath } from 'node:url';
 import type { Alliance, Artifact, RobotCommand, World } from '../../src/types';
 import { PRE_COUNTDOWN as C_PRE, SIM_DT } from '../../src/config';
 import { BIOBUZZ_SIM } from '../../src/games/biobuzz/sim';
-import { BB_POLLEN_R } from '../../src/games/biobuzz/config';
+import { BB_FLOWERS, BB_POLLEN_R, BB_RAMP_DEPLOY_S } from '../../src/games/biobuzz/config';
+import { bbFootprint, bbRampSettled } from '../../src/games/biobuzz/robot';
+import { BIOBUZZ_AUTO_COMMANDS } from '../../src/games/biobuzz/auto';
+import type { RobotSpec } from '../../src/types';
 import { startMatch } from '../../src/sim/match';
 import { coerceSetup, type RobotSetup } from '../../src/sim/spawn';
 import { driveParams } from '../../src/sim/drivetrain';
@@ -36,6 +39,13 @@ import { DEFAULT_ASSISTS } from '../../src/sim/spawn';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const adapter = autoAdapterFor('biobuzz');
+
+/** A build with the deployable ramp intake, everything else the default. */
+const RAMP_BUILD: Partial<RobotSpec> = {
+  ...BB_DEFAULT_SPEC,
+  intakeMount: 'front',
+  bbMech: { ...BB_DEFAULT_SPEC.bbMech, intake: { kind: 'ramp' } } as unknown as RobotSpec['bbMech'],
+};
 
 interface Pose {
   xIn: number;
@@ -407,6 +417,126 @@ export function autoChecks(check: Check): void {
     drive(world, seat, 6);
     const cut = seat.trace()?.steps.find((s) => s.id === 'cut');
     check('AUTO: an endCondition that reads true cuts the path at once', cut?.conditionFired === true && world.robots[0].pos.x > 55, `x ${world.robots[0].pos.x.toFixed(1)}`);
+  }
+
+  // ── setRamp: the driver's RAMP toggle, pressed by the auto (DSIM only; the robot has no ramp) ─
+  {
+    check('AUTO: setRamp is a command the BIOBUZZ adapter runs', (BIOBUZZ_AUTO_COMMANDS as readonly string[]).includes('setRamp') && adapter.commands.includes('setRamp'));
+    type Cmd = { name: string; summary?: string; params?: { state?: { type: string; values?: string[] } }; requires?: string[] };
+    for (const [label, spec] of [
+      ['a ramp build', { ...BB_DEFAULT_SPEC, ...RAMP_BUILD }],
+      ['a build without a ramp', BB_DEFAULT_SPEC],
+    ] as const) {
+      const file = adapter.robot(spec as RobotSpec) as { commands: Cmd[] };
+      const c = file.commands.find((x) => x.name === 'setRamp');
+      check(
+        `AUTO: the robot file handed to Zenith lists setRamp with a DEPLOY/STOW state, for ${label}`,
+        c !== undefined && c.params?.state?.type === 'enum' && c.params.state.values?.join() === 'DEPLOY,STOW' && !!c.summary && !(c.requires ?? []).includes('intake'),
+        JSON.stringify(c),
+      );
+    }
+    const rampAuto = {
+      ...probeAuto(),
+      steps: [
+        { id: 'deploy', kind: 'command', name: 'setRamp', args: { state: 'DEPLOY' } },
+        { id: 'hold', kind: 'wait', seconds: 0.5 },
+        { id: 'stow', kind: 'command', name: 'setRamp', args: { state: 'STOW' } },
+        { id: 'again', kind: 'command', name: 'setRamp', args: { state: 'STOW' } },
+      ],
+    };
+    for (const physics of ['2d', '3d'] as const) {
+      const { world, seat } = stage(zen(rampAuto), 'blue', physics, { spec: { ...BB_DEFAULT_SPEC, ...RAMP_BUILD } as RobotSpec });
+      // SCHEMA is Zenith's "robot.json does not register this command" (the probe's start pose is
+      // tuned for the default footprint, so its start-legality finding is not this check's business)
+      const errors = seat.loaded?.findings.filter((f) => f.code === 'SCHEMA') ?? [];
+      check(`AUTO ${physics}: a setRamp auto has no Zenith SCHEMA finding on a ramp build, and nothing is listed against it`, seat.loaded !== null && errors.length === 0 && seat.loaded.unsupported.length === 0 && seat.loaded.notOnRobot.length === 0, errors.map((f) => f.message).join(' | '));
+      startMatch(world);
+      const r = world.robots[0];
+      const x0 = r.pos.x;
+      const commands = new Map<number, RobotCommand>();
+      let deployedAtHold: boolean | null = null;
+      let pressedTicks = 0;
+      let lastCmd: RobotCommand | null = null;
+      for (let i = 0; i < 60 * 3 && seat.status().state !== 'done'; i++) {
+        const c = localizeCommand(seat.step(world, cmd({})));
+        if (c.bbRamp) pressedTicks++;
+        if (deployedAtHold === null && seat.status().stepId === 'hold') deployedAtHold = bbRampSettled(r, world.time);
+        commands.set(0, c);
+        lastCmd = c;
+        world.events.length = 0;
+        BIOBUZZ_SIM.step(world, SIM_DT, commands);
+      }
+      const t = seat.trace()?.steps ?? [];
+      const dep = t.find((s) => s.id === 'deploy');
+      const again = t.find((s) => s.id === 'again');
+      check(`AUTO ${physics}: setRamp DEPLOY presses the RAMP button and ends with the ramp deployed and settled`, deployedAtHold === true && pressedTicks >= 2, `settled at the wait ${String(deployedAtHold)}, pressed ${pressedTicks} ticks`);
+      check(
+        `AUTO ${physics}: ...taking the swing and no more (about ${BB_RAMP_DEPLOY_S} s)`,
+        dep !== undefined && dep.endS - dep.startS >= BB_RAMP_DEPLOY_S - 1e-6 && dep.endS - dep.startS <= BB_RAMP_DEPLOY_S + 0.15,
+        dep ? `${(dep.endS - dep.startS).toFixed(3)} s` : 'no trace step',
+      );
+      check(`AUTO ${physics}: setRamp STOW folds it again, and the routine finishes`, seat.status().state === 'done' && r.bbRampOut === false && bbRampSettled(r, world.time) === false, `${seat.status().state}, out ${String(r.bbRampOut)}`);
+      check(`AUTO ${physics}: setRamp STOW on a stowed ramp ends at once and presses nothing`, again !== undefined && again.endS - again.startS <= SIM_DT + 1e-6 && lastCmd?.bbRamp !== true, again ? `${(again.endS - again.startS).toFixed(3)} s` : 'no trace step');
+      check(`AUTO ${physics}: setRamp never moves the robot`, Math.abs(r.pos.x - x0) < 0.25, `moved ${(r.pos.x - x0).toFixed(3)} in`);
+    }
+    {
+      // THE POINT OF IT: an auto that deploys the ramp and drives into a FLOWER pulls POLLEN out
+      // (the match's own staged columns, F3 on BLUE's right wall). The path ends 1 in past flush so
+      // the follower keeps pressing, the way a driver holds the stick; the same run WITHOUT the
+      // deploy takes nothing, so the extraction is the command's doing and not the drive's.
+      // Measured 2026-09-27 over four approaches (lateral -1.5…+1 in, speed 0.35…1.0, 14…20 in
+      // out): all four took all four POLLEN in both physics, the first one 0.65…1.17 s in.
+      const f = BB_FLOWERS[2];
+      const spec = { ...BB_DEFAULT_SPEC, ...RAMP_BUILD } as RobotSpec;
+      const foot = bbFootprint(spec).front;
+      const flowerAuto = (deploy: boolean): Record<string, unknown> => ({
+        formatVersion: 3,
+        name: 'lane-ramp-flower',
+        alliance: 'BLUE',
+        start: { pose: { xIn: f.x - foot - 14, yIn: f.y + 1, headingRad: 0 } },
+        steps: [
+          ...(deploy ? [{ id: 'deploy', kind: 'command', name: 'setRamp', args: { state: 'DEPLOY' } }] : []),
+          { id: 'on', kind: 'command', name: 'setIntake', args: { side: 'BOTH', state: 'FORWARD' } },
+          {
+            id: 'in',
+            kind: 'path',
+            speedFraction: 0.8,
+            segments: [{ kind: 'line', from: 'current', to: { xIn: f.x - foot + 1, yIn: f.y + 1 } }],
+            heading: { mode: 'constant', headingRad: 0 },
+          },
+        ],
+      });
+      const extract = (physics: '2d' | '3d', deploy: boolean): { got: number; out: boolean } => {
+        const { world, seat } = stage(zen(flowerAuto(deploy)), 'blue', physics, { spec });
+        const r = world.robots[0];
+        r.hopper.length = 0; // staging, before the match: an empty hopper so the intake can take
+        startMatch(world);
+        drive(world, seat, 3);
+        return { got: r.hopper.length, out: r.bbRampOut === true };
+      };
+      for (const physics of ['2d', '3d'] as const) {
+        const q = extract(physics, true);
+        check(`AUTO ${physics}: an auto that runs setRamp DEPLOY and drives into a FLOWER pulls POLLEN out of it`, q.got >= 1 && q.out, `hopper ${q.got}, ramp out ${q.out}`);
+      }
+      const none = extract('2d', false);
+      check('AUTO 2d: ...and the same drive with the ramp left folded takes nothing', none.got === 0 && !none.out, `hopper ${none.got}`);
+    }
+    {
+      // NO RAMP: done at once, the button never pressed, and the panel says why
+      const { world, seat } = stage(zen(rampAuto), 'blue', '2d');
+      const why = seat.loaded?.notOnRobot.find((c) => c.name === 'setRamp');
+      check('AUTO: on a build without a ramp the panel lists setRamp as not on this robot, and not as unknown to DSIM', why !== undefined && /no ramp/.test(why.why) && seat.loaded?.unsupported.length === 0, JSON.stringify(seat.loaded?.notOnRobot));
+      startMatch(world);
+      let pressed = false;
+      const log = drive(world, seat, 3);
+      for (const c of log.commands) if (c.bbRamp) pressed = true;
+      const dep = seat.trace()?.steps.find((s) => s.id === 'deploy');
+      check(
+        'AUTO: on a build without a ramp setRamp ends at once, presses nothing, and the routine carries on',
+        seat.status().state === 'done' && !pressed && dep !== undefined && dep.endS - dep.startS <= SIM_DT + 1e-6 && world.robots[0].bbRampOut === undefined,
+        `${seat.status().state}, pressed ${pressed}, took ${dep ? (dep.endS - dep.startS).toFixed(3) : '?'} s`,
+      );
+    }
   }
 
   // ── the buzzer and Free Drive: the seat lets go ─────────────────────────────────────────
