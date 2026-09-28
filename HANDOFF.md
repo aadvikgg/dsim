@@ -1,3 +1,14 @@
+# HANDOFF — 2026-09-27m (online: one shot sound per shot; a snapshot's rounded clocks rebuilt)
+
+**State: pushed on `alpha`.** `npm test`, `build`, `server:check`, `bundleaudit`, `docaudit` pass. Client only, no deploy. **Not on `main`** (a push there is a production client deploy; owner's call).
+
+- **Owner:** "with the new prediction, it spams the shooting sound a ton and fakes the shooting animation but it never launches".
+- **Cause:** `round3` rounds `world.time`, the match countdowns and the shot stamps to 1 ms on the wire, and the sim compares them every tick. With the client a round trip ahead (`leadControl.ts`), every snapshot in the lead window re-decided each shot from rounded clocks: the same shot at a `world.time` a hair later (re-cued past the high-water mark), or a tick early (launched, then jumped back when the room fired a tick later).
+- **Measured** (a real `Room` behind a jittery latency queue, a client restating `stepServer`/`reconcile`/`handleActionAudio`, BIOBUZZ 3D driven by the game's own bot): 1.7-2.5 cues per real shot at 66-150 ms, up to four per dumper fling. After: BIOBUZZ turret 42/40 at 66 ms and 50/43 at 150 ms, dumper 17/16 and 12/12, DECODE 3/3, Chain Reaction 151/133 (it shows the same ~10% with no rounding at all: particle prediction misses some shots by a tick).
+- **Fix:** `src/net/wireClocks.ts`, called by `ServerSession` on every decoded snapshot: `world.time` from the tick, `lastFireAt`/`lastIntakeAt` onto the tick grid, `preCountdown`/`phaseTimeLeft` from their start, bit for bit; anything the rounding cannot explain is left alone, and a tick past an hour is ignored (LAN snapshots are untrusted). `handleActionAudio` keeps its marks in ticks.
+- **Left:** `fireReadyAt` cannot be rebuilt (time + arbitrary interval) and still flips a rare shot by a tick. Sending it unrounded from `server/wire.ts` would close that: ~11 bytes per robot per snapshot, and a server deploy.
+- The probe used for the numbers is not committed (the smoke block "shot cues:" is the kept reproduction).
+
 # HANDOFF — 2026-09-27l (idle traffic goes to a primary router so satellites can auto-stop)
 
 **State: pushed on `alpha`.** `build`, `server:check`, `docaudit`, `npm test` pass. Alpha game server and the new `dsim-alpha-primary` router DEPLOYED and measured. **Production not deployed** (owner): server change, no migration, plus a new app.
