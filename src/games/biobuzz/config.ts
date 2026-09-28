@@ -113,9 +113,10 @@ export const BB_HALF_Y = FIELD_HALF;
  * wide. BIOBUZZ draws its own grid from this and from `BB_TILE_SEAMS`; `C.TILE` (24) stays
  * DECODE's and Chain Reaction's, because their fields are still modelled on the nominal tile.
  *
- * The seams are NOT evenly spaced — a tile body is 24.312 in with its interlock tabs, and the
- * measured gaps run 23.176…23.986 — so anything DRAWING the grid uses `BB_TILE_SEAMS`, the seven
- * measured lines, and this constant is their mean, for the places that need one number.
+ * Anything DRAWING the grid uses `BB_TILE_SEAMS`: the two perimeter edges and the five tile
+ * JOINTS, evenly spaced at 23.502 (a 24.312-in tile body less one 0.810-in interlock), with the
+ * outer tiles cut straight to 23.581. This constant is the mean, for the places that need one
+ * number.
  */
 export const BB_TILE_PITCH = TILE_PITCH;
 export const BB_TILE_SEAMS = TILE_SEAMS;

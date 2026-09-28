@@ -1,8 +1,8 @@
 import * as THREE from 'three';
-import { BB_HALF_X, BB_TILE_SEAMS } from '../config';
+import { BB_HALF_X } from '../config';
 import { FINISHES, finishF0, type Finish, type FinishId } from '../graphics/finishes';
 import type { BbFieldHandles } from './renderField';
-import { BB_TILE_TOOTH } from './renderTiles';
+import { BB_TILE_TOOTH, tileFlankGeometry, tileJunctions, tileSeamLean } from './renderTiles';
 import {
   detailTexture,
   restoreTree,
@@ -189,22 +189,19 @@ function after(src: string, anchor: string, add: string): string {
  * WHAT IS NEW:
  *   • THE SEAM, ANALYTIC. The canvas has 14.5 texels to the inch, and at Extreme the driver-wall
  *     floor is seen at ~22 px/in, so the painted seam is magnified 1.5× and reads soft. The shader
- *     draws the same castellation (`renderTiles.ts`'s `tileSeamPolyline`, reproduced exactly: a
- *     50 %-duty square wave, period stretched to fit each cell, phase with a GAP centred on the
- *     cell) as a distance field in world inches, and from it a real 0.03-in gap (occluded: a
- *     5/8-in-deep slot is dark) and the die-cut rounded top edge (~1 mm radius, survey §1) as a
+ *     draws the same dovetail (`renderTiles.ts`'s `tileSeamPolyline`, reproduced exactly: the
+ *     comb of flats and filleted flanks, the X at every junction, the 45° flip at the middle of
+ *     every edge) as a distance field in world inches, and from it a real 0.03-in gap (occluded:
+ *     a 5/8-in-deep slot is dark) and the die-cut rounded top edge (~1 mm radius, survey §1) as a
  *     normal that rolls into the gap. Both are BOX-FILTERED over the pixel's own footprint, so the
  *     line is crisp at 22 px/in and fades to nothing — onto the painted seam — at range instead of
  *     shimmering.
- *   • THE FOAM. The repo's grain maps (`buildTileGrain`) put 65 % of their relief in a 0.19-in
- *     octave, about ten times coarser than EVA's closed cells, which is why the mat read as
- *     mottled. The twin drops both maps and takes the table's `stipple` (0.005–0.02-in cells) as
- *     triplanar detail, which is filtered by the ANISOTROPY ROW (`setDetailAnisotropy`) — the
- *     grain maps were stuck at 4 whatever the tier said.
+ *   • THE FOAM. The table's `stipple` (0.005–0.02-in cells) as triplanar detail, filtered by the
+ *     ANISOTROPY ROW (`setDetailAnisotropy`). The standard floor has no relief map at all.
  *   • WEAR. Faint rubber TRACKS in wheel pairs 14 in apart (a typical 18-in chassis' track), at
  *     most 6 % darker and 0.1 rougher (`FLOOR_TRACK_*`), and a per-tile ±0.035 roughness from the
  *     patchy anti-static spray the event guide calls for (survey §1).
- * The FLAT tier (Low's straight 2-px grid) has no castellation to match, so it gets the finish
+ * The FLAT tier (Low's straight 2-px grid) has no dovetail to match, so it gets the finish
  * and the wear but no seam.
  */
 const FLOOR_GAP_HALF_IN = 0.015;
@@ -318,54 +315,89 @@ function trackMask(): THREE.DataTexture | null {
 
 /**
  * THE FLOOR'S OWN SHADER. The seam function is `tileSeamPolyline` (`renderTiles.ts`) restated as a
- * distance: for a seam at `S` along an axis, the cell `[a, b]` it is crossing sets the period
- * `p = span / round(span / 2.369)` and the centre `c`; the tab is at `+A` where
- * `fract((t − c)/p + 0.75) < 0.5`, else `−A`, and the steps are at `c + p(¼ + k/2)`. The distance
- * to the seam is the nearer of the long run at `S ± A` and the step between them. Every x-seam
- * crosses the same cells in y (the seven lines are shared by both axes), so the tab side is the
- * same for all five at a given y and one pass finds the nearest AND counts the tile index.
+ * distance. For the joint nearest the point across, and the junction-to-junction cell it is in
+ * along (`tileJunctions`, virtual ones included, so the notched cut along the walls is drawn too),
+ * the point goes into the cell's frame `(s, t)` and is measured against: the X cut at each end and
+ * the 45° cut at the middle; the four flats nearest it, each clipped clear of those cuts; and the
+ * three flanks nearest it, each the canonical `tileFlankPoints` shape (a fillet and the straight
+ * flank, twice, point-symmetric) in its own frame, mirrored across the joint on every other one.
+ * What comes back is the nearest point, so the lip's normal is the direction to it.
  */
 const FLOOR_DECLS = /* glsl */ `
 varying vec2 vBbFloor;
 uniform sampler2D bbTrackMap;
 uniform float bbTrackK;
 #ifdef BB_SEAMS
-uniform float bbSeam[ 7 ];
-// the cell [a, b] along a seam that t lies in, with its centre and stretched period
-vec4 bbSeamCell( float t ) {
-\tvec2 ab = vec2( bbSeam[ 0 ], bbSeam[ 1 ] );
-\tfor ( int j = 1; j < 6; j ++ ) if ( t >= bbSeam[ j ] ) ab = vec2( bbSeam[ j ], bbSeam[ j + 1 ] );
-\tfloat span = ab.y - ab.x;
-\tfloat n = max( 1.0, floor( span / BB_TOOTH_P + 0.5 ) );
-\treturn vec4( ab, 0.5 * ( ab.x + ab.y ), span / n );
+uniform float bbJoint[ 7 ];
+vec2 bbSegQ( vec2 p, vec2 a, vec2 b ) {
+\tvec2 ab = b - a;
+\treturn a + ab * clamp( dot( p - a, ab ) / max( dot( ab, ab ), 1e-8 ), 0.0, 1.0 );
 }
-// one axis' seams: distance to the nearest (x), gradient of that distance in (across, along)
-// (yz), and how many seams lie below the point (w) — the tile index along this axis
-vec4 bbSeamAxis( float across, float along ) {
-\tvec4 cell = bbSeamCell( along );
-\tfloat dev = fract( ( along - cell.z ) / cell.w + 0.75 ) < 0.5 ? BB_TOOTH_A : - BB_TOOTH_A;
-\tfloat d = 1e4;
-\tfloat base = 0.0;
+// keep q if it is nearer p than the best so far (xy the point, z its distance)
+void bbKeep( vec2 p, vec2 q, inout vec3 best ) {
+\tfloat d = length( p - q );
+\tif ( d < best.z ) best = vec3( q, d );
+}
+// half a flank in its own frame (the lower fillet, then the straight flank to the centre); the
+// other half is this one turned about the centre, so sgn = -1 measures that one
+void bbFlankHalf( vec2 p, float sgn, inout vec3 best ) {
+\tvec2 q = p * sgn;
+\tvec2 c = vec2( BB_E, BB_R - BB_A );
+\tvec2 v = q - c;
+\tfloat ang = atan( v.y, v.x );
+\tvec2 e0 = vec2( BB_E, - BB_A );
+\tvec2 arc = ang >= - 1.5707964 && ang <= BB_ARC_END
+\t\t? c + BB_R * v / max( length( v ), 1e-6 )
+\t\t: ( length( q - e0 ) < length( q - BB_T1 ) ? e0 : BB_T1 );
+\tbbKeep( p, arc * sgn, best );
+\tbbKeep( p, bbSegQ( q, BB_T1, vec2( 0.0 ) ) * sgn, best );
+}
+// the seam of one cell, in its frame: s along from the junction, t across, cell length L, lean sig
+vec3 bbSeamCell( vec2 st, float L, float sig ) {
+\tvec3 best = vec3( 0.0, 0.0, 1e4 );
+\tfloat mid = 0.5 * L;
+\tvec2 dg = vec2( 1.0, sig ) * BB_A;
+\tbbKeep( st, bbSegQ( st, - dg, dg ), best );
+\tbbKeep( st, bbSegQ( st, vec2( mid, 0.0 ) - dg, vec2( mid, 0.0 ) + dg ), best );
+\tbbKeep( st, bbSegQ( st, vec2( L, 0.0 ) - dg, vec2( L, 0.0 ) + dg ), best );
+\tfloat hp = 0.5 * BB_P;
+\tfloat n0 = floor( ( st.x - mid ) / hp + 0.5 );
+\tfor ( int i = - 2; i <= 1; i ++ ) {
+\t\t// the flat after flank k: +sig A after an even one
+\t\tfloat k = n0 + float( i );
+\t\tfloat lvl = ( mod( k, 2.0 ) < 0.5 ? sig : - sig ) * BB_A;
+\t\tfloat a = mid + k * hp + BB_E;
+\t\tfloat b = mid + ( k + 1.0 ) * hp - BB_E;
+\t\tif ( a + b < L ) { a = max( a, BB_A ); b = min( b, mid - BB_A ); }
+\t\telse { a = max( a, mid + BB_A ); b = min( b, L - BB_A ); }
+\t\tif ( b > a ) bbKeep( st, vec2( clamp( st.x, a, b ), lvl ), best );
+\t}
+\tfor ( int i = - 1; i <= 1; i ++ ) {
+\t\tfloat k = n0 + float( i );
+\t\tfloat g = mid + k * hp;
+\t\tif ( abs( k ) < 0.5 || g < BB_A + BB_CLEAR || g > L - BB_A - BB_CLEAR ) continue;
+\t\tfloat flip = mod( k, 2.0 ) < 0.5 ? sig : - sig;
+\t\tvec2 p = vec2( st.x - g, st.y * flip );
+\t\tvec3 lb = vec3( 0.0, 0.0, 1e4 );
+\t\tbbFlankHalf( p, 1.0, lb );
+\t\tbbFlankHalf( p, - 1.0, lb );
+\t\tif ( lb.z < best.z ) best = vec3( g + lb.x, lb.y * flip, lb.z );
+\t}
+\treturn best;
+}
+// one axis' seams: distance to the nearest (x), the direction from it in (across, along) (yz),
+// and how many joints lie below the point (w) — the tile index along this axis
+vec4 bbSeamAxis( float across, float along, float sig ) {
+\tfloat jat = bbJoint[ 0 ];
+\tfor ( int i = 1; i < 7; i ++ ) if ( abs( across - bbJoint[ i ] ) < abs( across - jat ) ) jat = bbJoint[ i ];
 \tfloat idx = 0.0;
-\tfor ( int i = 1; i < 6; i ++ ) {
-\t\tfloat b = bbSeam[ i ] + dev;
-\t\tfloat dd = abs( across - b );
-\t\tif ( dd < d ) { d = dd; base = bbSeam[ i ]; }
-\t\tidx += step( b, across );
-\t}
-\tvec2 g = vec2( sign( across - base - dev ), 0.0 );
-\tfloat k = floor( ( ( along - cell.z ) / cell.w - 0.25 ) * 2.0 + 0.5 );
-\tfloat tk = cell.z + cell.w * ( 0.25 + 0.5 * k );
-\tif ( tk > cell.x + 1e-3 && tk < cell.y - 1e-3 ) {
-\t\tfloat lat = abs( across - base );
-\t\tvec2 q = vec2( max( lat - BB_TOOTH_A, 0.0 ), along - tk );
-\t\tfloat dt = length( q );
-\t\tif ( dt < d ) {
-\t\t\td = dt;
-\t\t\tg = lat > BB_TOOTH_A ? vec2( sign( across - base ) * q.x, q.y ) / max( dt, 1e-5 ) : vec2( 0.0, sign( along - tk ) );
-\t\t}
-\t}
-\treturn vec4( d, g, idx );
+\tfor ( int i = 1; i < 6; i ++ ) idx += step( bbJoint[ i ], across );
+\tvec2 ab = vec2( bbJoint[ 0 ], bbJoint[ 1 ] );
+\tfor ( int j = 1; j < 6; j ++ ) if ( along >= bbJoint[ j ] ) ab = vec2( bbJoint[ j ], bbJoint[ j + 1 ] );
+\tvec2 st = vec2( along - ab.x, across - jat );
+\tvec3 q = bbSeamCell( st, ab.y - ab.x, sig );
+\tvec2 away = vec2( st.y - q.y, st.x - q.x );
+\treturn vec4( q.z, away / max( q.z, 1e-5 ), idx );
 }
 #endif
 `;
@@ -375,10 +407,24 @@ function floorEdit(seams: boolean): (shader: THREE.WebGLProgramParametersWithUni
     const tracks = trackMask();
     shader.uniforms.bbTrackMap = { value: tracks };
     shader.uniforms.bbTrackK = { value: 1 / TRACK_SPAN_IN };
+    const flank = tileFlankGeometry();
+    const num = (v: number): string => v.toFixed(5);
     const defs = seams
-      ? `#define BB_SEAMS\n#define BB_TOOTH_P ${BB_TILE_TOOTH.period.toFixed(4)}\n#define BB_TOOTH_A ${BB_TILE_TOOTH.amplitude.toFixed(4)}\n`
+      ? [
+          '#define BB_SEAMS',
+          `#define BB_P ${num(BB_TILE_TOOTH.period)}`,
+          `#define BB_A ${num(BB_TILE_TOOTH.amplitude)}`,
+          `#define BB_E ${num(flank.e)}`,
+          `#define BB_R ${num(flank.r)}`,
+          `#define BB_T1 vec2( ${num(flank.t1[0])}, ${num(flank.t1[1])} )`,
+          `#define BB_ARC_END ${num(flank.arcEnd)}`,
+          `#define BB_CLEAR ${num(flank.clear)}`,
+          `#define BB_LEAN_X ${num(tileSeamLean('x'))}`,
+          `#define BB_LEAN_Y ${num(tileSeamLean('y'))}`,
+          '',
+        ].join('\n')
       : '';
-    if (seams) shader.uniforms.bbSeam = { value: [...BB_TILE_SEAMS] };
+    if (seams) shader.uniforms.bbJoint = { value: tileJunctions() };
     shader.vertexShader = after(
       `varying vec2 vBbFloor;\n${shader.vertexShader}`,
       '#include <begin_vertex>',
@@ -393,8 +439,8 @@ function floorEdit(seams: boolean): (shader: THREE.WebGLProgramParametersWithUni
     );
     const seamBlock = seams
       ? /* glsl */ `
-\tvec4 bbSx = bbSeamAxis( vBbFloor.x, vBbFloor.y );
-\tvec4 bbSy = bbSeamAxis( vBbFloor.y, vBbFloor.x );
+\tvec4 bbSx = bbSeamAxis( vBbFloor.x, vBbFloor.y, BB_LEAN_X );
+\tvec4 bbSy = bbSeamAxis( vBbFloor.y, vBbFloor.x, BB_LEAN_Y );
 \t// the nearer seam, its outward gradient in WORLD (x, y)
 \tfloat bbSd = bbSx.x;
 \tvec2 bbSg = bbSx.yz;
@@ -888,17 +934,9 @@ export function createFieldSurfaces(): FieldSurfaces {
     const finish: Finish = FINISHES[cls.finish];
     switch (cls.special) {
       case 'floor': {
-        const seams = !!(m as THREE.MeshStandardMaterial).normalMap;
-        const twin = cache.get(
-          m,
-          recipeOf(`${cls.finish}:floor`, cls, finish, {
-            // the repo's grain maps go: the stipple detail replaces them (see `FLOOR_*`)
-            tweak: (tw) => {
-              tw.normalMap = null;
-              tw.roughnessMap = null;
-            },
-          }),
-        );
+        // the flat tier (Low's straight grid) has no dovetail to match (`renderField.ts`'s tag)
+        const seams = m.userData.bbTileDetail === 'tiles';
+        const twin = cache.get(m, recipeOf(`${cls.finish}:floor`, cls, finish));
         if (twin) extendTwin(twin, `bbf-floor${seams ? '-s' : ''}`, floorEdit(seams));
         return twin;
       }

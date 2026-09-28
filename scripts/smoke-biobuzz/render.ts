@@ -47,12 +47,15 @@ import {
 import {
   BB_TILE_TOOTH,
   bbTileDetail,
-  buildTileGrain,
-  TILE_GRAIN_REPEAT,
-  TILE_GROOVE,
-  TILE_LINE,
+  TILE_JOINT,
+  TILE_JOINT_SHADE,
   TILE_MAT,
   TILE_TEX_SIZE,
+  TILE_VOID,
+  tileFlankGeometry,
+  tileJunctions,
+  tileOutline,
+  tileSeamLean,
   tileSeamPaths,
   tileSeamPolyline,
   tileTone,
@@ -364,7 +367,7 @@ import {
   pickableEnvironments,
   type VenueSpec,
 } from '../../src/games/biobuzz/graphics/environments';
-import { bbVenueDetail, buildBiobuzzVenue } from '../../src/games/biobuzz/scene/renderVenue';
+import { bbVenueDetail, buildBiobuzzVenue, groundMottle } from '../../src/games/biobuzz/scene/renderVenue';
 import { ENVIRONMENT_IDS, type EnvironmentId } from '../../src/games/biobuzz/graphics/settings';
 import { drawBiobuzzFlowerReadout } from '../../src/games/biobuzz/drawFlowerReadout';
 import { BIOBUZZ_MODULE } from '../../src/games/biobuzz';
@@ -935,143 +938,212 @@ export function renderChecks(check: Check): void {
 
     // ═══ THE MAT READS AS THIRTY-SIX SOFT TILES (owner, 2026-09-21: "For higher graphics
     //     settings, have proper texture and the proper pattern of the field tile (where two
-    //     tiles meet). More accurate colour would be good too") ═══════════════════════════════
+    //     tiles meet)"; 2026-09-28: "Borders between field tiles are not accurate to real life.
+    //     Also, there should be nothing in graphics that mesh and create weird visual
+    //     effects") ═══════════════════════════════════════════════════════════════════════════
     //
-    // `scene/renderTiles.ts` carries the measurement: the part is `am-2499`, the field has 36 of
-    // them in three variants, and the interlock is a 50 %-duty SQUARE castellation at period
-    // 2.369 in, half-amplitude 0.405 in — all of it read off the same sha-pinned STEP
-    // `npm run field-cad` uses. Everything below is arithmetic on the real polyline, because a
-    // seam that misses its own tile corner is exactly the failure a source grep cannot see.
+    // `scene/renderTiles.ts` carries the measurement: the part is `am-2499`, 36 of them in three
+    // variants, and the interlock is a DOVETAIL — traced off the B-rep top face of one tile and
+    // off all 36 placed tiles, and matching AndyMark's product photo. The numbers pinned below
+    // are the STEP's own (edge endpoints of `am-2499-Center`'s top face, and each variant's
+    // top-face area), so a drawing that drifts from the part fails here, not in a screenshot.
 
-    // (1) THE PITCH DIVIDES THE FIELD. A grid that does not land on the CAD's own seams looks
-    //     worse than no grid at all, and `BB_TILE_SEAMS` is the only place the answer lives.
+    // (1) THE JOINTS. `BB_TILE_SEAMS` used to be the tiles' bbox MINIMA — for an interior tile
+    //     the tips of its tabs, half an interlock off the joint — which is also where the
+    //     "unevenly spaced 23.176 … 23.986" came from. The joints are evenly spaced.
     check('the tile grid is 6 cells per axis over the CAD seam lines', BB_TILE_SEAMS.length === 7, `${BB_TILE_SEAMS.length} lines`);
     {
-      const spans = BB_TILE_SEAMS.slice(1).map((s, i) => s - BB_TILE_SEAMS[i]);
-      const worst = Math.max(...spans.map((s) => Math.abs(s - 23.5283)));
-      check('...and every cell is within half an inch of TILE_PITCH (the CAD seams are NOT even)', worst < 0.5, `worst ${worst.toFixed(3)} in`);
+      const joints = BB_TILE_SEAMS.slice(1, 6);
+      const gaps = joints.slice(1).map((j, i) => j - joints[i]);
+      check('the five tile joints are EVENLY spaced at the CAD\'s 23.502 in (bbox 24.3125 less one 0.810 interlock)',
+        gaps.every((g) => Math.abs(g - 23.502) < 1e-3), gaps.map((g) => g.toFixed(3)).join(' '));
+      check('...and centred: the middle joint is the field centreline', Math.abs(joints[2]) < 1e-9, `${joints[2]}`);
       const total = BB_TILE_SEAMS[6] - BB_TILE_SEAMS[0];
-      check('...and the six of them sum to the CAD tile footprint, 141.17 in', Math.abs(total - 141.1696) < 0.01, `${total.toFixed(4)}`);
+      check('...and the six cells still close on the CAD tile footprint, 141.17 in', Math.abs(total - 141.1696) < 0.01, `${total.toFixed(4)}`);
+      const J = tileJunctions();
+      check('the interlock is laid out between the joints plus one VIRTUAL junction 0.079 in inside each wall',
+        J.length === 7 && Math.abs(BB_TILE_SEAMS[0] - J[0] + 0.079) < 1e-3 && Math.abs(J[6] - BB_TILE_SEAMS[6] + 0.079) < 1e-3,
+        J.map((v) => v.toFixed(3)).join(' '));
     }
 
-    // (2) THE SEAM IS THE CASTELLATION, ON ITS OWN SEAM LINE, AND IT CLOSES AT THE TILE CORNER.
+    // (2) THE SEAM IS THE STEP'S DOVETAIL. `am-2499-Center`'s bottom edge in its own frame (x along
+    //     from the bbox corner, z in from the tab tips), read off the B-rep: flat ends, fillet-to-
+    //     flank tangent points, the middle cut, the far junction. In a run's frame that is
+    //     s = x − 0.405 and w = z − 0.405 (w the offset across the joint, times the run's lean).
     {
-      const at = BB_TILE_SEAMS[3];
-      const a = BB_TILE_SEAMS[2];
-      const b = BB_TILE_SEAMS[3];
-      const pts = tileSeamPolyline(at, a, b, 'x');
-      const devs = pts.map((p) => p[0] - at);
+      const CAD_EDGE: readonly [number, number][] = [
+        [0.81, 0.81], [1.527, 0.81], [1.632, 0.619], [1.36, 0.192], [1.465, 0], [2.712, 0], [2.817, 0.192],
+        [2.544, 0.619], [2.649, 0.81], [3.896, 0.81], [10.941, 0], [11.751, 0], [12.561, 0.81], [13.372, 0.81],
+        [13.204, 0.192], [13.31, 0], [22.785, 0], [23.502, 0], [23.907, 0.405],
+      ];
+      const J = tileJunctions();
+      const pts = tileSeamPolyline(0, J[2], J[3], 'x', 32);
+      const L = J[3] - J[2];
+      const dist = (x: number, y: number): number => {
+        let d = Infinity;
+        for (let i = 1; i < pts.length; i++) {
+          const [ax, ay] = pts[i - 1];
+          const [bx, by] = pts[i];
+          const dx = bx - ax;
+          const dy = by - ay;
+          const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1)));
+          d = Math.min(d, Math.hypot(x - ax - t * dx, y - ay - t * dy));
+        }
+        return d;
+      };
+      const sigma = tileSeamLean('x');
+      const off = CAD_EDGE.map(([x, z]) => dist(sigma * (z - 0.405), J[2] + x - 0.405));
+      check('a seam run passes through every measured vertex of the STEP\'s tile edge (within 0.003 in)',
+        off.every((d) => d < 0.003), `worst ${Math.max(...off).toFixed(4)} in over ${off.length}`);
+      check('...and it starts and ends on the junctions it runs between',
+        Math.abs(pts[0][1] - J[2]) < 1e-9 && Math.abs(pts[pts.length - 1][1] - J[3]) < 1e-9 && pts[0][0] === 0 && pts[pts.length - 1][0] === 0);
+      check('...and never strays past the tab tips', pts.every(([x]) => Math.abs(x) <= BB_TILE_TOOTH.amplitude + 1e-9));
+      // THE DOVETAIL: a tab head is wider than its neck, so the path runs BACK along the joint at
+      // every flank. A square castellation — what this was before — never does.
+      let back = 0;
+      for (let i = 1; i < pts.length; i++) if (pts[i][1] < pts[i - 1][1] - 1e-9) back++;
+      const { lean, e } = tileFlankGeometry();
+      check('...and it runs BACK along the joint at the flanks (a dovetail, not a square castellation)', back >= 18 && e > 0, `${back} backward segments, e=${e.toFixed(4)}`);
+      check('...and the flank leans 32.6° off square, from the four measured numbers alone',
+        Math.abs((lean * 180) / Math.PI - 32.6) < 0.2, `${((lean * 180) / Math.PI).toFixed(2)}°`);
+      // TEN TAB HEADS A SIDE: the flats at each level, counted.
       const A = BB_TILE_TOOTH.amplitude;
-      check('a seam run deviates by exactly ±the measured tab projection, never in between',
-        devs.every((d) => Math.abs(Math.abs(d) - A) < 1e-9), `${devs.length} points, A=${A}`);
-      check('...and it is NOT a straight line (the check is not vacuous)', new Set(devs.map((d) => Math.sign(d))).size === 2);
-      check('...and it starts and ends on the tile corners it runs between',
-        Math.abs(pts[0][1] - a) < 1e-9 && Math.abs(pts[pts.length - 1][1] - b) < 1e-9,
-        `${pts[0][1]} .. ${pts[pts.length - 1][1]}`);
-      // TEN TEETH TO AN EDGE, at the measured period stretched to fit the cell — never truncated,
-      // because a part-tooth straddling a tile corner is the one thing that reads as a mistake.
-      const flips = pts.filter((p, i) => i > 0 && p[0] !== pts[i - 1][0]).length;
-      check('ten teeth to an edge, so no tooth straddles a corner', flips === 2 * BB_TILE_TOOTH.perEdge, `${flips} flips`);
-      const period = (b - a) / BB_TILE_TOOTH.perEdge;
-      check('...and the stretched period stays within 1.5 % of the CAD\'s 2.369 in',
-        Math.abs(period - BB_TILE_TOOTH.period) / BB_TILE_TOOTH.period < 0.015, `${period.toFixed(4)} in`);
-      // 50 % DUTY, and the CELL CENTRE sits in a GAP — where the CAD puts it (its own centre gap
-      // is measured at 11.377…12.156 of a 23.99-in edge).
-      let hi = 0;
-      let lo = 0;
+      const flats = { hi: 0, lo: 0 };
       for (let i = 1; i < pts.length; i++) {
-        const run = pts[i][1] - pts[i - 1][1];
-        if (run <= 0) continue;
-        if (pts[i][0] > at) hi += run;
-        else lo += run;
+        if (Math.abs(pts[i][0] - pts[i - 1][0]) < 1e-9 && Math.abs(Math.abs(pts[i][0]) - A) < 1e-9 && pts[i][1] > pts[i - 1][1]) {
+          if (pts[i][0] > 0) flats.hi++;
+          else flats.lo++;
+        }
       }
-      check('the wave is 50 % duty — as much tab as notch along the seam', Math.abs(hi - lo) < 1e-6, `${hi.toFixed(4)} vs ${lo.toFixed(4)}`);
-      const mid = (a + b) / 2;
-      const seg = pts.findIndex((p, i) => i > 0 && pts[i - 1][1] <= mid && p[1] >= mid);
-      check('...and the cell centre falls in a NOTCH, the phase the CAD has', seg > 0 && pts[seg][0] < at, `centre dev ${seg > 0 ? (pts[seg][0] - at).toFixed(3) : 'n/a'}`);
+      check('ten flats each side of the joint on every tile edge', flats.hi === BB_TILE_TOOTH.perEdge && flats.lo === BB_TILE_TOOTH.perEdge, `${flats.hi}/${flats.lo}`);
+      // POINT-SYMMETRIC about the middle of the edge — how one moulding mates with its own copy
+      const mapped = pts.map(([x, y]) => `${(-x).toFixed(6)},${(J[2] + J[3] - y).toFixed(6)}`).sort().join(' ');
+      const own = pts.map(([x, y]) => `${x.toFixed(6)},${y.toFixed(6)}`).sort().join(' ');
+      check('...and point-symmetric about the edge\'s midpoint', mapped === own);
+      check('...with the 45° flip exactly there', dist(0, J[2] + L / 2) < 1e-9 && dist(-A * sigma, J[2] + L / 2 - A) < 1e-9 && dist(A * sigma, J[2] + L / 2 + A) < 1e-9);
+      // EVERY JUNCTION IS AN X: the joint along x and the joint along y each cross it on a 45° cut,
+      // leaning opposite ways
+      const v = tileSeamPolyline(J[3], J[2], J[3], 'x')[1];
+      const h = tileSeamPolyline(J[2], J[3], J[4], 'y')[1];
+      check('every junction is an X of two 45° cuts, one per joint',
+        Math.abs(v[0] - J[3] - A) < 1e-9 && Math.abs(v[1] - J[2] - A) < 1e-9 && Math.abs(h[0] - J[3] - A) < 1e-9 && Math.abs(h[1] - J[2] + A) < 1e-9,
+        `${v} / ${h}`);
     }
 
-    // (3) THE PERIMETER OF THE MAT IS STRAIGHT, and that is CAD, not a simplification: the field
-    //     carries 16 `am-2499-Side` and 4 `am-2499-Corner` tiles whose outer edges are cut flat,
-    //     which is why the tiled floor measures exactly 6 × TILE_PITCH with nothing poking out.
+    // (3) THE 36 TILES. Each is its own polygon (`tileOutline`), clipped to the tiled span — and
+    //     that clip IS the CAD's straight cut, which leaves the sockets along the wall as notches.
+    //     Pinned: each variant's top-face area off the STEP (350,705 / 353,529 / 356,353 mm²).
+    {
+      type P = [number, number];
+      const lo = BB_TILE_SEAMS[0];
+      const hi = BB_TILE_SEAMS[6];
+      const clipTo = (poly: P[], inside: (p: P) => boolean, cut: (a: P, b: P) => P): P[] => {
+        const out: P[] = [];
+        for (let i = 0; i < poly.length; i++) {
+          const a = poly[i];
+          const b = poly[(i + 1) % poly.length];
+          if (inside(b)) {
+            if (!inside(a)) out.push(cut(a, b));
+            out.push(b);
+          } else if (inside(a)) out.push(cut(a, b));
+        }
+        return out;
+      };
+      const atX = (a: P, b: P, x: number): P => [x, a[1] + ((b[1] - a[1]) * (x - a[0])) / (b[0] - a[0])];
+      const atY = (a: P, b: P, y: number): P => [a[0] + ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]), y];
+      const clip = (p: P[]): P[] => {
+        let q = clipTo(p, (v) => v[0] >= lo, (a, b) => atX(a, b, lo));
+        q = clipTo(q, (v) => v[0] <= hi, (a, b) => atX(a, b, hi));
+        q = clipTo(q, (v) => v[1] >= lo, (a, b) => atY(a, b, lo));
+        return clipTo(q, (v) => v[1] <= hi, (a, b) => atY(a, b, hi));
+      };
+      const area = (p: P[]): number => p.reduce((s, a, i) => s + a[0] * p[(i + 1) % p.length][1] - p[(i + 1) % p.length][0] * a[1], 0) / 2;
+      const MM2 = 25.4 * 25.4;
+      const CAD_AREA = { center: 356353 / MM2, side: 353529 / MM2, corner: 350705 / MM2 };
+      let worst = 0;
+      let total = 0;
+      for (let iy = 0; iy < 6; iy++) {
+        for (let ix = 0; ix < 6; ix++) {
+          const outer = (ix === 0 || ix === 5 ? 1 : 0) + (iy === 0 || iy === 5 ? 1 : 0);
+          const want = [CAD_AREA.center, CAD_AREA.side, CAD_AREA.corner][outer];
+          const a = area(clip(tileOutline(ix, iy, 32)));
+          total += a;
+          worst = Math.max(worst, Math.abs(a - want));
+        }
+      }
+      check('every one of the 36 tile polygons has its CAD part\'s area (Center, Side, Corner), within 0.02 in²',
+        worst < 0.02, `worst ${worst.toFixed(4)} in²`);
+      const cad = 16 * CAD_AREA.center + 16 * CAD_AREA.side + 4 * CAD_AREA.corner;
+      check('...and together they are the CAD\'s 36 (so no two overlap), short of the span by the wall notches',
+        Math.abs(total - cad) < 0.2 && (hi - lo) ** 2 - total > 140, `${total.toFixed(2)} of ${cad.toFixed(2)} in², ${((hi - lo) ** 2 - total).toFixed(1)} in² of notch`);
+      check('...and the tiles run the same way round: a tile\'s outline is its neighbour\'s shifted by a joint pitch',
+        JSON.stringify(tileOutline(2, 2).map(([x, y]) => [+(x + 23.502).toFixed(6), +y.toFixed(6)])) ===
+          JSON.stringify(tileOutline(3, 2).map(([x, y]) => [+x.toFixed(6), +y.toFixed(6)])));
+    }
+
+    // (4) THE PERIMETER, AND THE FLAT TIER. `tileSeamPaths` is the stroke list the Low column
+    //     paints and the interior runs this lane measures.
     {
       const tiled = tileSeamPaths('tiles');
       const flat = tileSeamPaths('flat');
-      const straight = tiled.filter((p) => !p.interior);
-      check('the mat\'s own perimeter edge is straight on all four sides', straight.length === 4 && straight.every((p) => p.points.length === 2), `${straight.length}`);
-      check('...and the five interior seams per axis are toothed, one run per cell',
+      check('the five interior joints per axis are dovetailed, one run per cell',
         tiled.filter((p) => p.interior).length === 2 * 5 * 6, `${tiled.filter((p) => p.interior).length}`);
-      // THE LOW COLUMN PAYS NOTHING. `flat` is the straight 14-line grid that shipped before any
-      // of this, and it is the whole of what a Low device draws.
-      check('the flat tier is still the fourteen straight grid lines it always was',
+      check('...and the outer runs are carried on to the wall along their junction cut',
+        tiled.filter((p) => p.interior).every((p) => p.points.every(([x, y]) => Math.max(Math.abs(x), Math.abs(y)) <= BB_TILE_SEAMS[6] + 1e-9)) &&
+          tiled.some((p) => p.interior && p.points.some(([x, y]) => Math.abs(Math.max(Math.abs(x), Math.abs(y)) - BB_TILE_SEAMS[6]) < 1e-9)));
+      // THE LOW COLUMN PAYS NOTHING. `flat` is the straight 14-line grid, and it is the whole of
+      // what a Low device draws.
+      check('the flat tier is the fourteen straight grid lines',
         flat.length === 14 && flat.every((p) => p.points.length === 2 && !p.interior), `${flat.length}`);
     }
 
-    // (4) THE TIER LADDER — `meshDetail` alone, the one value `createBiobuzzScene` hands
+    // (5) THE TIER LADDER — `meshDetail` alone, the one value `createBiobuzzScene` hands
     //     `buildBiobuzzField` (the field is built before the scene object exists, so there is no
     //     `tier` to read there), and already resolved against the fixed tier an EXPORT runs at.
     check('Low gets the flat mat and everything else gets the tiles', bbTileDetail('low') === 'flat' && bbTileDetail('high') === 'tiles');
     check('...and Low keeps the 1024-texel canvas, with 2048 only where the teeth need it',
       TILE_TEX_SIZE.flat === 1024 && TILE_TEX_SIZE.tiles === 2048);
-    check('...and the grain textures are not even allocated on Low', buildTileGrain('flat') === null);
-    // THE GRAIN IS A WHOLE NUMBER OF PERIODS PER TILE (4), which is the physical answer and not
-    // a convenience: the 36 tiles are identical translated copies of one moulding, so the fine
-    // surface has to repeat in phase from tile to tile. A repeat that did not divide the grid
-    // would drift the grain across the field and read as a texture laid over the mat.
-    check('the grain repeats a whole number of times per tile (4), in phase on every one',
-      TILE_GRAIN_REPEAT % (BB_TILE_SEAMS.length - 1) === 0 && TILE_GRAIN_REPEAT / (BB_TILE_SEAMS.length - 1) === 4, `${TILE_GRAIN_REPEAT}`);
 
-    // (5) NO DOUBLE-MULTIPLY. `MeshStandardMaterial` multiplies `color` by `map`, so a tone
-    //     passed as both comes out squared and near black — the venue's ground shipped exactly
-    //     that bug. The floor's albedo is the canvas and nothing else, and the two new map slots
-    //     carry no colour at all (an sRGB decode on a normal or roughness map is the same class
-    //     of silent wrongness one level down).
+    // (6) NO DOUBLE-MULTIPLY, AND NO GRAIN. `MeshStandardMaterial` multiplies `color` by `map`, so
+    //     a tone passed as both comes out squared and near black. And the floor carries NO relief
+    //     map: the old grain was a 256² noise normal+roughness pair repeated 24 times across the
+    //     field — four identical copies per tile — and it read as a mottle that tiled.
     {
       const fat = floorSrc.indexOf('function buildFloor(');
       const fbody = fat < 0 ? '' : floorSrc.slice(fat, floorSrc.indexOf('function wallMaterial(', fat));
+      const fcode = fbody.replace(/\/\/.*$/gm, '');
       check('the floor material takes a map and NO colour',
-        /new THREE\.MeshStandardMaterial\(\{ map: buildFloorTexture\(withTape, detail\) \}\)/.test(fbody) && !/color:/.test(fbody),
+        /new THREE\.MeshStandardMaterial\(\{ map: buildFloorTexture\(withTape, detail\) \}\)/.test(fbody) && !/color:/.test(fcode),
         `${fbody.length} chars`);
-      check('...and it takes the grain on the normal and roughness slots',
-        fbody.includes('material.normalMap = grain.normalMap') && fbody.includes('material.roughnessMap = grain.roughnessMap'));
+      check('...and no normal or roughness map (a repeating relief map is a pattern that tiles)',
+        !/normalMap|roughnessMap/.test(fcode));
       const tileSrc = readFileSync(join(root, 'src/games/biobuzz/scene/renderTiles.ts'), 'utf8');
-      check('...and neither grain map is decoded as sRGB', /srgb \? THREE\.SRGBColorSpace : THREE\.NoColorSpace/.test(tileSrc) && /mk\(canvas, false\)/.test(tileSrc) && /mk\(rough, false\)/.test(tileSrc));
+      check('...and renderTiles.ts builds no texture at all (it imports no three)', !/from 'three'/.test(tileSrc));
     }
 
-    // (6) THE 3D MAT IS A REAL TILE GREY, and how far it may go is MEASURED rather than
+    // (7) THE 3D MAT IS A REAL TILE GREY, and how far it may go is MEASURED rather than
     //     chosen. A field tile is grey EVA foam (AndyMark am-2499, spec "Gray"), not the
-    //     near-black the 2D board paints, so the 3D floor was lifted to one — and the 2D
-    //     `COLORS.mat`/`COLORS.tile` were deliberately NOT touched, because repainting
-    //     DECODE's board was never the ask. What stops the lift going further is below.
+    //     near-black the 2D board paints; the 2D `COLORS.mat`/`COLORS.tile` were deliberately
+    //     NOT touched. The joint is DARKER than any tile, so it can only widen a ratio.
     {
       const lin = (v: number): number => (v / 255 <= 0.03928 ? v / 255 / 12.92 : Math.pow((v / 255 + 0.055) / 1.055, 2.4));
       const chan = (h: string): number[] => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
       const lum = (h: string): number => { const c = chan(h); return 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]); };
       const ratio = (a: string, b: string): number => (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05);
-      for (const [name, next, token] of [['mat', TILE_MAT, SHARED_COLORS.mat], ['line', TILE_LINE, SHARED_COLORS.tile]] as const) {
-        const c = chan(next);
-        check(`the 3D ${name} is NEUTRAL grey — the CAD's own tile hue, not DECODE's blue mat`, c[0] === c[1] && c[1] === c[2], next);
-        check(`...and the 3D ${name} is LIGHTER than the 2D token, which is the point of it`,
-          lum(next) > lum(token), `${next} vs ${token}`);
-      }
+      const neutral = (h: string): boolean => { const c = chan(h); return c[0] === c[1] && c[1] === c[2]; };
+      check('the 3D mat is NEUTRAL grey — the CAD\'s own tile hue, not DECODE\'s blue mat', neutral(TILE_MAT), TILE_MAT);
+      check('...and LIGHTER than the 2D token, which is the point of it', lum(TILE_MAT) > lum(SHARED_COLORS.mat), `${TILE_MAT} vs ${SHARED_COLORS.mat}`);
       /**
-       * ⚠️ **ON-FIELD TEXT IS THE CEILING NOW, NOT THE DRIVER LABEL** (owner, 2026-09-21:
-       * lighten the mat, strengthen the label stroke).
-       *
-       * The mat used to be locked to `COLORS.tile`'s luminance because the driver label's FILL
-       * was measured against the lightest ground it crosses. `LABEL_STROKE` is OPAQUE now
-       * (`render/renderer.ts`), so a glyph reads against its own halo and that pair stopped
-       * moving with the field — which is what let the mat go to a real tile grey at all.
-       *
-       * What binds instead is canvas TEXT drawn over the field: `--ds-on-field-dim`. MEASURED,
-       * #585858 put it at 3.77 and was backed out for it. Both floors are asserted here so the
-       * next lift has to answer to them rather than rediscover them.
+       * ⚠️ **ON-FIELD TEXT IS THE CEILING** (owner, 2026-09-21: lighten the mat, strengthen the
+       * label stroke). `LABEL_STROKE` is OPAQUE (`render/renderer.ts`), so a glyph reads against
+       * its own halo; what binds instead is canvas TEXT drawn over the field,
+       * `--ds-on-field-dim`. MEASURED, #585858 put it at 3.77 and was backed out for it.
        */
       const ON_FIELD_DIM = '#b9beb8';
       check(
         '⚠️ the mat stays dark enough for canvas ON-FIELD TEXT to clear AA (this is the real ceiling)',
-        ratio(ON_FIELD_DIM, TILE_MAT) >= 4.5 && ratio(ON_FIELD_DIM, TILE_LINE) >= 4.5,
-        `mat ${ratio(ON_FIELD_DIM, TILE_MAT).toFixed(2)} line ${ratio(ON_FIELD_DIM, TILE_LINE).toFixed(2)}`,
+        ratio(ON_FIELD_DIM, TILE_MAT) >= 4.5,
+        `mat ${ratio(ON_FIELD_DIM, TILE_MAT).toFixed(2)}`,
       );
       check(
         '⚠️ the driver label clears AA against its OWN STROKE — the pair that does not move with the field',
@@ -1083,27 +1155,23 @@ export function renderChecks(check: Check): void {
         /const LABEL_STROKE = 'rgb\(/.test(readFileSync(join(root, 'src/render/renderer.ts'), 'utf8')),
         'an alpha stroke lets the ground through the halo, and the ceiling comes back',
       );
-      // THE PER-TILE TONE NEVER GOES UP. `TILE_MAT` is the measured ceiling (see above); a
-      // jitter that could brighten is a jitter that could walk a measured pair past its floor
-      // without anything failing.
+      // THE PER-TILE TONE NEVER GOES UP. `TILE_MAT` is the measured ceiling (see above).
       const tones = [] as string[];
       for (let iy = 0; iy < 6; iy++) for (let ix = 0; ix < 6; ix++) tones.push(tileTone(ix, iy));
       /* HOW MANY DISTINCT TONES 8-BIT sRGB HAS IN THE JITTER'S RANGE IS A FUNCTION OF THE BASE,
-         so it is DERIVED rather than written down — at the old near-black mat it was four, and
-         a lighter mat has more room. What is actually under test is that the jitter resolves to
-         SEVERAL tones and they are mixed up; a hard-coded count just breaks on every re-tone. */
+         so it is DERIVED rather than written down. */
       const base = chan(TILE_MAT)[0];
       const want = new Set(Array.from({ length: 64 }, (_, k) => Math.round(base * (1 - (k / 63) * 0.08)))).size;
-      // 36 draws from `want` buckets will usually miss one, so the band is want-1…want. The
-      // FLOOR is what is under test (the jitter is not being quantised down to a flat sheet);
-      // the CEILING is a tripwire on a range that grew without anyone measuring the darkest tile.
       const got = new Set(tones).size;
       check('the 36 tiles take very nearly every tone 8-bit sRGB has in the jitter range',
         got >= want - 1 && got <= want, `${got} distinct, ${want} available at base ${base}`);
       const neighbours = tones.filter((t, i) => i % 6 > 0 && t !== tones[i - 1]).length;
       check('...and the tones are scattered, not laid in blocks', neighbours >= 15, `${neighbours} of 30 adjacent pairs differ`);
       check('...and not one of them is lighter than the mat itself', tones.every((t) => lum(t) <= lum(TILE_MAT) + 1e-12));
-      check('...and the groove under the seam is darker than the mat, so it can only widen a ratio', lum(TILE_GROOVE) < lum(TILE_MAT));
+      const darkest = Math.min(...tones.map(lum));
+      check('the joint, its shade and the wall notches are NEUTRAL and darker than the darkest tile — no light lip',
+        [TILE_JOINT, TILE_JOINT_SHADE, TILE_VOID].every((c) => neutral(c) && lum(c) < darkest),
+        [TILE_JOINT, TILE_JOINT_SHADE, TILE_VOID].join(' '));
       // DETERMINISM: the same field on every machine and in every exported frame.
       const again = [] as string[];
       for (let iy = 0; iy < 6; iy++) for (let ix = 0; ix < 6; ix++) again.push(tileTone(ix, iy));
@@ -9883,6 +9951,27 @@ function environmentAndReadoutChecks(check: Check): void {
       }
       try {
         const ORBIT_RADIUS_MAX = 620; // `scene/renderCameras.ts` — the escape the guard exists for
+
+        // THE GROUND'S MOTTLE IS SMOOTH AND SEAMLESS (2026-09-28, owner: "nothing in graphics
+        // that mesh and create weird visual effects"). It was 200 hard-edged ±9 % squares stamped
+        // identically into every 48-in repeat, which read as a pixel mosaic from above. Measured
+        // on the 128-texel grid the texture is painted at.
+        {
+          const N = 128;
+          let step = 0;
+          let wrap = 0;
+          for (let y = 0; y < N; y++) {
+            for (let x = 0; x < N; x++) {
+              const v = groundMottle(x / N, y / N);
+              step = Math.max(step, Math.abs(groundMottle((x + 1) / N, y / N) - v), Math.abs(groundMottle(x / N, (y + 1) / N) - v));
+            }
+            wrap = Math.max(wrap, Math.abs(groundMottle(0, y / N) - groundMottle(1, y / N)), Math.abs(groundMottle(y / N, 0) - groundMottle(y / N, 1)));
+          }
+          // ×0.08 is the contrast the texture paints it at, so this is the largest texel-to-texel step in %
+          check('the venue ground\'s mottle has no hard edge: no neighbouring texels differ by 1 % of the floor colour (the specks stepped 18 %)',
+            step * 8 < 1, `${(step * 8).toFixed(3)} %`);
+          check('...and it wraps, so its 48-in repeat has no seam', wrap < 1e-12, `${wrap}`);
+        }
 
         check('every environment carries a venue of a known kind', BB_ENVIRONMENTS.every((e) =>
           ['hall', 'arena', 'studio', 'outdoor'].includes(e.venue.kind)));

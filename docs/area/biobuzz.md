@@ -502,6 +502,23 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
   inside the perimeter. A `fieldDims.gen.ts` that drifts from the measurements JSON
   fails the SIM3D lane, which re-renders it and diffs byte for byte. `docs/biobuzz-reference.md`
   carries the ruling and the full before/after table.
+- ⚠️ **`BB_TILE_SEAMS` ARE THE TILE JOINTS, AND THE 3D MAT IS THE STEP'S DOVETAIL** (owner,
+  2026-09-28: "Borders between field tiles are not accurate to real life"). The seams used to be
+  the tiles' bbox minima, which for an interior tile is the tip of its tabs, 0.405 in off the
+  joint; that was the whole of the "uneven 23.176 … 23.986" spacing. The joints are evenly spaced
+  at 23.502 (`emit-dims.mjs` derives them). The interlock is a dovetail, not a square wave: 1.247
+  flats, 0.810 deep, 2.369 period, flanks leaning 32.6° with 0.1247 fillets, an X of 45° cuts at
+  every junction and a 45° flip at the middle of every edge. `scene/renderTiles.ts` builds it,
+  each tile is its own polygon (`tileOutline`), and the clip to the tiled span is the CAD's straight
+  cut, which leaves the sockets as notches along every wall. The RENDER lane pins it to the STEP's
+  edge vertices (0.0007 in) and each variant's area (0.012 in²); the Extreme floor shader draws the
+  same curve. The seam is a dark hairline: the old light lip over a wide groove read as an
+  embossed outline and broke into a beaded line at range.
+- ⚠️ **NO REPEATING RELIEF OR SPECK TEXTURE ON A FLOOR** (same day: "there should be nothing in
+  graphics that mesh and create weird visual effects"). The mat's grain normal map (four identical
+  copies per tile) and the venue ground's 200 hard-edged specks (identical in every 48-in repeat)
+  both read as a pattern stamped on a grid. The mat has no relief map; the ground mottle is smooth
+  wrapped value noise, and the RENDER lane bounds its texel-to-texel step.
 - ⚠️ **THE CAD GLB IS WOUND AT RANDOM, AND THE LOADER RE-ORIENTS EVERY SHELL** (owner report
   2026-09-21: "a lot of mounting brackets, especially black and gray ones with complex geometry,
   have holes in them from different angles and they are glitchy and broken"). MEASURED over every

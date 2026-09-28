@@ -1,3 +1,17 @@
+# HANDOFF — 2026-09-28a (BIOBUZZ 3D: tile joints from the STEP, no repeating floor patterns)
+
+**State: pushed on `alpha`.** `npm test` (5367), `build`, `server:check`, `bundleaudit`, `docaudit`, `contrast` pass. Client only (`TILE_SEAMS` is read by renderers and the 2D grid, never by the sim). Not on `main`.
+
+- **Owner:** "Borders between field tiles are not accurate to real life. Also, there should be nothing in graphics that mesh and create weird visual effects."
+- **The interlock is a dovetail.** Traced off the B-rep of `am-2499-Center` and all 36 placed tiles (probe scripts not committed): 1.247 flats, 0.810 deep, 2.369 period, flanks leaning 32.6° with 0.1247 fillets, an X of 45° cuts at every junction, a 45° flip at the middle of every edge. Matches AndyMark's product photo. The old square wave was read off the outline's midline crossings, the one line where a dovetail and a square wave agree.
+- **`TILE_SEAMS` are the joints now** (`emit-dims.mjs`): ±47.004, ±23.502, 0, evenly spaced. They were the tiles' bbox minima, 0.405 in off the joint for an interior tile, which is where the "uneven 23.176 … 23.986" came from. The 2D grid moves by up to 0.405 in.
+- **Each tile is its own polygon** (`tileOutline`), so the per-tile tone follows the dovetail. The clip to the tiled span is the CAD's straight cut: the sockets survive as 0.48-in notches along every wall (`TILE_VOID`). RENDER lane: seam within 0.0007 in of the STEP's edge vertices, every tile within 0.012 in² of its variant's CAD area.
+- **The seam is a dark hairline** (`TILE_JOINT` over `TILE_JOINT_SHADE`). The light lip over a 0.44-in groove read as an embossed outline and broke into a beaded line at range. `contrast.mjs` lost its lip pair; the mat is the only cap again.
+- **Extreme's floor shader** draws the same dovetail as a distance field (`renderSurfaceField.ts`, `tileFlankGeometry`), notches included.
+- **Removed as repeating patterns:** the mat's grain normal/roughness map (four identical copies per tile, read as a tiling mottle) and the venue ground's 200 hard-edged specks (the same in every 48-in repeat, a pixel mosaic from above; now smooth wrapped value noise, step bounded in the RENDER lane).
+- **Checked by capture** (offscreen Electron, Medium/Ultra/Extreme, driver/chase/overhead/close-ups): no moiré on the floor, hives or walls. No temporal shimmer measurement was taken.
+- **Not done:** the builder preview's floor disc still draws a straight grid at `BB_TILE_PITCH`.
+
 # HANDOFF — 2026-09-27q (BIOBUZZ 3D: the Extreme tier, and physical materials)
 
 **State: pushed on `alpha`.** `npm test` (shared + BIOBUZZ 5362), `build`, `server:check`, `bundleaudit`, `uiaudit`, `docaudit` pass. Client only, no server deploy. **Not on `main`** (a push there is a production client deploy; owner's call).
