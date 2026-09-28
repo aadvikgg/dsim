@@ -13,11 +13,14 @@
  * | `setIntake`    | set the roller(s), done the same loop         | FORWARD holds INTAKE on until a STOP; REVERSE is a STOP (DSIM has no outtake) |
  * | `launcherIdle` | flywheel to 0                                 | done at once: DSIM's flywheel has no idle state to leave |
  * | `relocalize`   | vision relocalisation                         | done at once: DSIM's belief is the truth       |
- * | `cancelAll`    | intakes off, latch closed, launcher idle      | lets go of INTAKE and FIRE                     |
+ * | `cancelAll`    | intakes off, latch closed, launcher idle      | lets go of INTAKE and FIRE (a ramp stays where it is) |
+ * | `setRamp`      | NOT ON THE ROBOT: it has no ramp today        | presses the driver's RAMP button until the ramp is DEPLOYED / STOWED, then waits out the swing; a build without a `ramp` intake ends at once |
  * | `hopperFull`   | three column sensors read                     | `hopper.length >= bbHopperCap(spec)`           |
  * | `hopperEmpty`  | the column reads clear                        | `hopper.length === 0`                          |
  *
  * `setIntake`'s `side` is accepted and not modelled: every DSIM intake build runs as one intake.
+ * `setRamp` is DSIM's own: the team's robot has no ramp mechanism, so its runtime would list it as
+ * unregistered. It is here so a DSIM `ramp` build can practise pulling POLLEN out of a FLOWER.
  * A name the robot has and this list does not (a future command) is not refused — the seat runs
  * it as done-at-once and the auto panel lists it, so a file never stalls on an unknown name.
  *
@@ -28,13 +31,25 @@ import biobuzzField from '@horizon36596/zenith-season-biobuzz/field/biobuzz.fiel
 import type { AutoButtons, AutoCommand, AutoHost, GameAutoAdapter } from '../../../auto/types';
 import { driveParams } from '../../../sim/drivetrain';
 import type { RobotSpec, RobotState, World } from '../../../types';
-import { bbFootprint, bbHopperCap } from '../robot';
-import { BB_HALF_X, BB_HALF_Y, BB_START_POSES } from '../config';
+import { bbFootprint, bbHopperCap, bbRampSwingProgress } from '../robot';
+import { bbIntakeKindOf } from '../mechs';
+import { BB_HALF_X, BB_HALF_Y, BB_RAMP_DEPLOY_S, BB_START_POSES } from '../config';
 
 /** `Constants.AutoConstants.SHOT_SETTLE_MS` on the robot: the wait after the last launch. */
 const SHOT_SETTLE_S = 0.25;
 
-export const BIOBUZZ_AUTO_COMMANDS = ['shootAll', 'setIntake', 'launcherIdle', 'relocalize', 'cancelAll'] as const;
+/**
+ * `setRamp` gives up after this long without the ramp reaching the state it asked for, so a press
+ * the sim never takes (a phase that ignores the driver) cannot stall the auto. A normal run takes
+ * one tick to register the press plus the `BB_RAMP_DEPLOY_S` swing; a press held through the
+ * toggle's debounce adds `TOGGLE_DEBOUNCE_S` at most.
+ */
+const RAMP_GIVE_UP_S = 1;
+
+/** The sentence the autonomous panel shows when a build without a ramp runs `setRamp`. */
+const NO_RAMP = 'this build has no ramp. Choose the “Deployable ramp” intake to use it.';
+
+export const BIOBUZZ_AUTO_COMMANDS = ['shootAll', 'setIntake', 'launcherIdle', 'relocalize', 'cancelAll', 'setRamp'] as const;
 export const BIOBUZZ_AUTO_CONDITIONS = ['hopperFull', 'hopperEmpty'] as const;
 
 const SIM = (what: string): string => `SET FROM SIM: DSIM ${what}, derived from this build by src/games/biobuzz/auto`;
@@ -70,6 +85,7 @@ export function biobuzzZenithRobot(spec: RobotSpec): unknown {
   // costs nose-first. What Zenith still cannot see is the turn into each leg at a corner.
   const strafe = tank ? dp.maxSpeed : dp.maxSpeed * dp.strafeMult;
   const mountRaw = (spec as { intakeMount?: string }).intakeMount ?? 'front';
+  const hasRamp = bbIntakeKindOf(spec) === 'ramp';
   // THE FOOTPRINT IS THE COLLIDER'S, intake reach included (`bbFootprint`, the same extents the
   // chassis collider, the start rules and the pollen solids read), not the bare chassis: a plan
   // against the chassis alone parks the intake bar 3 in inside a wall.
@@ -175,6 +191,20 @@ export function biobuzzZenithRobot(spec: RobotSpec): unknown {
       { name: 'launcherIdle', summary: 'Spin the shooter down. Instant in DSIM.', estimateS: '0', requires: ['launcher'], stationary: false },
       { name: 'relocalize', summary: 'Re-check the robot’s position with the camera. Instant in DSIM.', estimateS: '0', stationary: false },
       { name: 'cancelAll', summary: 'Stop everything: intake off, stop shooting.', estimateS: '0', requires: ['intake', 'launcher'], stationary: false },
+      {
+        // DSIM ONLY: the team's robot has no ramp. `requires` names the ramp, not the intake, so
+        // Zenith's intake checks do not read DEPLOY as a roller state.
+        name: 'setRamp',
+        summary: hasRamp
+          ? 'Deploy or stow the ramp intake, for pulling pollen out of a flower. state: DEPLOY or STOW. Ends once the ramp has swung. DSIM only: the team robot has no ramp.'
+          : 'Deploy or stow the ramp intake. This build has no ramp, so it ends at once. DSIM only: the team robot has no ramp.',
+        params: {
+          state: { type: 'enum', values: ['DEPLOY', 'STOW'], default: 'DEPLOY' },
+        },
+        estimateS: hasRamp ? String(BB_RAMP_DEPLOY_S) : '0',
+        requires: ['ramp'],
+        stationary: false,
+      },
     ],
     conditions: [
       { name: 'hopperFull', summary: 'True when the hopper is full.', ledger: 'full' },
@@ -190,6 +220,8 @@ class BiobuzzAutoHost implements AutoHost {
   private intakeOn = false;
   /** shootAll commands running now (a parallel group could hold two) */
   private firing = 0;
+  /** setRamp commands holding the RAMP button now */
+  private rampPress = 0;
 
   constructor(
     public world: World,
@@ -214,7 +246,10 @@ class BiobuzzAutoHost implements AutoHost {
         return this.instant(() => {
           this.intakeOn = false;
           this.firing = 0;
+          this.rampPress = 0;
         });
+      case 'setRamp':
+        return this.setRamp(args.state !== 'STOW');
       case 'launcherIdle':
       case 'relocalize':
         return this.instant(() => {});
@@ -260,6 +295,59 @@ class BiobuzzAutoHost implements AutoHost {
     };
   }
 
+  /**
+   * THE DRIVER'S RAMP BUTTON. `RobotCommand.bbRamp` is an edge-triggered TOGGLE (`bbRampStep`),
+   * so this presses it only when the ramp is not already where the file wants it, holds it until
+   * the sim flips `bbRampOut` (one tick, or the debounce if a previous press has only just let
+   * go), lets go, and finishes once the swing has settled (`bbRampSwingProgress` null), which is
+   * when the ramp's reach counts for a FLOWER. If the sim's swing guard reverses the swing (the
+   * ramp would have hit a static), it ends where the sim left it rather than pressing again. A
+   * build without a `ramp` intake ends at once: `bbRampStep` would ignore the button anyway, and
+   * the panel lists the command as not on this robot.
+   */
+  private setRamp(deploy: boolean): AutoCommand {
+    let done = false;
+    let holding = false;
+    let startedAt = 0;
+    const release = (): void => {
+      if (holding) {
+        holding = false;
+        this.rampPress = Math.max(0, this.rampPress - 1);
+      }
+    };
+    const out = (r: RobotState): boolean => r.bbRampOut ?? false;
+    return {
+      initialize: () => {
+        startedAt = this.world.time;
+        const r = robotOf(this.world, this.robotId);
+        if (!r || bbIntakeKindOf(r.spec) !== 'ramp') {
+          done = true;
+          return;
+        }
+        if (out(r) !== deploy) {
+          holding = true;
+          this.rampPress += 1;
+        } else if (bbRampSwingProgress(r, this.world.time) === null) done = true;
+      },
+      execute: () => {
+        if (done) return;
+        const r = robotOf(this.world, this.robotId);
+        if (!r || this.world.time - startedAt > RAMP_GIVE_UP_S) {
+          release();
+          done = true;
+          return;
+        }
+        if (holding) {
+          if (out(r) === deploy) release();
+          return;
+        }
+        if (bbRampSwingProgress(r, this.world.time) === null) done = true;
+      },
+      isFinished: () => done,
+      end: () => release(),
+    };
+  }
+
   condition(name: string): boolean | null {
     const r = robotOf(this.world, this.robotId);
     if (!r) return null;
@@ -269,12 +357,13 @@ class BiobuzzAutoHost implements AutoHost {
   }
 
   buttons(): AutoButtons {
-    return { intake: this.intakeOn, fire: this.firing > 0 };
+    return { intake: this.intakeOn, fire: this.firing > 0, bbRamp: this.rampPress > 0 };
   }
 
   release(): void {
     this.intakeOn = false;
     this.firing = 0;
+    this.rampPress = 0;
   }
 }
 
@@ -322,6 +411,7 @@ export const BIOBUZZ_AUTO: GameAutoAdapter = {
   rules: (field) => loadSeason(field),
   robot: biobuzzZenithRobot,
   holonomic: bbHolonomic,
+  notOnRobot: (spec): Record<string, string> => (bbIntakeKindOf(spec) === 'ramp' ? {} : { setRamp: NO_RAMP }),
   createHost: (world, robotId) => new BiobuzzAutoHost(world, robotId),
   // BIOBUZZ's canonical frame is BLUE's, and RED is its point mirror (`bbMirror`), which is its
   // own inverse: a RED world pose mirrors back to the canonical one.

@@ -73,6 +73,8 @@ export interface LoadedAuto {
   unsupported: string[];
   /** the path legs re-headed for a robot that cannot strafe (`tankHeadings`), by step id */
   reheaded: string[];
+  /** commands the file uses that this game runs and this build cannot, with the reason */
+  notOnRobot: { name: string; why: string }[];
 }
 
 /** a leg shorter than this is a turn in place or a nudge: it keeps the heading it was written with */
@@ -247,5 +249,7 @@ export function loadZenithAuto(
     ...used.commands.filter((n) => !adapter.commands.includes(n)),
     ...used.conditions.filter((n) => !adapter.conditions.includes(n)),
   ];
-  return { written, running, mirrored, robot, field, plan: thePlan, estimate: est, findings, unsupported, reheaded };
+  const cannot = adapter.notOnRobot?.(spec) ?? {};
+  const notOnRobot = used.commands.filter((n) => Object.hasOwn(cannot, n)).map((name) => ({ name, why: cannot[name] }));
+  return { written, running, mirrored, robot, field, plan: thePlan, estimate: est, findings, unsupported, reheaded, notOnRobot };
 }

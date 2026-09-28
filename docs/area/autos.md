@@ -29,6 +29,11 @@ contract. BIOBUZZ only: Zenith has no DECODE or Chain Reaction field, and DECODE
   (`shootAll`, `setIntake`, `launcherIdle`, `relocalize`, `cancelAll`; `hopperFull`,
   `hopperEmpty`), so the file a team deploys is the file it practises. A name DSIM does not run
   ends at once and is listed, never refused: a file must not stall on a future command.
+  ⚠️ **`setRamp` (`state: DEPLOY | STOW`) IS DSIM-ONLY**: the team's robot has no ramp today, so
+  its runtime would list it as unregistered. It presses the driver's own RAMP toggle
+  (`RobotCommand.bbRamp`) until the ramp is where the file wants it, then waits out the swing. A
+  build without the `ramp` intake ends it at once and the panel lists it as not on this robot
+  (`GameAutoAdapter.notOnRobot`), rather than as unknown to DSIM.
 - **THE ALLIANCE RULE IS THE ROBOT'S**: a file's `alliance` names the alliance its poses are
   written for; it is mirrored iff the robot plays the other one, headings and `facePoint` points
   included (Zenith's `mirrorAuto`). ⚠️ Waypoint `ref`s are INLINED FIRST (`load.ts`), because
