@@ -415,7 +415,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 | class | declared | used |
 |---|---|---|
 | `.ds-dialog-actions` | src/ui/shell.css:6350 | 9 |
-| `.ds-dialog-title` | src/ui/styles.css:1795 | 8 |
+| `.ds-dialog-title` | src/ui/styles.css:1804 | 8 |
 
 ## `ds-field` — 2
 
@@ -442,7 +442,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-hint` | src/ui/shell.css:2131 | 182 |
+| `.ds-hint` | src/ui/shell.css:2131 | 184 |
 | `.ds-hint-caption` | src/ui/shell.css:4197 | 1 |
 
 ## `ds-homestats` — 2

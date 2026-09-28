@@ -1774,6 +1774,15 @@ button {
   font-weight: 600;
 }
 
+/* THE PRE-MATCH PANEL'S AUTO LINE (GameView, `autoHud.ts`) when the auto is off or Zenith flags
+   it. A Zenith finding is a whole sentence, and unwrapped it stretched the panel across the
+   field; it wraps at `.overlay-sub`'s reading width and stays centred like the rest of the panel. */
+.overlay-panel > .ds-hint.warn,
+.overlay-panel > .ds-hint.err {
+  max-width: 42ch;
+  margin-inline: auto;
+}
+
 /* SHELL dialogs are sentence case, matching `.ann-actions`' own "Got it". The 1.5px
    tracking that suits GameView's all-caps match overlays reads as gaps between letters
    in sentence case, so it is relaxed here only. */

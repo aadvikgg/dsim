@@ -27,6 +27,14 @@ import type { AutoSeatStatus, ZenithAutoSetup } from './auto/types';
  * plus the editor popup; a type-only import here, so the main chunk never contains Zenith) and the
  * file to play.
  */
+/**
+ * The auto seat's status as the HUD reads it: the seat's own, the file's name, and `problems`,
+ * the ERROR findings Zenith has for this file on this robot and alliance (a start in the other
+ * half, a path through a wall, a routine over 30 s). They do not stop the seat, so without this
+ * a file Zenith refuses drove in silence, or sat still, and nothing on the match screen said why.
+ */
+export type GameAutoStatus = AutoSeatStatus & { name: string; problems: string[] };
+
 export interface GameControllerZenithAuto extends ZenithAutoSetup {
   module: typeof import('./ui/zenithEditor');
   name: string;
@@ -487,9 +495,10 @@ export interface HudSnapshot {
   tutorial: TutorialView | null;
   /**
    * THE ZENITH AUTO this solo run plays, and where it is (docs/area/autos.md): the status chip
-   * during AUTO, and the "Open run in Zenith" button once it has run. Null when none is playing.
+   * during AUTO, the pre-match panel's line (the auto, why it is off, or what Zenith flags in it),
+   * and the "Open run in Zenith" button once it has run. Null when none is playing.
    */
-  auto: (AutoSeatStatus & { name: string }) | null;
+  auto: GameAutoStatus | null;
 }
 
 export class GameController {
@@ -800,6 +809,8 @@ export class GameController {
    */
   private zenithAuto: GameControllerZenithAuto | null;
   private autoSeat: import('./auto/zenithAutos').AutoSeat | null = null;
+  /** the seat's Zenith ERROR findings, read once per seat (`GameAutoStatus.problems`) */
+  private autoProblems: string[] = [];
   /**
    * THE TUTORIAL IN FLIGHT, or null — which is every other run this controller has ever done.
    *
@@ -1207,8 +1218,10 @@ export class GameController {
       },
     ];
     // THE ZENITH AUTO seats the robot where the file starts, which is what a team does at the
-    // field. The start is still the game's to snap legal (`coerceSetup`), so an illegal start in
-    // the file is moved and the follower drives from where the robot really is.
+    // field. The pose goes through `coerceSetup` like any custom start, which snaps it only for a
+    // game with a `startSnap` (BIOBUZZ has none): an illegal start in the file (the other half,
+    // off the wall) is seated as written, and Zenith's START_ILLEGAL finding is what says so, on
+    // the pre-match panel (`autoStatus().problems`).
     const za = this.zenithAuto;
     const autoStart = za ? this.zenithAutoStart(za, s) : null;
     if (za) {
@@ -1216,8 +1229,12 @@ export class GameController {
       if (autoStart) setups[0].startPose = autoStart;
     }
     // THE PRACTICE SEATS — partner, opponent 1, opponent 2 — in Solo practice AND Free drive
-    // (`practiceSetups`, DOM-free so `npm test` holds the line-up it builds)
-    const { setups: others, botTiers } = practiceSetups(s, this.gameId, seed);
+    // (`practiceSetups`, DOM-free so `npm test` holds the line-up it builds). The partner takes
+    // the anchor away from where the player REALLY starts: with an auto, that is the file's start,
+    // not `settings.startIndex`, or the partner spawns inside the robot the auto is about to drive.
+    const autoAnchor =
+      za && autoStart ? za.module.autoAdapterFor(this.gameId)?.defaultStartNear?.(autoStart) : undefined;
+    const { setups: others, botTiers } = practiceSetups(s, this.gameId, seed, autoAnchor ?? s.startIndex);
     setups.push(...others);
     this.soloSetups = setups;
     const world = build(s.mode, seed, setups, this.settings);
@@ -1314,6 +1331,7 @@ export class GameController {
   private seatAuto(world: World): void {
     this.autoSeat?.dispose();
     this.autoSeat = null;
+    this.autoProblems = [];
     const za = this.zenithAuto;
     if (!za) return;
     const adapter = za.module.autoAdapterFor(this.gameId);
@@ -1321,6 +1339,7 @@ export class GameController {
     const seat = za.module.createAutoSeat(world, this.localRobotId, za, adapter);
     if (world.match.phase === 'freeplay') seat.arm();
     this.autoSeat = seat;
+    this.autoProblems = seat.loaded ? seat.loaded.findings.filter((f) => f.severity === 'error').map((f) => f.message) : [];
     // a file that cannot run says so in the event log, and the driver keeps the robot
     const st = seat.status();
     if (st.state === 'error') world.events.push(`AUTO OFF: ${st.error ?? 'the auto could not be loaded'}`);
@@ -1354,8 +1373,10 @@ export class GameController {
   }
 
   /** the auto seat's status for the HUD, or null when this run plays no auto */
-  autoStatus(): (AutoSeatStatus & { name: string }) | null {
-    return this.autoSeat && this.zenithAuto ? { ...this.autoSeat.status(), name: this.zenithAuto.name } : null;
+  autoStatus(): GameAutoStatus | null {
+    return this.autoSeat && this.zenithAuto
+      ? { ...this.autoSeat.status(), name: this.zenithAuto.name, problems: this.autoProblems }
+      : null;
   }
 
   /**

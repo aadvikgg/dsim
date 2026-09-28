@@ -37,6 +37,16 @@ contract. BIOBUZZ only: Zenith has no DECODE or Chain Reaction field, and DECODE
   rate from `driveParams`, the footprint from `bbFootprint` (intake reach INCLUDED: the bare
   chassis parked the intake bar 3 in inside a wall), every number labelled `SET FROM SIM`. The
   follower gains are the robot's measured ones (`CARRIED OVER`).
+- ⚠️ **A TANK IS A MECANUM FILE, DRIVEN NOSE- OR TAIL-FIRST.** Zenith's follower and robot schema
+  are mecanum-only (no drivetrain kind). Pedro puts heading feedback before the drive vector, so
+  a tank asked to hold a heading it cannot reach drove NOTHING (StarterBot, the kit preset,
+  stalled on garden-cycle's first leg for all 30 s). For `adapter.holonomic(spec) === false`,
+  `load.ts` re-plans every path leg `tangent`/`tangentReversed` (`LoadedAuto.reheaded`) and
+  `drive.ts` `nonHolonomic` steers the request. The robot file states the forward speed as the
+  strafe cap (was 1 in/s: a 155 s estimate); what Zenith cannot price is the turn at a corner.
+- **STUCK IS SAID, NOT FIXED** (`seat.ts`): a path step with no `timeoutS` whose follower asks for
+  power while the robot stands still for 1.5 s reports `stuck`, and the HUD reads `AUTO STUCK ON
+  <STEP>`. Waits, commands and author-bounded shoves into a wall never count.
 - ⚠️ **THE FIELD DSIM HANDS ZENITH HAS DSIM'S WALLS.** Zenith's BIOBUZZ file is the manual's
   nominal 144 in (±72); DSIM is FIRST's CAD (±70.674). Against 72 a path 1.3 in past DSIM's wall
   plans clean and then wedges the robot, so the adapter overrides `sizeIn` and derives the season

@@ -8,7 +8,7 @@
  * screen has already loaded by the time its button can be clicked, and it is not in the main chunk.
  */
 import type { GameSettings } from '../types';
-import { loadAutoLibrary, saveAutoLibrary, upsertAuto, type GameAutoLibrary } from '../auto/library';
+import { autoTooLarge, loadAutoLibrary, saveAutoLibrary, upsertAuto, type GameAutoLibrary } from '../auto/library';
 import { autoAdapterFor, parseAutoText, runAutoHeadless } from '../auto/zenithAutos';
 import { openZenith, ZENITH_URL } from './zenithHost';
 
@@ -56,6 +56,8 @@ export function launchZenith(o: LaunchOptions): string | null {
       } catch (err) {
         return err instanceof Error ? err.message : String(err);
       }
+      const tooLarge = autoTooLarge(text);
+      if (tooLarge) return tooLarge;
       const current = loadAutoLibrary(game);
       const prior = current.entries.find((e) => e.name === name);
       const wp = prior?.waypoints ?? entry?.waypoints;

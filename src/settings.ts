@@ -139,6 +139,12 @@ export function practiceSeatsFor(s: GameSettings, game: GameId): PracticeSeats {
  * driver is None, the same way the Practice card does not offer one there. An AI seat in FREE
  * DRIVE plays as it would in teleop: there is no clock for it to read, only the field.
  *
+ * `playerIndex` is the anchor the player is really on. It is `s.startIndex` unless something
+ * else seats the player: a Zenith auto puts the robot where the file starts, and the partner has
+ * to take the anchor away from THAT (the controller asks the auto adapter's `defaultStartNear`).
+ * Reading the setting there put the partner on the auto's own start, and the two robots spawned
+ * inside each other.
+ *
  * Returns the setups to append after the player's (id 0) and, per AI robot id, the tier its
  * driver is to be seated at.
  */
@@ -146,11 +152,12 @@ export function practiceSetups(
   s: GameSettings,
   game: GameId,
   seed: number,
+  playerIndex: number = s.startIndex,
 ): { setups: RobotSetup[]; botTiers: Map<number, string> } {
   const botDriver = simModuleFor(game).bot;
   const opp: Alliance = s.alliance === 'blue' ? 'red' : 'blue';
   const places: [id: number, alliance: Alliance, startIndex: number][] = [
-    [1, s.alliance, s.startIndex === 1 ? 0 : 1],
+    [1, s.alliance, playerIndex === 1 ? 0 : 1],
     [2, opp, 0],
     [3, opp, Math.min(1, startPoseCount(game) - 1)],
   ];

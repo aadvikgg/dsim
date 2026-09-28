@@ -12,13 +12,19 @@ import { localizeCommand } from '../../src/net/protocol';
 import { GAME_IDS } from '../../src/games/types';
 import { simModuleFor } from '../../src/games/sim';
 import { autoAdapterFor, autoStartPose, createAutoSeat, type AutoSeat } from '../../src/auto/zenithAutos';
-import { ZENITH_AUTO_MAX_BYTES } from '../../src/auto/coerce';
+import { coerceZenithAuto, ZENITH_AUTO_MAX_BYTES } from '../../src/auto/coerce';
 import type { ZenithAutoSetup } from '../../src/auto/types';
 import { cmd, setup, type Check } from './harness';
 import { Room, type Client } from '../../server/room';
 import { CLIENT_CAPS, type ServerMsg } from '../../src/net/protocol';
 import { BB_DEFAULT_SPEC } from '../../src/games/biobuzz/robotConfig';
 import { DEFAULT_ASSISTS } from '../../src/sim/spawn';
+import { defaultSettings, practiceSetups, switchGame } from '../../src/settings';
+import { autoTooLarge } from '../../src/auto/library';
+import { autoHudLine, autoPreNotice } from '../../src/ui/autoHud';
+import type { GameAutoStatus } from '../../src/game';
+import { BB_STARTER_BOTS } from '../../src/games/biobuzz/presets';
+import { nonHolonomic } from '../../src/auto/drive';
 
 /**
  * THE AUTO LANE — Zenith autos driven by an auto seat (docs/area/autos.md).
@@ -551,6 +557,229 @@ export function autoChecks(check: Check): void {
       'AUTO: close.auto.json drives to its shoot pose and fires the whole preload',
       shots !== undefined && shots.endS > shots.startS && red.world.robots[0].hopper.length === 0 && before === 4,
       `preload ${before}, holds ${red.world.robots[0].hopper.length}, shots ${JSON.stringify(shots)}`,
+    );
+  }
+
+  // ── solo practice's glue: the partner, the match screen's words, the library's byte cap ────
+  {
+    // THE PARTNER TAKES THE ANCHOR AWAY FROM THE AUTO'S START, not from `settings.startIndex`.
+    // A RED file starting on BOTTOM's anchor, played by BLUE with the setting still on TOP (0):
+    // `practiceSetups` used to read the setting, put the partner on BOTTOM, and the two robots
+    // spawned inside each other and were thrown apart before AUTO began.
+    const file = zen({
+      formatVersion: 3,
+      name: 'bottom-start',
+      alliance: 'RED',
+      start: { pose: { xIn: -46, yIn: 63.17, headingRad: -Math.PI / 2 } },
+      steps: [{ id: 'out', kind: 'path', segments: [{ kind: 'line', from: 'current', to: { xIn: -46, yIn: 35 } }], heading: { mode: 'constant', headingRad: -Math.PI / 2 } }],
+    });
+    const base = switchGame(defaultSettings(), 'biobuzz');
+    const s = {
+      ...base,
+      alliance: 'blue' as const,
+      startIndex: 0,
+      practiceSeats: { ...base.practiceSeats, biobuzz: [{ kind: 'dummy' as const, tier: 'medium' }, { kind: 'none' as const, tier: 'medium' }, { kind: 'none' as const, tier: 'medium' }] as const },
+    };
+    const probeWorld = BIOBUZZ_SIM.createWorld('match', 11, [{ ...setup(0, 'blue', {}, 2), spec: s.spec }], undefined, '2d');
+    const probe = createAutoSeat(probeWorld, 0, file, adapter);
+    const start = probe.loaded ? autoStartPose(probe.loaded, 'blue', adapter) : null;
+    const near = start ? adapter.defaultStartNear?.(start) : undefined;
+    const seat = (index: number) => {
+      const me: RobotSetup = { id: 0, alliance: 'blue', spec: s.spec, assists: s.assists, startIndex: s.startIndex, startPose: start ?? undefined, zenithAuto: file };
+      const w = BIOBUZZ_SIM.createWorld('match', 11, [me, ...practiceSetups(s, 'biobuzz', 11, index).setups], undefined, '2d');
+      const [a, b] = w.robots;
+      return { gap: Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y), at: Math.hypot(a.pos.x - 46, a.pos.y + 63.17) };
+    };
+    check('AUTO solo: the adapter names BOTTOM (1) as the anchor nearest a BOTTOM start', near === 1, String(near));
+    const fixed = seat(near ?? s.startIndex);
+    const old = seat(s.startIndex);
+    check(
+      "AUTO solo: the practice partner spawns at the other end from the auto's start, and the robot sits on it",
+      fixed.gap > 60 && fixed.at < 1,
+      `gap ${fixed.gap.toFixed(1)} in, robot ${fixed.at.toFixed(2)} in off the start`,
+    );
+    check('AUTO solo: (the bug) seated from the setting, the partner lands on the auto’s start', old.gap < 25, `gap ${old.gap.toFixed(1)} in`);
+  }
+  {
+    // THE MATCH SCREEN SAYS WHEN THE AUTO CANNOT RUN, OR WHAT ZENITH FLAGS IN IT. `problems` is
+    // built the way the controller builds it (`seatAuto`: the loaded plan's ERROR findings).
+    const status = (seat: AutoSeat, name: string): GameAutoStatus => ({
+      ...seat.status(),
+      name,
+      problems: seat.loaded ? seat.loaded.findings.filter((f) => f.severity === 'error').map((f) => f.message) : [],
+    });
+    const broken = createAutoSeat(BIOBUZZ_SIM.createWorld('match', 3, [setup(0, 'blue', {}, 2)], undefined, '2d'), 0, { auto: '{"formatVersion":3' }, adapter);
+    const off = status(broken, 'broken');
+    const pre = autoPreNotice({ auto: off });
+    check('AUTO hud: a file the seat cannot load reads AUTO OFF before and during AUTO', autoHudLine({ auto: off, phase: 'pre' }) === 'AUTO OFF' && autoHudLine({ auto: off, phase: 'auto' }) === 'AUTO OFF');
+    check('AUTO hud: ...and not once the driver has the robot', autoHudLine({ auto: off, phase: 'teleop' }) === null);
+    check('AUTO hud: the pre-match panel says why the auto is off', pre?.tone === 'err' && pre.text.startsWith('Auto off: ') && pre.text.includes(off.error ?? '(no error)'), pre?.text);
+    // a RED file whose start is BLUE's anchor, played by BLUE: mirrored into RED's half
+    const wrong = stage(
+      zen({
+        formatVersion: 3,
+        name: 'wrong-half',
+        alliance: 'RED',
+        start: { pose: { xIn: 34, yIn: 63.17, headingRad: -Math.PI / 2 } },
+        steps: [{ id: 'leg', kind: 'path', segments: [{ kind: 'line', from: 'current', to: { xIn: 34, yIn: 40 } }], heading: { mode: 'constant', headingRad: -Math.PI / 2 } }],
+      }),
+      'blue',
+      '2d',
+    );
+    const flagged = status(wrong.seat, 'wrong-half');
+    const note = autoPreNotice({ auto: flagged });
+    check(
+      'AUTO hud: a start Zenith flags (the other half) is named on the pre-match panel, and the auto still plays',
+      flagged.state === 'waiting' && note?.tone === 'warn' && /own half/.test(note.text),
+      note?.text,
+    );
+    // garden-cycle plans with no Zenith errors (checked above)
+    const clean = stage({ auto: readFileSync(join(here, 'fixtures', 'zenith', 'garden-cycle.auto.json'), 'utf8') }, 'blue', '2d');
+    const ok = autoPreNotice({ auto: status(clean.seat, 'garden-cycle') });
+    check('AUTO hud: a clean auto is named as the one AUTO plays', ok?.tone === 'ok' && ok.text === 'garden-cycle plays in AUTO.', ok?.text);
+  }
+  {
+    // THE LIBRARY'S BYTE CAP IS SAID, NOT APPLIED IN SILENCE: `saveAutoLibrary` drops an entry
+    // `coerceZenithAuto` refuses, so Zenith's Save and the import ask `autoTooLarge` first
+    const big = JSON.stringify({ ...probeAuto(), title: 'x'.repeat(ZENITH_AUTO_MAX_BYTES) });
+    const fits = JSON.stringify(probeAuto());
+    check(
+      'AUTO library: an auto over the byte cap is refused with a sentence, exactly where the library would drop it',
+      autoTooLarge(big) !== null && coerceZenithAuto({ auto: big }) === undefined && autoTooLarge(fits) === null && coerceZenithAuto({ auto: fits }) !== undefined,
+      autoTooLarge(big) ?? 'accepted',
+    );
+  }
+
+  // ── a TANK drives its auto (StarterBot, the kit preset, is a 6WD tank) ───────────────────────
+  // Zenith's follower is mecanum-only. The tank used to drop the follower's strafe, so a leg it
+  // could not face stalled for the whole period (garden-cycle: ~96 in short, never past its first
+  // leg). Now each leg is re-headed nose- or tail-first (`load.ts`) and the request is steered
+  // (`drive.ts` `nonHolonomic`).
+  {
+    const tank = BB_STARTER_BOTS.find((x) => x.drivetrain === 'tank');
+    check('AUTO tank: the kit preset is a tank', tank !== undefined);
+    if (tank) {
+      const behind = nonHolonomic({ forward: -0.6, strafe: 0.1, turn: 0 });
+      const left = nonHolonomic({ forward: 0.4, strafe: 0.4, turn: 0 });
+      const hold = nonHolonomic({ forward: 0, strafe: 0, turn: 0.3 });
+      check(
+        "AUTO tank: a request behind is driven in reverse, one to the left turns CCW, a hold keeps the follower's turn",
+        behind.forward < 0 && left.turn > 0 && left.forward > 0 && hold.forward === 0 && hold.turn === 0.3,
+        JSON.stringify({ behind, left, hold }),
+      );
+      const robot = adapter?.robot(tank) as { kinematics: { maxForwardVelInPerS: { value: number }; maxStrafeVelInPerS: { value: number } } };
+      check(
+        "AUTO tank: the robot file's sideways cap is the forward one, not a 1 in/s crawl",
+        robot.kinematics.maxStrafeVelInPerS.value === robot.kinematics.maxForwardVelInPerS.value,
+        `${robot.kinematics.maxStrafeVelInPerS.value} vs ${robot.kinematics.maxForwardVelInPerS.value}`,
+      );
+      // a tangent line, a bezier and a tangentReversed leg, in open field on the BLUE side
+      const curve = zen({
+        formatVersion: 3,
+        name: 'tank-curve',
+        alliance: 'BLUE',
+        start: { pose: { xIn: 61.6, yIn: 45, headingRad: Math.PI } },
+        steps: [
+          { id: 'line', kind: 'path', segments: [{ kind: 'line', from: 'current', to: { xIn: 40, yIn: 45 } }], heading: { mode: 'tangent' } },
+          {
+            id: 'curve',
+            kind: 'path',
+            segments: [{ kind: 'bezier', from: 'current', control: [{ xIn: 40, yIn: 0 }, { xIn: 50, yIn: -10 }], to: { xIn: 50, yIn: -40 } }],
+            heading: { mode: 'tangent' },
+          },
+          { id: 'back', kind: 'path', segments: [{ kind: 'line', from: 'current', to: { xIn: 50, yIn: -10 } }], heading: { mode: 'tangentReversed' } },
+        ],
+      });
+      for (const physics of ['2d', '3d'] as const) {
+        for (const alliance of ['blue', 'red'] as const) {
+          const { world, seat } = stage(curve, alliance, physics, { spec: tank });
+          const dp = driveParams(world.robots[0].spec);
+          startMatch(world);
+          const log = drive(world, seat, 12);
+          const r = world.robots[0];
+          const steps = seat.loaded!.plan.steps;
+          const end = steps[steps.length - 1].endPose!;
+          const err = Math.hypot(r.pos.x - end.xIn, r.pos.y - end.yIn);
+          check(
+            `AUTO tank ${physics} ${alliance}: a tank drives a line, a curve and a reversed leg to the end`,
+            seat.status().state === 'done' && err < 1 && log.ticks * SIM_DT < 5,
+            `${seat.status().state} at ${seat.status().stepId}, ${(log.ticks * SIM_DT).toFixed(2)} s, ${err.toFixed(2)} in off`,
+          );
+          check(
+            `AUTO tank ${physics} ${alliance}: ...inside the drivetrain's own turn and speed limits every tick`,
+            log.maxDh <= dp.maxTurn * SIM_DT * 1.05 && log.maxDp <= dp.maxSpeed * SIM_DT * 1.05,
+            `max ${log.maxDh.toFixed(4)} rad/tick (limit ${(dp.maxTurn * SIM_DT).toFixed(4)}), ${log.maxDp.toFixed(3)} in/tick (limit ${(dp.maxSpeed * SIM_DT).toFixed(3)})`,
+          );
+        }
+      }
+      // garden-cycle: constant and sweeping headings a tank cannot hold, so its legs are re-headed
+      const gc = readFileSync(join(here, 'fixtures', 'zenith', 'garden-cycle.auto.json'), 'utf8');
+      for (const physics of ['2d', '3d'] as const) {
+        const { world, seat } = stage({ auto: gc }, 'red', physics, { spec: tank });
+        const l = seat.loaded!;
+        startMatch(world);
+        drive(world, seat, 30);
+        const r = world.robots[0];
+        const end = l.plan.steps[l.plan.steps.length - 1].endPose!;
+        const err = Math.hypot(r.pos.x - end.xIn, r.pos.y - end.yIn);
+        check(
+          `AUTO tank ${physics}: garden-cycle on a tank is re-headed, estimated inside AUTO, and finishes within 2 in of its park`,
+          l.reheaded.length > 0 &&
+            (l.estimate.nominalS ?? 99) < 30 &&
+            !l.findings.some((f) => f.code === 'TIME_BUDGET' && f.severity !== 'info') &&
+            seat.status().state === 'done' &&
+            err < 2,
+          `reheaded ${l.reheaded.join(', ')}, estimate ${l.estimate.nominalS?.toFixed(1)} s, ${seat.status().state} at ${seat.status().stepId}, ${err.toFixed(2)} in off`,
+        );
+      }
+      const mec = stage({ auto: gc }, 'red', '2d');
+      check('AUTO tank: a holonomic build keeps the headings the file wrote', mec.seat.loaded!.reheaded.length === 0);
+    }
+  }
+  {
+    // STUCK IS SAID: a path into the wall behind the robot asks for power the wall will not let it
+    // use. A wait stands still just as long and is never stuck, and neither is a shove into the
+    // wall the author bounded with a `timeoutS` (garden-cycle's `sweep` on a tank does exactly that).
+    const into = stage(
+      zen({
+        formatVersion: 3,
+        name: 'into-wall',
+        alliance: 'BLUE',
+        start: { pose: { xIn: 61.6, yIn: 45, headingRad: Math.PI } },
+        steps: [
+          { id: 'rest', kind: 'wait', seconds: 3 },
+          {
+            id: 'shove',
+            kind: 'path',
+            timeoutS: 2.5,
+            segments: [{ kind: 'line', from: 'current', to: { xIn: 80, yIn: 45 } }],
+            heading: { mode: 'constant', headingRad: Math.PI },
+          },
+          { id: 'ram', kind: 'path', segments: [{ kind: 'line', from: 'current', to: { xIn: 80, yIn: 45 } }], heading: { mode: 'constant', headingRad: Math.PI } },
+        ],
+      }),
+      'blue',
+      '2d',
+    );
+    startMatch(into.world);
+    let stuckEarly = false;
+    let stuckAt = -1;
+    const commands = new Map<number, RobotCommand>();
+    for (let i = 0; i < Math.round(10 / SIM_DT); i++) {
+      commands.set(0, localizeCommand(into.seat.step(into.world, cmd({}))));
+      into.world.events.length = 0;
+      BIOBUZZ_SIM.step(into.world, SIM_DT, commands);
+      const st = into.seat.status();
+      if (st.stepId !== 'ram' && st.stuck) stuckEarly = true;
+      if (st.stepId === 'ram' && st.stuck && stuckAt < 0) stuckAt = st.timeS;
+    }
+    const st = into.seat.status();
+    const line = autoHudLine({ auto: { ...st, name: 'into-wall', problems: [] }, phase: 'auto' });
+    check('AUTO stuck: a 3 s wait, and a shove into the wall with its own timeout, never read as stuck', !stuckEarly);
+    check(
+      'AUTO stuck: a leg the wall blocks reads stuck within 2 s of it starting, and the HUD names it',
+      stuckAt > 5.5 && stuckAt < 7.6 && st.state === 'running' && line === 'AUTO STUCK ON RAM',
+      `stuck at ${stuckAt.toFixed(2)} s, ${st.state} at ${st.stepId}, ${line}`,
     );
   }
 }
