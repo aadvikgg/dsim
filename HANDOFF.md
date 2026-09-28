@@ -1,3 +1,14 @@
+# HANDOFF — 2026-09-27p (Zenith autos: solo practice plays them, tank drives them, `setRamp`)
+
+**State: pushed on `alpha`.** `npm test` passes except the machine-dependent reconcile/`step3d` timing checks (7, the same ones that fail on this machine on any tree); `build`, `server:check`, `bundleaudit`, `docaudit`, `uiaudit` pass. Not on `main`. **Fly not redeployed**: custom rooms run the auto seat on the server, so `setRamp`, tank driving and partner seating reach online rooms only after `./scripts/fly-deploy.sh --alpha` (the owner decides; it needs `ZENITH_VENDOR_*` in the shell).
+
+- **Owner report:** "running an auto doesn't actually work in the solo practice", "there is no flower intake ramp command".
+- **Solo practice:** the partner is seated off the auto's start (`defaultStartNear`), so the two robots no longer spawn on top of each other; a seat that cannot load says why on the pre-match panel and the HUD (`src/ui/autoHud.ts`: AUTO OFF, AUTO STUCK ON <step>, AUTO DONE); an auto over the byte cap is refused with a sentence; the library reloads when the tab regains focus, so an auto saved from the Zenith popup is the one that plays.
+- **Tank (StarterBot):** Zenith plans for a holonomic chassis, and Pedro spent the whole power budget on a heading a tank cannot hold, so it drove nothing. `tankHeadings` (`src/auto/load.ts`) re-plans each path leg `tangent` or `tangentReversed` for a `holonomic(spec) === false` build, and `nonHolonomic` (`src/auto/drive.ts`) turns the follower's field vector into tank sticks.
+- **`setRamp`** (`state: DEPLOY | STOW`) drives the ramp intake through the same button a driver uses (`bbRamp`). On a build without the ramp it ends at once and the panel lists it under "Not on this robot" (`notOnRobot(spec)`).
+- **Verified end to end** (local DSIM + local Zenith, Playwright, a real popup): New in Zenith → legal start + "Draw for RED" bar → rename, drag, `setRamp` → Save to DSIM → "Saved new-auto from Zenith." → Play it in AUTO → Solo practice → AUTO DONE, for blue mecanum, red + ramp (ramp deployed), and the StarterBot on both alliances. Simulate in DSIM lays the recorded drive over the plan.
+- **Still true:** refreshing the Zenith popup re-asks the DSIM tab that opened it, so an old DSIM tab hands over its old bundle. Reload the DSIM tab too after a deploy.
+
 # HANDOFF — 2026-09-27o (phantom-shot fixes on `main`; a rollback restores the saved JSON)
 
 **State: pushed on `main` and `alpha`.** On `main`: 27m, 27n and this fix, cherry-picked onto the multi-core release. `npm test`, `build`, `server:check`, `bundleaudit`, `docaudit` pass on both. Client only: the server code that changed is a comment in `server/wire.ts` and client-only paths in `engineImpl.ts`, so production Fly was not redeployed. The production client deploys from `main` (Vercel).
