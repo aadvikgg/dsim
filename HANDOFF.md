@@ -10,7 +10,7 @@
 - **Known edge:** LAN rendezvous is per machine, so an old client (Anycast) and a new one (router) at one venue can miss each other until the old one reloads.
 # HANDOFF — 2026-09-27k (multi-core: rooms on worker threads, `SIM_WORKERS`)
 
-**State: pushed on `main` and `alpha` (not yet deployed).** `server:check`, `build`, `npm test` (shared + BIOBUZZ 5149), `test:mm` (222), `docaudit`, and the new `npm run test:workers` (83) pass. ⚠️ **SERVER CHANGE: needs a deploy** (`./scripts/fly-deploy.sh` from a `main` worktree). No protocol change, no migration, no sim change.
+**State: pushed on `main` and `alpha`. DEPLOYED to `dsim-alpha` 2026-09-28 00:00Z (`eb4fcbae`): one worker, ready, clean boot on Linux. Production NOT deployed (the deploy was blocked by the permission classifier; the owner runs it).** `server:check`, `build`, `npm test` (shared + BIOBUZZ 5149), `test:mm` (222), `docaudit`, and the new `npm run test:workers` (83) pass. ⚠️ **SERVER CHANGE: needs a deploy** (`./scripts/fly-deploy.sh` from a `main` worktree). No protocol change, no migration, no sim change.
 
 - **Owner:** make the server use more than one core, off `main`, deployable soon (urgent since 2026-09-24).
 - **What:** rooms run on `worker_threads` (`server/roomWorker.ts`), sockets/matchmaker/DB/registry stay on the main thread (`server/roomHost.ts`, messages in `server/roomThreads.ts`). `SIM_WORKERS` unset/0 = the old in-process server, untouched; `auto` = one worker per vCPU beyond the first. **`fly.toml` now sets `SIM_WORKERS = 'auto'`**: iad (performance-2x) gets 1 worker, jnb (shared-cpu-4x) 3, performance-1x satellites 0 (in-process, as before). Rollback: `'0'` and redeploy.
