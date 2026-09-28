@@ -104,6 +104,10 @@ const deployRamp = urlParams.get('ramp') === '1';
 // traction set instead of its mecanum set.
 const drivetrainParam = urlParams.get('drivetrain');
 const gfxParam = urlParams.get('gfx');
+// `&mat=standard|physical` overrides the `materials` row AFTER `&gfx=` picked the column, so a
+// pair of pictures at the SAME tier differs in the material model alone (Extreme with and
+// without physical materials, or High with them turned on).
+const matParam = urlParams.get('mat');
 const butterflyTankParam = urlParams.get('tank') === '1';
 // `&wheelrig=1` stands the five real drive-wheel parts on bare tiles — see the block that builds
 // it for why a wheel on a ROBOT cannot be photographed at all.
@@ -329,6 +333,7 @@ async function main(): Promise<void> {
     setGraphicsSetting('environment', envParam as EnvironmentId);
   }
   if (iblParam === '0' || iblParam === '1') setGraphicsSetting('envLighting', iblParam === '1');
+  if (matParam === 'standard' || matParam === 'physical') setGraphicsSetting('materials', matParam);
   const { createBiobuzzScene } = await import('../../src/games/biobuzz/scene/renderScene');
   const host = document.getElementById('host')!;
   const scene = await createBiobuzzScene(host);
@@ -339,6 +344,9 @@ async function main(): Promise<void> {
   // rather than widening the class's real public API for a debug hook.
   (window as unknown as { __bbScene: THREE.Scene }).__bbScene = (scene as unknown as { scene: THREE.Scene }).scene;
   (window as unknown as { __bbWorld: World }).__bbWorld = world;
+  // and the `GameScene` itself, for the same kind of inspection of its PRIVATE state — the
+  // physical-materials comparison reads `surfaces` (is the chunk live, did the probe capture)
+  (window as unknown as { __bbGameScene: unknown }).__bbGameScene = scene;
 
   // ── THE WHEEL RIG (2026-09-21) — `?wheelrig=1` ─────────────────────────────────────────────
   // ⚠️ A DRIVE WHEEL CANNOT BE PHOTOGRAPHED ON A ROBOT, and that is not a bug in the wheel. It

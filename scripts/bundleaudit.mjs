@@ -161,6 +161,10 @@ function routeFor(file, buf) {
   // here would recognise it. If a future chunking ever merged it into the scene chunk, the name
   // would change and the `scene` marker below would claim it, which is the right answer.
   if (/^renderPost-[^/]*\.js$/.test(base)) return 'postfx';
+  // The physical-materials chunk (the `materials` row), by FILENAME for the same reason: Vite
+  // names it after `renderSurfaces.ts`, its `renderSurface*.ts` helpers are merged into it (only
+  // it imports them), and it imports three.js from `renderScene-*.js` rather than containing it.
+  if (/^renderSurfaces-[^/]*\.js$/.test(base)) return 'surfaces';
   // filename-first for a standalone `.wasm` asset (cheap, and a real one would be named after
   // its source module, e.g. `rapier_wasm3d_bg-<hash>.wasm`), then a content scan for both .js
   // and .wasm alike — content is what actually decided this in the measured build, where the
@@ -426,6 +430,22 @@ const BASELINE = {
   // tier: the lazy loader for `renderPost` (which carries the passes themselves, see `postfx`),
   // the three.js core classes only those passes use (Rollup keeps three's own module in this
   // chunk, so they are emitted here), the emissive and panel-cap wiring, and the preview clamp.
+  //
+  // 2026-09-27, PHYSICAL MATERIALS: measured at 224.92, +1.06 over the 223.86 above and still under
+  // the 4.42 KB tolerance (225.48), so the number is NOT moved; recorded, and the next pass will
+  // cross it. The +1.06 is the two scenes' wiring to the lazy `surfaces` chunk — `syncSurfaces`,
+  // the drop path, the probe-capture trigger and the raise/lower around the scene pass in
+  // `renderScene.ts`, the robots-only twin of it in `renderPreview.ts` — plus the three.js core
+  // classes only that chunk uses (`CubeCamera`, `WebGLCubeRenderTarget`, `DataTexture`), which
+  // Rollup emits here with the rest of three. The shaders, the finish table and the generators are
+  // in `surfaces`.
+  //
+  // 2026-09-27, THE ROBOT/FIELD/VENUE APPLIERS: measured at 225.14, +0.22 over the 224.92 above
+  // and still under the 4.42 KB tolerance (225.48), so the number is NOT moved. The appliers
+  // themselves are counted in `surfaces`, below; what lands here is the wiring `renderScene.ts`
+  // and `renderPreview.ts` do around them — the robot shadow row (`setRobotShadows`),
+  // `robotsChanged()`'s identity check replacing the old child-count one, and the probe recapture
+  // trigger.
   scene: { gzip: 221.06 * 1000, budgetCeiling: 250 * 1000 },
   // 2026-09-21, THE EIGHT PAINTED ENVIRONMENTS: 4.01 -> 5.56 (+1.55), well inside the 4 KB
   // tolerance, so the number below is deliberately NOT moved — recorded here for the same reason
@@ -447,6 +467,14 @@ const BASELINE = {
   // that turns one on. SMAA is deliberately not in it (its pass alone is 38 KB of lookup
   // textures; `GFX_NOT_OFFERED`).
   postfx: { gzip: 12.3 * 1000 },
+  // 2026-09-27: NEW. `renderSurfaces-*.js`, the physical-materials chunk, measured on the build
+  // that introduced it: the finish table (`graphics/finishes.ts`, 38 entries, inlined here because
+  // only this chunk reads it), the surface kit (procedural detail generators, the one shader patch,
+  // the twin swap), the room probe with its exposure and white balance, and the field, robot and
+  // venue appliers (the GLSL strings are most of the field's share). Lazy: fetched only when the
+  // `materials` row is `physical` (Extreme, or a Custom that turns it on); a 2D player and a
+  // standard-materials 3D player pay nothing.
+  surfaces: { gzip: 20.74 * 1000 },
   gallery: { gzip: 7.33 * 1000 },
   // 2026-09-24: the Zenith autos chunk, MEASURED on the build that introduced it — Zenith's
   // planner, follower and schema (zod) plus `src/auto/`. Lazy: see the `autos` route.

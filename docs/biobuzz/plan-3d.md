@@ -424,7 +424,8 @@ One preset picker and every setting under it; changing a setting switches the pr
 | Environment | procedural room / HDRI set (on demand, 4.5) | procedural | procedural | HDRI | HDRI | HDRI |
 | Environment lighting | off / on | off | off | on | on | on |
 | Reflections | off / on (env map on metals) | off | off | on | on | on |
-| Bloom | off / on (venue lamps and hard glints; never a robot part) | off | off | off | off | on |
+| Bloom | off / on (venue lamps and hard glints; never a robot part) | off | off | off | off | off |
+| Materials | standard / physical (measured finishes + a room probe) | standard | standard | standard | standard | physical |
 | Effects | tracers, tint pulse, wheel spin, dust off | minimal | standard | standard | full | full |
 | Field of view | 60 to 90 | 70 | 70 | 70 | 70 | 70 |
 | Camera motion | full / reduced (also from `prefers-reduced-motion`) | reduced | full | full | full | full |
@@ -439,7 +440,8 @@ not offered at all. Extreme renders at 150 % on top of MSAA 4x, which is sharper
 thin edges, and `SMAAPass` alone is 38 KB gzipped of lookup textures. AO and bloom are post passes
 in a lazy chunk fetched the first time either is on, so they apply live once it arrives. They draw
 in the match and the live replay viewer only: the builder preview has no post chain, and the
-replay export stays fixed at High (4.7). Auto never picks Extreme (4.6).
+replay export stays fixed at High (4.7). Auto never picks Extreme (4.6). Materials also switches
+to `physical` at Extreme only — its own lazy chunk, see `docs/area/biobuzz.md`'s PHYSICAL MATERIALS.
 
 ### 4.5 Environments
 

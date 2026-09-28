@@ -30,6 +30,7 @@ import {
   shadowMapSize,
   subscribeGraphics,
   wantsPost,
+  wantsSurfaces,
   type GraphicsSettings,
   type GraphicsTier,
 } from '../graphics/settings';
@@ -84,6 +85,21 @@ export { createRobotPreviewScene, type RobotPreviewScene } from './renderPreview
  */
 type PostModule = typeof import('./renderPost');
 type BbPost = ReturnType<PostModule['createPost']>;
+/** THE PHYSICAL-MATERIALS CHUNK'S TYPE, the same way and for the same reason as `PostModule`:
+ * `renderSurfaces.ts` is reached only through `syncSurfaces`'s `import('./renderSurfaces')` (and
+ * the builder preview's own), fetched the first time the `materials` row is `physical`. */
+type SurfacesModule = typeof import('./renderSurfaces');
+type BbSurfaces = ReturnType<SurfacesModule['createSurfaces']>;
+
+/**
+ * DOES THIS SCENE DRAW PHYSICAL MATERIALS? The row (`wantsSurfaces`), AND image-based lighting:
+ * a metal's whole look is its reflection, and with `envLighting` off there is no environment map
+ * for it to reflect, so a physical aluminium plate would render near black on a Custom that turned
+ * the lighting off. The chunk is not fetched in that case either.
+ */
+function surfacesOn(s: GraphicsSettings): boolean {
+  return wantsSurfaces(s) && s.envLighting;
+}
 
 /**
  * ⚠️ `SceneQuality` / `QUALITY` ARE GONE. They were a module CONSTANT at "Medium", with a header
@@ -224,10 +240,27 @@ class BiobuzzScene implements GameScene {
   private readonly pipCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 4000);
   private frameInterval = 0;
   private lastDraw = 0;
-  /** how many children the robot group had when material tuning was last applied. Robots are
-   * built lazily per spec, so anisotropy and reflections have to be re-applied when one appears
-   * — a cheap integer compare per frame instead of a traverse. */
-  private robotChildren = -1;
+  /**
+   * THE ROBOT GROUPS material tuning last saw, BY IDENTITY. Robots are built lazily per spec, so
+   * anisotropy, reflections and the physical twins have to be re-applied when one appears or is
+   * REBUILT — and a rebuild (a spec change, a wheel-tier change) keeps the child COUNT, which is
+   * what this used to compare, so a rebuilt robot's new materials were never tuned. Four
+   * reference compares a frame, still no traverse.
+   */
+  private robotKids: THREE.Object3D[] = [];
+
+  /**
+   * THE PHYSICAL-MATERIALS CHUNK (`renderSurfaces.ts`), the same lifecycle as `post`: null until
+   * it has arrived and while the row does not want it, `surfacesLoad` the fetch in flight,
+   * `surfacesFailed` sticky for the scene's life (a chunk that would not load or code that threw
+   * is not retried every frame; the scene carries on in standard materials).
+   */
+  private surfaces: BbSurfaces | null = null;
+  private surfacesLoad: Promise<void> | null = null;
+  private surfacesFailed = false;
+  /** the room changed since the probe was captured: the environment resolved (a late HDRI too),
+   * the venue was rebuilt, or the mode came on. Consumed by `render`, before its scene pass. */
+  private probeDirty = true;
 
   /** THE VENUE (`renderVenue.ts`) — real geometry around the field, rebuilt only when the
    * environment or the detail level actually changes. `venueKey` is what makes `applyQuality`
@@ -423,7 +456,12 @@ class BiobuzzScene implements GameScene {
    *   ambient occlusion + bloom → `syncPost`: the lazy post chunk (`renderPost.ts`), fetched
    *                           the first time `wantsPost` is true and freed when it turns false;
    *                           bloom also raises the tagged emissives (`glowMats`) in `render`
-   *   anisotropy            → `tuneMaterials` reflections    → `tuneMaterials`
+   *   materials             → `syncSurfaces`: the lazy surfaces chunk (`renderSurfaces.ts`),
+   *                           physical twins swapped onto the meshes and a room probe; the probe
+   *                           uniforms are raised around the scene pass in `render`
+   *   anisotropy            → `tuneMaterials` reflections    → `tuneMaterials` (and, for the
+   *                           physical twins, the surfaces' `setReflections`, which is the one
+   *                           that actually reaches the shader — see `renderSurfaceKit.ts`)
    *   mesh detail           → the ONE setting that needs a rebuild: it selects which GLB
    *                           `buildBiobuzzField` loads, and the field is built before the scene
    *                           exists. It takes effect on the next 3D view; the UI says that.
@@ -500,7 +538,12 @@ class BiobuzzScene implements GameScene {
     // the loader silently substituted the practice room under a hall's geometry.
     const def = environmentDefFor(s.environment);
     applyEnvironmentRig(this.renderer, this.hemi, this.sun, def, s.envLighting);
-    void this.env.apply(s.environment, this.onQualityEvent, s.envLighting);
+    // the ROOM PROBE (physical materials) is captured from the environment that is actually live,
+    // so a resolve — the painted dome at once, an HDRI a second or two later — re-arms it. A flag
+    // and nothing else: in standard materials nothing reads it.
+    void this.env.apply(s.environment, this.onQualityEvent, s.envLighting).then(() => {
+      this.probeDirty = true;
+    });
 
     // ── the venue ──────────────────────────────────────────────────────────────────────────
     //
@@ -514,10 +557,16 @@ class BiobuzzScene implements GameScene {
     const key = `${def.id}:${detail}`;
     if (key !== this.venueKey) {
       if (this.venue) {
+        // the BASES back on their meshes first, so the walk below frees them and not the twins
+        const old = this.venue;
+        this.withSurfaces('could not be removed', (sf) => sf.revertVenue(old));
         this.scene.remove(this.venue);
         disposeObject3D(this.venue);
       }
       this.venue = buildBiobuzzVenue(def.venue, detail);
+      const fresh = this.venue;
+      this.withSurfaces('could not be applied', (sf) => sf.applyVenue(fresh, def));
+      this.probeDirty = true;
       /* ⚠️ THE TWO TOP-DOWN CAMERAS ARE LEFT OUT ON PURPOSE. Everything the venue hangs
          over the field — the lighting grid, the ceiling fittings — sits on
          `VENUE_OVERHEAD_LAYER`, and enabling it here for the side-on cameras only is what
@@ -528,6 +577,8 @@ class BiobuzzScene implements GameScene {
       this.venueKey = key;
     }
 
+    // before `tuneMaterials`, so twins swapped in here get the anisotropy row like any material
+    this.syncSurfaces();
     this.tuneMaterials();
     setCameraTuning(s.hfov, s.cameraMotion);
     this.stats.setMode(s.perfOverlay);
@@ -591,6 +642,120 @@ class BiobuzzScene implements GameScene {
   }
 
   /**
+   * PHYSICAL MATERIALS: fetch the surfaces chunk the first time the row wants it, put everything
+   * back and free it the moment it does not. The same shape as `syncPost`, and asked of the
+   * SETTINGS (`surfacesOn`), never the tier, so a Custom branched from High can have it.
+   *
+   * Everything it does is a swap onto cached twins (`renderSurfaces.ts`'s contract), so turning
+   * it off is a revert, not a rebuild, and the standard picture comes back exactly.
+   */
+  private syncSurfaces(): void {
+    if (!surfacesOn(this.settings)) {
+      if (this.surfaces) {
+        const sf = this.surfaces;
+        this.surfaces = null;
+        try {
+          this.revertSurfaces(sf);
+          sf.dispose();
+        } catch (err) {
+          this.dropSurfaces('could not be removed', err);
+        }
+        this.renderer.shadowMap.needsUpdate = true;
+      }
+      return;
+    }
+    if (this.surfaces) {
+      const sf = this.surfaces;
+      this.withSurfaces('could not be applied', () => {
+        sf.setReflections(this.settings.reflections);
+        sf.setAnisotropy(Math.min(this.settings.anisotropy, this.renderer.capabilities.getMaxAnisotropy()));
+        // robots receive shadows on `max` only (`renderSurfaceRobots.ts`); the walk applies it
+        sf.setRobotShadows(this.settings.shadows === 'max');
+        sf.applyRobots(this.robots.group);
+      });
+      return;
+    }
+    if (this.surfacesLoad || this.surfacesFailed) return;
+    this.surfacesLoad = import('./renderSurfaces')
+      .then((m) => {
+        this.surfacesLoad = null;
+        if (this.disposed || this.surfaces || this.surfacesFailed || !surfacesOn(this.settings)) return;
+        try {
+          const sf = m.createSurfaces({ probe: true });
+          this.surfaces = sf;
+          sf.setReflections(this.settings.reflections);
+          sf.setAnisotropy(Math.min(this.settings.anisotropy, this.renderer.capabilities.getMaxAnisotropy()));
+          sf.setRobotShadows(this.settings.shadows === 'max');
+          sf.applyField(this.field);
+          sf.applyRobots(this.robots.group);
+          if (this.venue) sf.applyVenue(this.venue, environmentDefFor(this.settings.environment));
+          sf.applyElements(this.elements.group);
+        } catch (err) {
+          this.dropSurfaces('could not be applied', err);
+          return;
+        }
+        this.probeDirty = true;
+        this.renderer.shadowMap.needsUpdate = true;
+        // the twins' maps get the anisotropy row, and the robot snapshot is re-taken
+        this.tuneMaterials();
+      })
+      .catch((err: unknown) => {
+        this.surfacesLoad = null;
+        if (this.disposed) return;
+        this.dropSurfaces('could not be loaded', err);
+      });
+  }
+
+  /** every applier's revert, in one place — the order does not matter, each is its own subtree */
+  private revertSurfaces(sf: BbSurfaces): void {
+    sf.revertField(this.field);
+    sf.revertRobots(this.robots.group);
+    if (this.venue) sf.revertVenue(this.venue);
+    sf.revertElements(this.elements.group);
+    sf.lower();
+  }
+
+  /** run `fn` against the live surfaces, if any; a throw drops the mode (`dropSurfaces`) and never
+   * leaves this method. */
+  private withSurfaces(what: string, fn: (sf: BbSurfaces) => void): void {
+    const sf = this.surfaces;
+    if (!sf) return;
+    try {
+      fn(sf);
+    } catch (err) {
+      this.dropSurfaces(what, err);
+    }
+  }
+
+  /** the surfaces code failed: put the standard materials back (best effort), stop asking for the
+   * scene's life, say so once. Never thrown onward — the same bargain as `dropPost`. */
+  private dropSurfaces(what: string, err: unknown): void {
+    if (this.surfacesFailed) return;
+    this.surfacesFailed = true;
+    const sf = this.surfaces;
+    this.surfaces = null;
+    if (sf) {
+      try {
+        this.revertSurfaces(sf);
+        sf.dispose();
+      } catch {
+        /* already failing; the flag above is what matters */
+      }
+    }
+    this.renderer.shadowMap.needsUpdate = true;
+    console.warn(`[renderScene] physical materials ${what}`, err);
+    this.onQualityEvent?.('Physical materials are unavailable here. Showing the standard materials.');
+  }
+
+  /** everything the room probe must NOT see: the field's structure (all of the field group but
+   * its floor), the robots, the elements and the reticle. See `renderSurfaceProbe.ts`. */
+  private probeHidden(): THREE.Object3D[] {
+    const out = this.field.group.children.filter((c) => c !== this.field.floor);
+    out.push(this.robots.group, this.elements.group, this.reticle.group);
+    return out;
+  }
+
+  /**
    * ANISOTROPY and REFLECTIONS, the two rows that live on the MATERIALS.
    *
    * Anisotropic filtering is a per-TEXTURE sampler setting: it is what keeps the tile seams and
@@ -624,7 +789,15 @@ class BiobuzzScene implements GameScene {
       }
     });
     this.glowMats = [...glow];
-    this.robotChildren = this.robots.group.children.length;
+    this.robotKids = [...this.robots.group.children];
+  }
+
+  /** has any robot group appeared, gone or been REBUILT since `tuneMaterials` last ran? */
+  private robotsChanged(): boolean {
+    const kids = this.robots.group.children;
+    if (kids.length !== this.robotKids.length) return true;
+    for (let i = 0; i < kids.length; i++) if (kids[i] !== this.robotKids[i]) return true;
+    return false;
   }
 
   /**
@@ -910,14 +1083,30 @@ class BiobuzzScene implements GameScene {
     updateBiobuzzElements(this.elements, world);
     updateBiobuzzRobots(this.robots, world);
     updateBiobuzzReticle(this.reticle, world, frame.localRobotId, this.reticleOn);
-    // a robot appeared or its spec changed: its materials are new and have never been tuned
-    if (this.robots.group.children.length !== this.robotChildren) this.tuneMaterials();
+    // a robot appeared, left or was rebuilt: its materials are new and have never been tuned (or
+    // swapped onto their physical twins — idempotent, so the whole group is simply walked again)
+    if (this.robotsChanged()) {
+      this.withSurfaces('could not be applied', (sf) => sf.applyRobots(this.robots.group));
+      this.tuneMaterials();
+    }
 
     this.lastW = Math.max(1, frame.width);
     this.lastH = Math.max(1, frame.height);
     this.lastViewAngle = frame.viewAngle;
     this.lastCamera = this.resolvedCamera(frame.camera);
     const camera = this.cameras.update(frame, world, this.lastCamera);
+
+    // THE ROOM PROBE, when the room changed — before the target is bound and outside both the
+    // bloom window and the surface raise below, so the lamps are at their own power and the twins
+    // drawn into the capture reflect the dome. Six small renders and one filter, never per frame.
+    if (this.surfaces && this.probeDirty) {
+      this.probeDirty = false;
+      const hidden = this.probeHidden();
+      const def = environmentDefFor(this.settings.environment);
+      this.withSurfaces('failed while capturing reflections', (sf) => {
+        sf.recapture(this.renderer, this.scene, hidden, def);
+      });
+    }
 
     // ONE scene pass, into the MSAA target when anti-aliasing is on and straight to the canvas
     // when it is off (which costs no blit at all — that is the whole reason `off` is a real
@@ -932,6 +1121,11 @@ class BiobuzzScene implements GameScene {
       // and the clear panels stop feeding it: see `setClearPanelCap`
       setClearPanelCap(post.panelCap / Math.max(0.05, this.renderer.toneMappingExposure));
     }
+    // THE PHYSICAL TWINS' SHARED UNIFORMS (the probe, the reflections scale), raised for THIS pass
+    // alone: the twins are shared with the builder preview, which is another GL context, and the
+    // minimap and AO passes below read them at rest. Lowered in the same `finally` as the glow.
+    const surf = this.surfaces;
+    if (surf) this.withSurfaces('failed while drawing', (sf) => sf.raise(this.scene));
     try {
       this.renderer.render(this.scene, camera);
     } finally {
@@ -941,6 +1135,7 @@ class BiobuzzScene implements GameScene {
         this.setGlow(1);
         setClearPanelCap(null);
       }
+      surf?.lower();
     }
     // THE SCENE'S OWN COUNTS, READ HERE — `info.render` is reset at the START of every
     // `render()` call, and more follow (the post passes, the blit, the minimap), so a read taken
@@ -1097,6 +1292,18 @@ class BiobuzzScene implements GameScene {
     this.env.dispose();
     this.post?.dispose();
     this.post = null;
+    // the BASES back on every mesh before the blanket walk below, so it frees them; the twins are
+    // the surfaces' own to free (they ignore `dispose()` — see `renderSurfaceKit.ts`)
+    if (this.surfaces) {
+      const sf = this.surfaces;
+      this.surfaces = null;
+      try {
+        this.revertSurfaces(sf);
+        sf.dispose();
+      } catch {
+        /* teardown carries on: a leak beats a scene that cannot be disposed */
+      }
+    }
     this.target?.dispose();
     this.blitMesh.geometry.dispose();
     this.blitMesh.material.dispose();
@@ -1195,11 +1402,14 @@ export const createBiobuzzScene: GameSceneFactory = async (host: HTMLElement, op
   // THE POST CHUNK rides along the same way, for a live scene whose settings want it: an Extreme
   // scene's first frames then already have AO and bloom instead of popping them in a moment
   // later. Allowed to fail for the same reason: `syncPost` asks again (from the module cache when
-  // this one landed) and owns the error path. A fixed-tier scene never wants it.
+  // this one landed) and owns the error path. A fixed-tier scene never wants it. The PHYSICAL
+  // MATERIALS chunk rides along on the same terms, so an Extreme match's first frame is already in
+  // measured finishes rather than switching a moment in.
   const [field] = await Promise.all([
     buildBiobuzzField(quality.meshDetail),
     quality.elementDetail === 'cad' ? loadElementGeometries().catch(() => null) : null,
     !opts.quality && wantsPost(quality) ? import('./renderPost').catch(() => null) : null,
+    !opts.quality && surfacesOn(quality) ? import('./renderSurfaces').catch(() => null) : null,
   ]);
   host.appendChild(canvas);
   // `host` is handed on: the orbit camera's pointer listeners live on it (see the class's own

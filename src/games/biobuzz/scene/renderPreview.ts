@@ -11,6 +11,7 @@ import {
   shadowBlurSamples,
   shadowMapSize,
   subscribeGraphics,
+  wantsSurfaces,
   type GraphicsSettings,
   type GraphicsTier,
 } from '../graphics/settings';
@@ -134,6 +135,11 @@ function getTileTexture(): THREE.CanvasTexture {
   tileTexture = tex;
   return tex;
 }
+
+/** THE PHYSICAL-MATERIALS CHUNK, typed without an import statement — the match scene's own
+ * `SurfacesModule` note says why (`renderScene.ts`). */
+type SurfacesModule = typeof import('./renderSurfaces');
+type BbSurfaces = ReturnType<SurfacesModule['createSurfaces']>;
 
 /** one `MediaQueryList`, constructed once — `matchMedia()` per frame is a cost this is read on
  * every frame to avoid. Null in a non-DOM host, which reads as "motion is fine". */
@@ -315,8 +321,80 @@ export const createRobotPreviewScene: RobotPreviewFactory = (host, options) => {
       void env.apply('room');
       scene.environment = null;
     }
+    syncSurfaces();
     tuneMaterials();
     syncSize();
+  }
+
+  /**
+   * PHYSICAL MATERIALS, ON THE ROBOT ONLY — the same twins the match swaps in (`renderSurfaces.ts`
+   * keeps ONE cache of robot twins for the document), so the builder shows the finish the robot
+   * will have on the field. Same predicate as the match: the `materials` row AND image-based
+   * lighting, because a metal with no environment to reflect renders near black.
+   *
+   * ⚠️ NO ROOM PROBE (`{ probe: false }`): there is no venue here to capture, so the robot reflects
+   * the dome. That is the ONE material-side difference between this card and the match, beside the
+   * three this file already documents (no post chain, the shadow map capped at 2048, the default
+   * light rig). A material PARAMETER that differed at the same settings would be a preview that
+   * lies, which is what ONE GENERATOR exists to prevent.
+   */
+  let surfaces: BbSurfaces | null = null;
+  let surfacesLoad: Promise<void> | null = null;
+  let surfacesFailed = false;
+  const surfacesOn = (s: GraphicsSettings): boolean => wantsSurfaces(s) && s.envLighting;
+  /** a throw from the surfaces code drops the mode for this card's life, never out of a frame */
+  function dropSurfaces(err: unknown): void {
+    surfacesFailed = true;
+    const sf = surfaces;
+    surfaces = null;
+    try {
+      if (sf && group) sf.revertRobots(group);
+      sf?.dispose();
+    } catch {
+      /* already failing */
+    }
+    console.warn('[renderPreview] physical materials unavailable', err);
+  }
+  function syncSurfaces(): void {
+    if (!surfacesOn(settings)) {
+      if (surfaces) {
+        const sf = surfaces;
+        surfaces = null;
+        try {
+          if (group) sf.revertRobots(group);
+          sf.dispose();
+        } catch (err) {
+          dropSurfaces(err);
+        }
+      }
+      return;
+    }
+    if (surfaces) {
+      surfaces.setReflections(settings.reflections);
+      surfaces.setAnisotropy(Math.min(settings.anisotropy, renderer.capabilities.getMaxAnisotropy()));
+      return;
+    }
+    if (surfacesLoad || surfacesFailed) return;
+    surfacesLoad = import('./renderSurfaces')
+      .then((m) => {
+        surfacesLoad = null;
+        if (disposed || surfaces || surfacesFailed || !surfacesOn(settings)) return;
+        try {
+          const sf = m.createSurfaces({ probe: false });
+          surfaces = sf;
+          sf.setReflections(settings.reflections);
+          sf.setAnisotropy(Math.min(settings.anisotropy, renderer.capabilities.getMaxAnisotropy()));
+          if (group) sf.applyRobots(group);
+        } catch (err) {
+          dropSurfaces(err);
+          return;
+        }
+        tuneMaterials();
+      })
+      .catch((err: unknown) => {
+        surfacesLoad = null;
+        if (!disposed) dropSurfaces(err);
+      });
   }
 
   /** ANISOTROPY and REFLECTIONS, the two settings that live on the MATERIALS — same rule as the
@@ -496,6 +574,14 @@ export const createRobotPreviewScene: RobotPreviewFactory = (host, options) => {
     group.add(buildHeightEnvelope(spec));
     scene.add(group);
     measure(group);
+    // the new group's meshes onto their physical twins (cached — a slider drag builds none)
+    if (surfaces) {
+      try {
+        surfaces.applyRobots(group);
+      } catch (err) {
+        dropSurfaces(err);
+      }
+    }
     tuneMaterials();
     void warmUp();
   }
@@ -521,7 +607,21 @@ export const createRobotPreviewScene: RobotPreviewFactory = (host, options) => {
     // otherwise win.
     if (scene.background !== null) scene.background = null;
     poseCamera(dt);
-    renderer.render(scene, camera);
+    // the twins' shared uniforms for THIS pass only (the reflections scale; no probe here), put
+    // back after it — the match on another GL context reads the same objects
+    const sf = surfaces;
+    if (sf) {
+      try {
+        sf.raise(scene);
+      } catch (err) {
+        dropSurfaces(err);
+      }
+    }
+    try {
+      renderer.render(scene, camera);
+    } finally {
+      sf?.lower();
+    }
   }
 
   function loop(): void {
@@ -694,6 +794,16 @@ export const createRobotPreviewScene: RobotPreviewFactory = (host, options) => {
       for (const off of teardown) off();
       teardown.length = 0;
       env.dispose();
+      if (surfaces) {
+        const sf = surfaces;
+        surfaces = null;
+        try {
+          if (group) sf.revertRobots(group);
+          sf.dispose();
+        } catch {
+          /* teardown carries on */
+        }
+      }
       if (group) {
         scene.remove(group);
         disposeRobotGroup(group);

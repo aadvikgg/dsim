@@ -536,8 +536,8 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
   at all. The real defect is the exporter's, and `public/models/biobuzz/README.md` carries the
   note; this is a no-op the day `convert.py` orients its tessellation before merging.
 - **GRAPHICS SETTINGS ARE PER DEVICE, AND THE SCENE SUBSCRIBES TO THEM** (Day 3, plan §4.4–§4.6).
-  `graphics/settings.ts` is the model — the eighteen dials (§4.4's sixteen plus
-  `elementDetail`, below, and `bloom`), the five preset columns, the 0.6/1.2/2.2/4.0/8.3 MP pixel budgets,
+  `graphics/settings.ts` is the model — the nineteen dials (§4.4's sixteen plus
+  `elementDetail`, below, `bloom`, and `materials`), the five preset columns, the 0.6/1.2/2.2/4.0/8.3 MP pixel budgets,
   `localStorage['decodesim.graphics']` with field-by-field coercion. `graphics/auto.ts` is the POLICY (first guess → two-second warm-up → the in-match
   slip rule) and takes its clock as a PARAMETER, because `smoke.ts`'s determinism guard greps
   this whole directory for `performance.now()`. Nothing under `graphics/` may import `three` or
@@ -586,6 +586,42 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
     - ⚠️ The scene pass leaves a few NaN texels on robots at high resolution (4 of 7.9 M at
       3744 × 2106). Bloom's high pass zeroes them; without that one blurred NaN blacked out the
       whole frame. The source is still unfound.
+  - **PHYSICAL MATERIALS (2026-09-27) is a lazy chunk, reached from exactly two places.**
+    `scene/renderSurfaces.ts` (+ its `renderSurface*.ts` helpers) is imported only as
+    `import('./renderSurfaces')`, from `renderScene.ts` and `renderPreview.ts`. Standard mode is
+    pixel-identical whether the chunk ever loaded: every change is a TWIN swapped onto a mesh, no
+    base material is ever written, and a twin's own `dispose()` is a no-op (only the kit's
+    `releaseTwin` frees one, so a rebuild elsewhere can't recompile it out from under another
+    robot). `graphics/finishes.ts` is the source of truth — plain numbers, no `three` import, no
+    colour where colour carries meaning (alliance, elements, chassis fill, `TILE_MAT`, a HUD
+    contrast pin).
+    - **The room probe** is a `CubeCamera` (36 in above the field centre, `VENUE_OVERHEAD_LAYER`
+      included) box-projected to the venue's own room, cube size matched to the dome's. It
+      recaptures only when the environment resolves, the venue rebuilds, or the mode turns on —
+      never per frame — and is raised/lowered around the match's own scene pass only, because the
+      twins are shared with the builder preview's GL context. Diffuse irradiance stays on the
+      dome; only the specular reflection moves to the probe.
+    - **The probe's exposure gain is metals only** (`metalness === 1`), clamped to [1, 2.5]: the
+      drawn room is dimmer than the light the scene is actually lit by, so an un-gained probe
+      reads bronze on aluminium. The 2.5 ceiling is a legibility call, not physics — the same gain
+      would wash a light dielectric toward clipping. The gain also WHITE-BALANCES (`probeGains`'
+      tint, per channel, clamped, luminance 1): it adds the rig's hemisphere light, and in the
+      halls that light is white while the drawn room is warm, so without the tint aluminium came
+      out cream beside the white front bar (school hall ×0.89/1.01/1.25, gym ×0.84/1.01/1.37). A
+      half already brighter than its lighting keeps its own energy and colour.
+    - **`reflections` now does something in physical mode** (`bbSpecIbl` scales a twin's IBL
+      specular). In standard mode it stays a no-op: `envMapIntensity` is read only when a
+      material sets `envMap`, and none does (pre-existing, left).
+    - **Clear panels get true two-surface Fresnel** instead of the dead `×6.667` restore (a no-op
+      in three 0.186, same cause as the `reflections` no-op above), and lose their shadows — cast
+      AND receive — in physical mode only; standard mode keeps the old glass-casts-a-shadow bug.
+    - **The builder preview gets the same robot twins, with no room probe** — the one allowed
+      material difference from the match, because the preview has no venue to capture.
+    - Known gaps, left for the owner: glass still casts a shadow in STANDARD mode; the
+      `reflections` no-op in standard mode; the robot decal's colour-space bug is fixed in
+      physical mode only; the two tape reds (GLB `#ff0000` vs the patch's `#e02020`) are both
+      kept; the elements' small emissive (pollen 0.12, nectar 0.05) is unruled; the mecanum side
+      plates are drawn bare steel where the real part is yellow-coated.
   - ⚠️ **THE SCORING ELEMENTS ARE THE REAL PERFORATED CAD SOLID ON HIGH AND ULTRA** (owner,
     2026-09-21: "For higher graphics settings, model the balls accurately with the holes.
     Consider grabbing the actual accurate cad"). `public/models/biobuzz/elements.glb` is a REAL

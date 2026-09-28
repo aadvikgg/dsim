@@ -385,6 +385,10 @@ import { createWorld as createDecodeWorld } from '../../src/sim/spawn';
 import { BB_POLLEN_R } from '../../src/games/biobuzz/config';
 import { buildBiobuzzElements, setElementDetail, updateBiobuzzElements } from '../../src/games/biobuzz/scene/renderElements';
 import { ELEMENT_RADIUS_TOL_IN } from '../../src/games/biobuzz/scene/renderElementsGlb';
+// -- PHYSICAL MATERIALS (Extreme, 2026-09-27), in their own import block ----------------
+import { FINISHES, ROBOT_FAMILY_FINISH, VENUE_FLOOR_FINISH, finishF0, type DetailKind, type FinishId } from '../../src/games/biobuzz/graphics/finishes';
+import { detailData, detailTexture } from '../../src/games/biobuzz/scene/renderSurfaceKit';
+import { probeBoxFor, probeGains } from '../../src/games/biobuzz/scene/renderSurfaceProbe';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIOBUZZ_DIR = join(root, 'src', 'games', 'biobuzz');
@@ -10505,6 +10509,404 @@ function environmentAndReadoutChecks(check: Check): void {
           /ctx\.setTransform\(/.test(readoutSrc),
       );
       check('and the PiP minimap is left out deliberately, in writing', /PiP minimap/.test(readoutSrc));
+    }
+  }
+
+  // ══ PHYSICAL MATERIALS (Extreme, 2026-09-27) — the `materials: 'physical'` row's lazy chunk ══
+  //
+  // `graphics/finishes.ts` is the three-free finish table (pinned by VALUE, since a smoke check is
+  // the only thing that can answer "did a finish move"); `scene/renderSurfaces.ts` and its
+  // `renderSurface*.ts` helpers are the applier. The finish NUMBERS (roughness, colour, the probe's
+  // white balance) are still being tuned in another session working this same worktree, so this
+  // pins RULES — a metalness that is 0 or 1 and nothing between, an import boundary, the wiring
+  // standard mode depends on staying untouched — never a specific roughness or colour.
+  {
+    // ---- a. the finish table ---------------------------------------------------------------
+    {
+      const ids = Object.keys(FINISHES) as FinishId[];
+      check('the finish table actually has entries (else every check below is vacuous)', ids.length > 0, String(ids.length));
+
+      const badRoughness = ids.filter((id) => !(FINISHES[id].roughness >= 0 && FINISHES[id].roughness <= 1));
+      check("every finish's roughness is in [0,1]", badRoughness.length === 0, badRoughness.join(', '));
+
+      const badMetalness = ids.filter((id) => FINISHES[id].metalness !== 0 && FINISHES[id].metalness !== 1);
+      check('every finish’s metalness is exactly 0 or 1 — nothing real is in between', badMetalness.length === 0, badMetalness.join(', '));
+
+      const badSource = ids.filter((id) => typeof FINISHES[id].source !== 'string' || FINISHES[id].source.trim().length === 0);
+      check('every finish carries a non-empty source', badSource.length === 0, badSource.join(', '));
+
+      const emissiveish = ids.filter((id) => Object.keys(FINISHES[id]).some((k) => /emissive/i.test(k)));
+      check('no finish carries an emissive-like key — a finish is what a surface is MADE OF, never a light', emissiveish.length === 0, emissiveish.join(', '));
+
+      // the only real metals on the whole table (the `Finish` header: "nothing real is in
+      // between; the old 0.05-0.7 values were neither metal nor paint") — everything else,
+      // whatever it is called, is a dielectric.
+      const METALS = new Set<FinishId>(['aluminiumClearAnodised', 'aluminiumExtrusion', 'aluminiumTube', 'steel', 'rivet', 'blackAnodised']);
+      const notMetal = [...METALS].filter((id) => FINISHES[id].metalness !== 1);
+      check(
+        'the aluminium finishes (clear-anodised, extrusion, tube), steel, the rivet and the black anodise are metalness 1',
+        notMetal.length === 0,
+        notMetal.join(', '),
+      );
+      const wrongDielectric = ids.filter((id) => !METALS.has(id) && FINISHES[id].metalness !== 0);
+      check(
+        'every powder coat, plastic, rubber, paint, vinyl, the tile, the tapes and the venue floors are metalness 0',
+        wrongDielectric.length === 0,
+        wrongDielectric.join(', '),
+      );
+
+      const robotFamilyIds = Object.values(ROBOT_FAMILY_FINISH);
+      check(
+        'every ROBOT_FAMILY_FINISH value is a FINISHES key',
+        robotFamilyIds.every((id) => id in FINISHES),
+        robotFamilyIds.filter((id) => !(id in FINISHES)).join(', '),
+      );
+
+      const venueFloorIds = Object.values(VENUE_FLOOR_FINISH);
+      check(
+        'every VENUE_FLOOR_FINISH value is a FINISHES key',
+        venueFloorIds.every((id) => id in FINISHES),
+        venueFloorIds.filter((id) => !(id in FINISHES)).join(', '),
+      );
+
+      const envIds = Object.keys(VENUE_FLOOR_FINISH).sort();
+      const wantIds = [...ENVIRONMENT_IDS].sort();
+      check(
+        'VENUE_FLOOR_FINISH covers every EnvironmentId, no more and no fewer',
+        envIds.length === wantIds.length && envIds.every((id, i) => id === wantIds[i]),
+        `${envIds.join(',')} vs ${wantIds.join(',')}`,
+      );
+
+      const siliconeKind: string | undefined = FINISHES.siliconeRubber.detail?.kind;
+      check(
+        'siliconeRubber has no pips detail — a pip is a pixel at chase distance and is drawn as fine grain instead',
+        siliconeKind !== 'pips',
+        siliconeKind,
+      );
+
+      const f0 = finishF0(1.585);
+      check(
+        "finishF0(1.585) is polycarbonate's normal-incidence reflectance, ~0.0513",
+        Math.abs(f0 - ((1.585 - 1) / (1.585 + 1)) ** 2) < 1e-9 && Math.abs(f0 - 0.0512) < 0.001,
+        String(f0),
+      );
+    }
+
+    // ---- b. the import boundary -------------------------------------------------------------
+    {
+      const surfacesImportRx = /from\s+['"][^'"]*renderSurfaces['"]|import\(\s*['"][^'"]*renderSurfaces['"]\s*\)/;
+      const staticSurfacesImports: string[] = [];
+      const dynamicSurfacesImports: string[] = [];
+      for (const p of walkTs(join(root, 'src'))) {
+        if (p === join(SCENE_DIR, 'renderSurfaces.ts')) continue; // the file does not import itself
+        codeLines(p).forEach((line, i) => {
+          if (!surfacesImportRx.test(line)) return;
+          const loc = `${relPosix(p)}:${i + 1}`;
+          if (/import\(/.test(line)) dynamicSurfacesImports.push(loc);
+          else staticSurfacesImports.push(loc);
+        });
+      }
+      check(
+        'nothing imports renderSurfaces.ts STATICALLY (the physical-materials chunk must stay lazy)',
+        staticSurfacesImports.length === 0,
+        staticSurfacesImports.join(', '),
+      );
+      check(
+        'renderSurfaces.ts is reached only from renderScene.ts and renderPreview.ts, both dynamically (the real import, the prefetch, and the type-only alias)',
+        dynamicSurfacesImports.length >= 4 &&
+          dynamicSurfacesImports.every(
+            (l) => l.startsWith('src/games/biobuzz/scene/renderScene.ts:') || l.startsWith('src/games/biobuzz/scene/renderPreview.ts:'),
+          ),
+        dynamicSurfacesImports.join(', '),
+      );
+
+      // the renderSurface*.ts helpers: reached only from renderSurfaces.ts or a sibling, never
+      // from renderScene.ts/renderPreview.ts directly (which would bypass the one chunk entry).
+      const HELPERS = ['renderSurfaceKit', 'renderSurfaceProbe', 'renderSurfaceField', 'renderSurfaceRobots', 'renderSurfaceVenue'];
+      const outsideHelperImports: string[] = [];
+      for (const helper of HELPERS) {
+        const rx = new RegExp(`from\\s+['"]\\.\\/${helper}['"]|import\\(\\s*['"]\\.\\/${helper}['"]\\s*\\)`);
+        for (const p of walkTs(join(root, 'src'))) {
+          if (p === join(SCENE_DIR, `${helper}.ts`)) continue;
+          const base = relPosix(p);
+          const isRenderSurfacesOrSibling = base === 'src/games/biobuzz/scene/renderSurfaces.ts' || HELPERS.some((h) => base === `src/games/biobuzz/scene/${h}.ts`);
+          if (isRenderSurfacesOrSibling) continue;
+          codeLines(p).forEach((line, i) => {
+            if (rx.test(line)) outsideHelperImports.push(`${base}:${i + 1} -> ${helper}`);
+          });
+        }
+      }
+      check(
+        'every renderSurface*.ts helper is imported only from renderSurfaces.ts or another renderSurface*.ts sibling',
+        outsideHelperImports.length === 0,
+        outsideHelperImports.join(', '),
+      );
+
+      // every file under scene/ being named render*.ts is already asserted near the top of this
+      // lane — not duplicated here.
+      const finishesSrc = readFileSync(join(BIOBUZZ_DIR, 'graphics', 'finishes.ts'), 'utf8');
+      check(
+        "graphics/finishes.ts imports no three.js and nothing from scene/ (it must run in Node with no GL context or canvas)",
+        !/from\s+['"]three(\/[^'"]*)?['"]/.test(finishesSrc) && !/from\s+['"]\.\.\/scene\//.test(finishesSrc),
+      );
+    }
+
+    // ---- c. bundleaudit routes the surfaces chunk ------------------------------------------
+    {
+      const auditSrc = readFileSync(join(root, 'scripts', 'bundleaudit.mjs'), 'utf8');
+      const routeMarker = String.raw`if (/^renderSurfaces-[^/]*\.js$/.test(base)) return 'surfaces';`;
+      check("bundleaudit routes renderSurfaces-*.js as 'surfaces', by filename", auditSrc.includes(routeMarker));
+      check("bundleaudit has a 'surfaces' baseline", /\bsurfaces:\s*\{\s*gzip:/.test(auditSrc));
+    }
+
+    // ---- d. standard mode is untouched ------------------------------------------------------
+    {
+      const fieldGlbSrc = readFileSync(join(SCENE_DIR, 'renderFieldGlb.ts'), 'utf8');
+      check('PANEL_ROUGHNESS (the standard clear-panel material) is still 0.18', /const PANEL_ROUGHNESS = 0\.18;/.test(fieldGlbSrc));
+
+      const sceneSrc5 = readFileSync(join(SCENE_DIR, 'renderScene.ts'), 'utf8');
+      const previewSrc5 = readFileSync(join(SCENE_DIR, 'renderPreview.ts'), 'utf8');
+      check(
+        'renderScene.ts and renderPreview.ts never touch bbBaseMat or call swapMesh/swapTree themselves — every swap goes through the surfaces interface',
+        !/bbBaseMat|swapMesh\(|swapTree\(/.test(sceneSrc5) && !/bbBaseMat|swapMesh\(|swapTree\(/.test(previewSrc5),
+      );
+
+      check(
+        'surf?.lower() runs in the SAME scene-pass finally as the bloom/panel-cap restore',
+        /try \{\s*this\.renderer\.render\(this\.scene, camera\);\s*\} finally \{[\s\S]{0,600}?surf\?\.lower\(\);/.test(sceneSrc5),
+      );
+
+      const probeDirtySets = sceneSrc5.match(/this\.probeDirty = true;/g) ?? [];
+      check(
+        'the probe is dirtied in exactly three places — the environment resolving, a venue rebuild, and the surfaces chunk arriving',
+        probeDirtySets.length === 3,
+        String(probeDirtySets.length),
+      );
+      check(
+        'the room probe recaptures only under `if (this.surfaces && this.probeDirty)`, never per frame',
+        (sceneSrc5.match(/\.recapture\(/g) ?? []).length === 1 && /if \(this\.surfaces && this\.probeDirty\) \{\s*this\.probeDirty = false;/.test(sceneSrc5),
+      );
+
+      check(
+        'robotsChanged() (identity comparison) replaced the old child-COUNT trigger — robotChildren is gone',
+        sceneSrc5.includes('private robotsChanged()') && !sceneSrc5.includes('robotChildren'),
+      );
+    }
+
+    // ---- e. the probe's box and its exposure gains (pure numbers, no GL context needed) ----
+    {
+      const encVenue: VenueSpec = { kind: 'hall', floor: 0, wall: 0, trim: 0, lamp: 0, lampPower: 0, half: 800, ceil: 200 };
+      const smallVenue: VenueSpec = { kind: 'arena', floor: 0, wall: 0, trim: 0, lamp: 0, lampPower: 0, half: 100, ceil: 20 };
+      const outVenue: VenueSpec = { kind: 'outdoor', floor: 0, wall: 0, trim: 0, lamp: 0, lampPower: 0, half: 200, ceil: 0 };
+
+      const big = probeBoxFor(encVenue);
+      check(
+        'an enclosed room wider than 660 keeps its own half-extent, z from -1 to the ceiling',
+        big.min[0] === -800 && big.min[1] === -800 && big.min[2] === -1 && big.max[0] === 800 && big.max[1] === 800 && big.max[2] === 200,
+        JSON.stringify(big),
+      );
+
+      const small = probeBoxFor(smallVenue);
+      check(
+        'an enclosed room narrower than 660 is widened to it, and z tops out past the probe height when the ceiling is lower',
+        small.min[0] === -660 && small.min[1] === -660 && small.max[0] === 660 && small.max[1] === 660 && small.max[2] === 37,
+        JSON.stringify(small),
+      );
+
+      const out = probeBoxFor(outVenue);
+      check(
+        'outdoors the box reaches 1.35x the half-extent, z from -1 to 5000',
+        out.min[0] === -270 && out.min[1] === -270 && out.max[0] === 270 && out.max[1] === 270 && out.max[2] === 5000,
+        JSON.stringify(out),
+      );
+
+      // `ENCLOSED_MIN_HALF` mirrors renderVenue.ts's `VENUE_MIN_HALF` (not exported there) — a
+      // source pin, so a change to either has to change both on purpose.
+      const probeSrc = readFileSync(join(SCENE_DIR, 'renderSurfaceProbe.ts'), 'utf8');
+      const venueSrc = readFileSync(join(SCENE_DIR, 'renderVenue.ts'), 'utf8');
+      check(
+        "the probe box's enclosed-room floor (660) is renderVenue.ts's VENUE_MIN_HALF",
+        /const ENCLOSED_MIN_HALF = 660;/.test(probeSrc) && /const VENUE_MIN_HALF = 660;/.test(venueSrc),
+      );
+
+      const blackProbe = [0.05, 0.05, 0.05, 0.03, 0.03, 0.03] as const;
+      const litDome = [0.8, 0.8, 0.8, 0.5, 0.5, 0.5] as const;
+      const hemi = [1.3, 1.3, 1.3] as const;
+      const nearBlack = probeGains(blackProbe, litDome, hemi, hemi);
+      check(
+        'probeGains clamps to 2.5 for a probe far darker than the lighting it stands in for',
+        nearBlack.up === 2.5 && nearBlack.down === 2.5,
+        JSON.stringify({ up: nearBlack.up, down: nearBlack.down }),
+      );
+
+      const brightProbe = [2, 2, 2, 2, 2, 2] as const;
+      const dimDome = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1] as const;
+      const zeroHemi = [0, 0, 0] as const;
+      const alreadyLit = probeGains(brightProbe, dimDome, zeroHemi, zeroHemi);
+      check(
+        'probeGains never lowers a probe already brighter than the lighting — clamped to [1, 2.5]',
+        alreadyLit.up === 1 && alreadyLit.down === 1,
+        JSON.stringify({ up: alreadyLit.up, down: alreadyLit.down }),
+      );
+
+      // THE WHITE BALANCE (`tint`), on the school hall's measured shape: a warm probe and a warm
+      // dome under a WHITE hemisphere — the case that turned clear-anodised aluminium cream
+      const lumOf = (t: readonly number[]): number => 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+      const warm = (k: number): number[] => [1.33 * k, 0.94 * k, 0.59 * k];
+      const hall = probeGains([...warm(0.27), ...warm(0.27)], [1.04, 0.76, 0.5, 1.04, 0.76, 0.5], [1.3, 1.3, 1.3], [0.09, 0.11, 0.14]);
+      check(
+        'probeGains white-balances a warm probe toward the white light it is lifted by (less red, more blue)',
+        hall.upTint[0] < 0.95 && hall.upTint[2] > 1.15,
+        JSON.stringify(hall.upTint),
+      );
+      check(
+        'a probe tint has luminance 1, so the gain stays the one number that sets energy',
+        Math.abs(lumOf(hall.upTint) - 1) < 1e-9 && Math.abs(lumOf(hall.downTint) - 1) < 1e-9,
+        JSON.stringify([lumOf(hall.upTint), lumOf(hall.downTint)]),
+      );
+      check(
+        'a half already brighter than its lighting keeps its own colour (tint exactly 1, 1, 1)',
+        alreadyLit.upTint.every((v) => v === 1) && alreadyLit.downTint.every((v) => v === 1),
+        JSON.stringify([alreadyLit.upTint, alreadyLit.downTint]),
+      );
+      const wild = probeGains([1, 0.01, 0.01, 0, 0, 0], [0.01, 0.01, 5, 0.5, 0.5, 0.5], [0, 0, 0], [0, 0, 0]);
+      check(
+        'the white balance is a correction, never a recolour: clamped per channel, finite, (1, 1, 1) for an unmeasurable half',
+        wild.upTint.every(Number.isFinite) &&
+          Math.max(...wild.upTint) / Math.min(...wild.upTint) <= 1.4 / 0.7 + 1e-9 &&
+          wild.downTint.every((v) => v === 1),
+        JSON.stringify([wild.upTint, wild.downTint]),
+      );
+    }
+
+    // ---- f. detail generators run in Node (pure arithmetic, no canvas) --------------------
+    {
+      // tracks `DetailKind` in graphics/finishes.ts — a type has no runtime existence, so the nine
+      // kinds are named here by hand.
+      const KINDS: DetailKind[] = ['stipple', 'orangePeel', 'extrusion', 'bead', 'pips', 'weave', 'grain', 'speckle', 'layer'];
+      const badLen: string[] = [];
+      const badAlpha: string[] = [];
+      const badSpan: string[] = [];
+      const badWrap: string[] = [];
+      const n = 256;
+      for (const kind of KINDS) {
+        const d = detailData(kind);
+        if (d.length !== n * n * 4) badLen.push(kind);
+
+        let alphaOk = true;
+        for (let i = 3; i < d.length; i += 4) if (d[i] !== 255) alphaOk = false;
+        if (!alphaOk) badAlpha.push(kind);
+
+        let minR = 255;
+        let maxR = 0;
+        let minG = 255;
+        let maxG = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          minR = Math.min(minR, d[i]);
+          maxR = Math.max(maxR, d[i]);
+          minG = Math.min(minG, d[i + 1]);
+          maxG = Math.max(maxG, d[i + 1]);
+        }
+        if (Math.max(maxR - minR, maxG - minG) < 200) badSpan.push(kind);
+
+        let colWrap = 0;
+        let colStep = 0;
+        let rowWrap = 0;
+        let rowStep = 0;
+        for (let y = 0; y < n; y++) {
+          const i0 = (y * n + 0) * 4;
+          const i1 = (y * n + 1) * 4;
+          const iN = (y * n + (n - 1)) * 4;
+          colWrap = Math.max(colWrap, Math.abs(d[i0] - d[iN]), Math.abs(d[i0 + 1] - d[iN + 1]));
+          colStep = Math.max(colStep, Math.abs(d[i0] - d[i1]), Math.abs(d[i0 + 1] - d[i1 + 1]));
+        }
+        for (let x = 0; x < n; x++) {
+          const i0 = (0 * n + x) * 4;
+          const i1 = (1 * n + x) * 4;
+          const iN = ((n - 1) * n + x) * 4;
+          rowWrap = Math.max(rowWrap, Math.abs(d[i0] - d[iN]), Math.abs(d[i0 + 1] - d[iN + 1]));
+          rowStep = Math.max(rowStep, Math.abs(d[i0] - d[i1]), Math.abs(d[i0 + 1] - d[i1 + 1]));
+        }
+        if (colWrap > colStep * 2 + 4 || rowWrap > rowStep * 2 + 4) badWrap.push(kind);
+      }
+      check('every detailData(kind) is a 256x256 RGBA8 tile, for every DetailKind', badLen.length === 0, badLen.join(', '));
+      check("every detail tile's alpha channel is 255 throughout", badAlpha.length === 0, badAlpha.join(', '));
+      check("every detail tile's slope (R or G) spans close to the full 0-255 range", badSpan.length === 0, badSpan.join(', '));
+      check(
+        'every detail tile wraps — column 0 vs column 255 and row 0 vs row 255 differ by no more than a typical neighbour step',
+        badWrap.length === 0,
+        badWrap.join(', '),
+      );
+
+      const texFails: string[] = [];
+      for (const kind of KINDS) {
+        try {
+          const tex = detailTexture(kind);
+          if (tex !== null && !tex.isDataTexture) texFails.push(kind);
+        } catch {
+          texFails.push(`${kind} (threw)`);
+        }
+      }
+      check('detailTexture(kind) returns a DataTexture (or null) under Node, for every kind, without throwing', texFails.length === 0, texFails.join(', '));
+    }
+
+    // ---- g. the probe's exposure gain applies to metals only -------------------------------
+    {
+      const kitSrc = readFileSync(join(SCENE_DIR, 'renderSurfaceKit.ts'), 'utf8');
+      check(
+        'makeTwin only takes the probe exposure for a metal (metalness === 1), never a dielectric',
+        kitSrc.includes('exposure: recipe.probeExposure !== false && f.metalness === 1,'),
+      );
+      check(
+        'the patched shader applies the exposure gain only under #ifndef BB_PROBE_RAW, gated by a roughness smoothstep',
+        /#ifndef BB_PROBE_RAW[\s\S]{0,400}?smoothstep\( 0\.08, 0\.45, roughness \)/.test(kitSrc),
+      );
+    }
+
+    // ---- h. every robot part's family tag maps through the finish table -------------------
+    // `buildRobotGroup` needs `document.createElement('canvas')` for the sign/decal textures
+    // (`renderRobots.ts`), and this headless lane has no DOM — so this is a SOURCE check over
+    // every `cast(...)`/`tag(...)` call site's family literal, not a built group. TypeScript
+    // already enforces this at compile time (`family: RobotFamily`, not `string`); this is the
+    // runtime net for the day that type gets loosened to a plain string. "No robot material is
+    // emissive" is already pinned (the front-bar block, above) — not duplicated here.
+    {
+      const lines = codeLines(join(SCENE_DIR, 'renderRobots.ts'));
+      const families = new Set(Object.keys(ROBOT_FAMILY_FINISH));
+      const seen: string[] = [];
+      const bad: string[] = [];
+      lines.forEach((line, i) => {
+        if (!/\b(cast|tag)\(/.test(line)) return;
+        const re = /'([a-zA-Z]+)'\s*\)/g;
+        let m: RegExpExecArray | null;
+        // eslint-disable-next-line no-cond-assign
+        while ((m = re.exec(line))) {
+          seen.push(m[1]);
+          if (!families.has(m[1])) bad.push(`${m[1]} @${i + 1}`);
+        }
+      });
+      check("every cast(...)/tag(...) family-tag site is found (else the check below is vacuous)", seen.length >= 40, String(seen.length));
+      check("every robot part's family tag names a family ROBOT_FAMILY_FINISH maps", bad.length === 0, bad.join(', '));
+    }
+
+    // ---- i. clear panels don't cast/receive shadows, in physical mode only ----------------
+    {
+      const fieldApplierSrc = readFileSync(join(SCENE_DIR, 'renderSurfaceField.ts'), 'utf8');
+      check(
+        'the field applier turns cast AND receive off, via setShadow, for every clear sheet (transparent, depthWrite:false)',
+        fieldApplierSrc.includes('if (mesh.isMesh && isClearSheet(mesh)) setShadow(mesh, false, false);') &&
+          fieldApplierSrc.includes('return mats.some((m) => m.transparent && m.depthWrite === false);'),
+      );
+      check(
+        'that shadow policy runs only from apply() — physical mode’s own entry point, never a standard-mode path',
+        /apply\(field\): void \{[\s\S]{0,250}?sheets\(field\.walls\);/.test(fieldApplierSrc),
+      );
+
+      const kitSrc2 = readFileSync(join(SCENE_DIR, 'renderSurfaceKit.ts'), 'utf8');
+      check(
+        "restoreTree restores the parked shadow flags (setShadow's revert) for every mesh, including the clear sheets",
+        /export function restoreTree[\s\S]{0,400}?restoreShadow\(mesh\);/.test(kitSrc2),
+      );
     }
   }
 }

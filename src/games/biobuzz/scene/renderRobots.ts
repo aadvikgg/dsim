@@ -9,6 +9,7 @@ import { robotsEnabled } from '../../../sim/match';
 // RENDER lane asserts it), but the scene reading the settings MODEL is how every other quality
 // dial already works — see `renderPreview.ts`, which imports the store itself.
 import type { GraphicsSettings, GraphicsTier } from '../graphics/settings';
+import type { RobotFamily } from '../graphics/finishes';
 import {
   BB3_MOUTH_SLOT_Z,
   BB_BOX_TUBE_ARM_T,
@@ -189,9 +190,23 @@ function frontBarMat(): THREE.MeshStandardMaterial {
 /** every mesh this module builds casts a shadow; nothing here receives one back onto itself
  * (the field floor/hive/flowers do that — see `renderScene.ts`'s `applyShadowFlags`). One call
  * per part rather than a post-hoc traversal, so a group rebuilt mid-match (`specKey` changing)
- * never has to be re-walked to pick the flag back up. */
-function cast<T extends THREE.Object3D>(o: T): T {
+ * never has to be re-walked to pick the flag back up.
+ *
+ * `family` is WHAT THE PART IS MADE OF (`graphics/finishes.ts`'s `ROBOT_FAMILY_FINISH`), and it
+ * is REQUIRED so a new part cannot be added without saying. It is an INERT tag on the MESH:
+ * nothing in this chunk reads it, and the standard materials never see it. Only the lazy
+ * physical-materials applier (`renderSurfaceRobots.ts`, the `materials: 'physical'` row) does, to
+ * pick the part's twin — which is why the part is named here, where it is built, rather than
+ * guessed there from a colour that a steel plate, a plastic wheel core and an aluminium bracket
+ * all share. */
+function cast<T extends THREE.Object3D>(o: T, family: RobotFamily): T {
   o.castShadow = true;
+  return tag(o, family);
+}
+/** the same inert tag, for the few parts that cast no shadow (the signs, their frames, the decal,
+ * the intake belts) */
+function tag<T extends THREE.Object3D>(o: T, family: RobotFamily): T {
+  o.userData.bbFamily = family;
   return o;
 }
 
@@ -791,10 +806,11 @@ export function buildDriveWheel(
   if (part.rollers > 0) {
     const rollers = framePart(`wheel:${kind}:rollers:${detail}:${hand}`, () => rollerGeometries(part, detail, hand));
     const plates = framePart(`wheel:${kind}:plates:${detail}`, () => plateGeometries(part, detail));
-    const rm = cast(new THREE.Mesh(rollers, rubber));
+    const rm = cast(new THREE.Mesh(rollers, rubber), 'rubber');
     rm.name = 'bb-wheel-rollers';
     g.add(rm);
-    const pm = cast(new THREE.Mesh(plates, steel));
+    // the mecanum's plates are steel; an omni's are its plastic HUB (goBILDA: "plastic hub")
+    const pm = cast(new THREE.Mesh(plates, steel), kind === 'mecanum' ? 'steel' : 'nylon');
     // ⚠️ NAMED, AND NOT FOR THIS FILE'S BENEFIT. `podChecks` (RENDER lane) picks the swerve fork
     // out of a pod by "the first mesh with no name", which was true while the pod's only other
     // meshes were the named tyre and hub. A wheel that adds an anonymous mesh of its own would
@@ -804,10 +820,12 @@ export function buildDriveWheel(
   } else {
     const tyre = framePart(`wheel:${kind}:tyre:${detail}`, () => tyreGeometries(part, detail));
     const core = framePart(`wheel:${kind}:core:${detail}`, () => plateGeometries(part, detail));
-    const tm = cast(new THREE.Mesh(tyre, rubber));
+    const tm = cast(new THREE.Mesh(tyre, rubber), 'rubber');
     tm.name = 'bb-wheel-tread';
     g.add(tm);
-    const cm = cast(new THREE.Mesh(core, steel));
+    // the Hogback's core is goBILDA's "Plastic Core", not steel: it shares the plates' standard
+    // material (a colour, which is all standard mode draws), and its FINISH says what it is
+    const cm = cast(new THREE.Mesh(core, steel), 'nylon');
     cm.name = 'bb-wheel-core';
     g.add(cm);
   }
@@ -1051,9 +1069,9 @@ function podParts(): THREE.Object3D[] {
     return parts;
   });
   return [
-    cast(new THREE.Mesh(struct, solidMat(ALU, 0.45, 0.35))),
-    cast(new THREE.Mesh(ring, solidMat(TURRET_RING, 0.4, 0.5))),
-    cast(new THREE.Mesh(drive, solidMat(SWEEPER, 0.6, 0.2))),
+    cast(new THREE.Mesh(struct, solidMat(ALU, 0.45, 0.35)), 'alu'),
+    cast(new THREE.Mesh(ring, solidMat(TURRET_RING, 0.4, 0.5)), 'dark'),
+    cast(new THREE.Mesh(drive, solidMat(SWEEPER, 0.6, 0.2)), 'belt'),
   ];
 }
 
@@ -1087,7 +1105,7 @@ export function buildSwervePod(accent: string = TREAD, detail: BbWheelDetail = '
   const hub = new THREE.Mesh(wheelGeometry(BB_POD_HUB_R, BB_POD_WHEEL_W + 0.14), solidMat(ALU, 0.4, 0.5));
   hub.name = 'bb-pod-hub';
   hub.position.set(0, 0, BB_POD_WHEEL_R);
-  pod.add(cast(hub));
+  pod.add(cast(hub, 'alu'));
   for (const p of podParts()) pod.add(p);
   return pod;
 }
@@ -1328,7 +1346,7 @@ export function buildFrame(spec: RobotSpec): THREE.Object3D[] {
   skinMesh.name = 'robot:frame:skin';
   const frameMesh = new THREE.Mesh(frame, solidMat(ALU_DK, 0.45, 0.4));
   frameMesh.name = 'robot:frame:rails';
-  return [cast(skinMesh), cast(frameMesh)];
+  return [cast(skinMesh, 'fill'), cast(frameMesh, 'dark')];
 }
 
 /**
@@ -1401,7 +1419,7 @@ function buildEndPlate(spec: RobotSpec, end: 'front' | 'back', mouthHalf: number
   const cx = sign * (hl - BB_PLATE_T / 2); // outer face flush with ±hl — never past it
 
   if (mouthHalf === undefined) {
-    const mesh = cast(new THREE.Mesh(endPlateGeo(BB_PLATE_T, (hw - BB_PLATE_T) * 2, BB_PLATE_H), mat));
+    const mesh = cast(new THREE.Mesh(endPlateGeo(BB_PLATE_T, (hw - BB_PLATE_T) * 2, BB_PLATE_H), mat), 'fill');
     mesh.position.set(cx, 0, BB_PLATE_H / 2);
     return [mesh];
   }
@@ -1415,7 +1433,7 @@ function buildEndPlate(spec: RobotSpec, end: 'front' | 'back', mouthHalf: number
     const cy = (s * (Math.abs(outerFace) + innerMag)) / 2;
     const z0 = 0; // floor to plate height — see the header: the frame face is solid already
     const h = BB_PLATE_H - z0;
-    const mesh = cast(new THREE.Mesh(endPlateGeo(BB_PLATE_T, width, h), mat));
+    const mesh = cast(new THREE.Mesh(endPlateGeo(BB_PLATE_T, width, h), mat), 'fill');
     mesh.position.set(cx, cy, z0 + h / 2);
     out.push(mesh);
   }
@@ -1995,7 +2013,7 @@ export function buildIntake(
     for (const s of [1, -1] as const) {
       const arm = new THREE.Mesh(armGeo, solidMat(ALU, 0.45, 0.35));
       arm.position.set(0, s * (f.half - BB_INTAKE_ARM_INSET - armT / 2), 0);
-      g.add(cast(arm));
+      g.add(cast(arm, 'alu'));
     }
 
     /**
@@ -2023,7 +2041,7 @@ export function buildIntake(
     ]);
     const brace = new THREE.Mesh(braceGeo, solidMat(ALU, 0.45, 0.35));
     brace.name = `robot:intake:brace:${m.edge}`;
-    g.add(cast(brace));
+    g.add(cast(brace, 'alu'));
 
     // the `ramp`'s own rails sit inboard of the arms (`railY` below); its barrel is shortened to
     // pass between them with the stated clearance. Every other kind keeps the full-width barrel
@@ -2052,12 +2070,12 @@ export function buildIntake(
     const roll = new THREE.Group();
     roll.name = `robot:sweeper:${m.edge}`;
     roll.position.set(outer, 0, BB_ROLLER_Z);
-    const hubMesh = cast(new THREE.Mesh(hubGeo, rollerMat));
+    const hubMesh = cast(new THREE.Mesh(hubGeo, rollerMat), 'rubber');
     roll.add(hubMesh);
     const flaps: THREE.Object3D[] = [];
     for (let i = 0; i < BB_ROLLER_FLAPS; i++) {
       const flap = new THREE.Group();
-      flap.add(cast(new THREE.Mesh(flapGeo, rollerMat)));
+      flap.add(cast(new THREE.Mesh(flapGeo, rollerMat), 'rubber'));
       roll.add(flap);
       flaps.push(flap);
     }
@@ -2071,7 +2089,7 @@ export function buildIntake(
       t.name = `robot:transfer:${m.edge}`;
       t.scale.set(0.62, 1, 0.62);
       t.position.set(inner, 0, BB_ROLLER_Z + 0.9);
-      g.add(cast(t));
+      g.add(cast(t, 'rubber'));
       rollers.push({ hub: t, flaps: [], phase: 0 });
       // the BELTS down the inside of each arm, linking the two shafts
       for (const s of [1, -1] as const) {
@@ -2080,7 +2098,7 @@ export function buildIntake(
           solidMat(tint3d(SWEEPER, accent, 0.35), 0.8, 0),
         );
         belt.position.set((outer + inner) / 2, s * (f.half - 0.45), BB_ROLLER_Z + 0.45);
-        g.add(belt);
+        g.add(tag(belt, 'belt'));
       }
     }
 
@@ -2143,7 +2161,7 @@ export function buildIntake(
           ['top', wheelZ1],
           ['bot', wheelZ0 - BB_SIDE_ROLLER_PLATE_T],
         ] as const) {
-          const yoke = cast(new THREE.Mesh(plate(z0), solidMat(ALU, 0.45, 0.35)));
+          const yoke = cast(new THREE.Mesh(plate(z0), solidMat(ALU, 0.45, 0.35)), 'alu');
           yoke.name = `robot:sideroller:yoke:${tag}:${m.edge}`;
           g.add(yoke);
         }
@@ -2152,7 +2170,7 @@ export function buildIntake(
         const axle = new THREE.CylinderGeometry(0.17, 0.17, wheelZ1 - wheelZ0 + 2 * BB_SIDE_ROLLER_PLATE_T, 8);
         axle.rotateX(Math.PI / 2);
         axle.translate(wheelX, rollerY, BB_SIDE_ROLLER_Z);
-        const axleMesh = cast(new THREE.Mesh(axle, solidMat(ALU_DK, 0.5, 0.5)));
+        const axleMesh = cast(new THREE.Mesh(axle, solidMat(ALU_DK, 0.5, 0.5)), 'dark');
         axleMesh.name = `robot:sideroller:axle:${m.edge}`;
         g.add(axleMesh);
         // the WEB tying the two straps together where they leave the arm — entirely BEHIND the
@@ -2160,15 +2178,15 @@ export function buildIntake(
         const webT = INTAKE_RAIL_T * 0.6;
         const webLen = Math.max(0.2, BB_SIDE_ROLLER_YOKE_BACK - BB_SIDE_ROLLER_R);
         const web = boxAt(webLen, webT, wheelZ1 - wheelZ0, backX + webLen / 2, armOuter - (s * webT) / 2, BB_SIDE_ROLLER_Z);
-        const webMesh = cast(new THREE.Mesh(web, solidMat(ALU, 0.45, 0.35)));
+        const webMesh = cast(new THREE.Mesh(web, solidMat(ALU, 0.45, 0.35)), 'alu');
         webMesh.name = `robot:sideroller:web:${m.edge}`;
         g.add(webMesh);
 
         // the WHEEL: hub + lugged tread, one group so the whole thing takes `rotation.z`
         const wheel = new THREE.Group();
         wheel.name = `robot:sideroller:${m.edge}:${s === 1 ? 'l' : 'r'}`;
-        wheel.add(cast(new THREE.Mesh(sideRollerTreadGeometry(), rollerMat)));
-        wheel.add(cast(new THREE.Mesh(sideRollerHubGeometry(), solidMat(ALU, 0.5, 0.4))));
+        wheel.add(cast(new THREE.Mesh(sideRollerTreadGeometry(), rollerMat), 'rubber'));
+        wheel.add(cast(new THREE.Mesh(sideRollerHubGeometry(), solidMat(ALU, 0.5, 0.4)), 'alu'));
         wheel.position.set(wheelX, rollerY, BB_SIDE_ROLLER_Z);
         g.add(wheel);
         // FUNNEL INWARD: the wheel's leading face (local +x, where an oncoming POLLEN first
@@ -2201,7 +2219,7 @@ export function buildIntake(
         boxAt(BB_RAMP_RAIL_X, BB_RAMP_RAIL_Y, BB_RAMP_L, 0, 0, BB_RAMP_L / 2),
       ]);
       for (const s of [1, -1] as const) {
-        const rail = cast(new THREE.Mesh(railGeo, solidMat(ALU, 0.5, 0.3)));
+        const rail = cast(new THREE.Mesh(railGeo, solidMat(ALU, 0.5, 0.3)), 'alu');
         rail.name = `robot:ramp:rail:${m.edge}:${s === 1 ? 'l' : 'r'}`;
         rail.position.set(0, s * railY, 0);
         pivot.add(rail);
@@ -2242,7 +2260,7 @@ export function buildIntake(
         const geo = framePart(`ramp:wedge:${tag}|${length.toFixed(2)}|${railY.toFixed(2)}`, () => [
           boxAt(length, railY * 2, BB_RAMP_WEDGE_THICK * 2, 0, 0, 0),
         ]);
-        const mesh = cast(new THREE.Mesh(geo, solidMat(ALU, 0.5, 0.3)));
+        const mesh = cast(new THREE.Mesh(geo, solidMat(ALU, 0.5, 0.3)), 'alu');
         mesh.name = `robot:ramp:bar:${m.edge}:${tag}`;
         mesh.position.set(lx, 0, lz);
         mesh.rotation.y = worldAngle - thetaFull;
@@ -2264,7 +2282,7 @@ export function buildIntake(
         ),
       ]);
       for (const s of [1, -1] as const) {
-        const pb = cast(new THREE.Mesh(pivotBracketGeo, solidMat(ALU, 0.45, 0.35)));
+        const pb = cast(new THREE.Mesh(pivotBracketGeo, solidMat(ALU, 0.45, 0.35)), 'alu');
         pb.name = `robot:ramp:pivotbracket:${m.edge}`;
         pb.position.set(0, s * pivotArmY, 0);
         g.add(pb);
@@ -2570,7 +2588,7 @@ function buildHoodNode(H: BbHeadDims, which: 0 | 1): THREE.Group {
   ]);
   const hood = new THREE.Mesh(hoodGeo, solidMat(TURRET_BARREL, 0.35, 0.55));
   hood.name = 'bb-turret-hood';
-  pitch.add(cast(hood));
+  pitch.add(cast(hood, 'dark'));
 
   // THE TWO CHEEKS — see the header. One merged part per side; the key carries the side, because
   // the two are mirror images and a shared buffer would put both on one.
@@ -2599,7 +2617,7 @@ function buildHoodNode(H: BbHeadDims, which: 0 | 1): THREE.Group {
     // of with the arc it carries — which is the whole claim this bracket exists to make.
     const cheek = new THREE.Mesh(cheekGeo, solidMat(TURRET_BARREL, 0.4, 0.45));
     cheek.name = 'bb-turret-hood-cheek';
-    pitch.add(cast(cheek));
+    pitch.add(cast(cheek, 'dark'));
   }
 
   // THE MUZZLE, as a named empty at the hood's LIP — `pathR` straight up from the axle in this
@@ -2646,7 +2664,7 @@ function addFixedShooter(head: THREE.Group, axle: THREE.Group, H: BbHeadDims, wh
   });
   const turretPlate = new THREE.Mesh(plateGeo, solidMat(ALU_DK, 0.45, 0.4));
   turretPlate.name = 'bb-turret-plate';
-  head.add(cast(turretPlate));
+  head.add(cast(turretPlate, 'dark'));
 
   // ── THE TWO SIDE PLATES — `sidePlateR`, sampled, with its four corners exact ───────────────
   // SOLID, not a band with a bore: a side plate is what the flywheel is JOURNALLED in, and the
@@ -2689,7 +2707,7 @@ function addFixedShooter(head: THREE.Group, axle: THREE.Group, H: BbHeadDims, wh
     plate.name = 'bb-turret-side-plate';
     // the geometry runs y ∈ [−t, 0], so this puts each plate's INNER face on the channel wall
     plate.position.y = s > 0 ? H.plateGap / 2 + BB_SHOOTER_PLATE_T : -H.plateGap / 2;
-    axle.add(cast(plate));
+    axle.add(cast(plate, 'alu'));
   }
 
   // ── THE FLYWHEEL — ONE WHEEL, CENTRED, ONE BEARING BLOCK ABOVE THE TURRET PLATE ───────────
@@ -2706,7 +2724,7 @@ function addFixedShooter(head: THREE.Group, axle: THREE.Group, H: BbHeadDims, wh
   const fwW = H.elemR * 2 * BB_FLYWHEEL_W_FRAC;
   const wheel = new THREE.Mesh(wheelGeometry(BB_FLYWHEEL_R, fwW), solidMat(SWEEPER, 0.45, 0.2));
   wheel.name = 'bb-turret-flywheel';
-  axle.add(cast(wheel));
+  axle.add(cast(wheel, 'rubber'));
   // the HUB inside it, and a spacer collar each side — a wheel on a shaft rather than a puck
   const hubGeo = framePart(`flywheelHub:${which}`, () => {
     const parts: THREE.BufferGeometry[] = [
@@ -2719,7 +2737,7 @@ function addFixedShooter(head: THREE.Group, axle: THREE.Group, H: BbHeadDims, wh
   });
   const hub = new THREE.Mesh(hubGeo, solidMat(ALU_DK, 0.35, 0.6));
   hub.name = 'bb-turret-flywheel-hub';
-  axle.add(cast(hub));
+  axle.add(cast(hub, 'dark'));
   const beltY = H.plateGap / 2 + BB_SHOOTER_PLATE_T + BB_BELT_CLEAR + BB_BELT_W / 2;
   const shaftIn = -(H.plateGap / 2 + BB_SHOOTER_PLATE_T + 0.15);
   const shaftOut = beltY + BB_BELT_W / 2 + 0.1;
@@ -2737,7 +2755,7 @@ function addFixedShooter(head: THREE.Group, axle: THREE.Group, H: BbHeadDims, wh
   );
   const braces = new THREE.Mesh(braceGeo, solidMat(ALU, 0.35, 0.55));
   braces.name = 'bb-turret-brace';
-  axle.add(cast(braces));
+  axle.add(cast(braces, 'alu'));
 
   // ── THE FEED THROAT — THE BACK OF THE CHANNEL THE ELEMENT COMES UP, AND THE REAR TIE ──────
   // ⚠️ **THIS IS WHAT REPLACES THE "WEIRD FLAP IN THE BACK", REPORTED TWICE.** The first answer
@@ -2768,7 +2786,7 @@ function addFixedShooter(head: THREE.Group, axle: THREE.Group, H: BbHeadDims, wh
   ]);
   const throat = new THREE.Mesh(throatGeo, solidMat(ALU, 0.4, 0.45));
   throat.name = 'bb-turret-throat';
-  axle.add(cast(throat));
+  axle.add(cast(throat, 'alu'));
 
   // ── THE MOTOR, BEHIND THE HOOD, FACE-BOLTED TO THE DRIVE-SIDE PLATE ───────────────────────
   // ⚠️ OWNER ITEM (a): "the motor should be on the other side of the flywheel, behind the hood."
@@ -2795,7 +2813,7 @@ function addFixedShooter(head: THREE.Group, axle: THREE.Group, H: BbHeadDims, wh
   ]);
   const motor = new THREE.Mesh(motorGeo, solidMat(MOTOR, 0.5, 0.4));
   motor.name = 'bb-turret-motor';
-  axle.add(cast(motor));
+  axle.add(cast(motor, 'dark'));
 
   // ── THE TWO SHAFTS — the flywheel's, which runs right through and out the belt side to carry
   // its pulley, and the motor's output, which reaches out to meet it. Both cross a side plate
@@ -2809,7 +2827,7 @@ function addFixedShooter(head: THREE.Group, axle: THREE.Group, H: BbHeadDims, wh
   ]);
   const shaft = new THREE.Mesh(shaftGeo, solidMat(ALU, 0.3, 0.7));
   shaft.name = 'bb-turret-shaft';
-  axle.add(cast(shaft));
+  axle.add(cast(shaft, 'steel'));
 
   // THE BELT — two pulleys and the two straight tangent runs between them, merged into one part,
   // in a plane `BB_BELT_CLEAR` outboard of the side plate's outer face. A `TubeGeometry` over a
@@ -2844,7 +2862,7 @@ function addFixedShooter(head: THREE.Group, axle: THREE.Group, H: BbHeadDims, wh
   });
   const belt = new THREE.Mesh(beltGeo, solidMat(ALU_DK, 0.55, 0.3));
   belt.name = 'bb-turret-belt';
-  axle.add(cast(belt));
+  axle.add(cast(belt, 'belt'));
 }
 
 /**
@@ -2894,7 +2912,7 @@ export function buildTurret(spec: RobotSpec, mountPos: BbMountPos, which: 0 | 1 
   });
   const ringMesh = new THREE.Mesh(ringGeo, solidMat(TURRET_RING, 0.4, 0.5));
   ringMesh.name = 'bb-turret-ring';
-  group.add(cast(ringMesh));
+  group.add(cast(ringMesh, 'dark'));
 
   // ⚠️ THE YAW NODE'S ORIGIN IS THE ROTATION AXIS, AT DECK HEIGHT, AND IT USED TO BE THE AXLE.
   // It has to be the axis: `rotation.z` turns this node's children about its own origin, so with
@@ -2982,7 +3000,7 @@ function buildDumper(spec: RobotSpec, launcher: BbLauncherSpec): THREE.Group {
     }
     return parts;
   });
-  group.add(cast(new THREE.Mesh(mount, mat)));
+  group.add(cast(new THREE.Mesh(mount, mat), 'alu'));
 
   // the SWINGING half, built about the shaft so the node's own rotation IS the throw.
   const arm = new THREE.Group();
@@ -3013,7 +3031,7 @@ function buildDumper(spec: RobotSpec, launcher: BbLauncherSpec): THREE.Group {
     }
     return parts;
   });
-  arm.add(cast(new THREE.Mesh(tray, mat)));
+  arm.add(cast(new THREE.Mesh(tray, mat), 'alu'));
   group.add(arm);
   group.userData.dumpArm = arm;
   return group;
@@ -3087,7 +3105,7 @@ export function buildRobotGroup(
     const decal = new THREE.Mesh(new THREE.BoxGeometry(deckL, deckW, 0.02), decalMat);
     decal.name = `robot:${id}:decal`;
     decal.position.set(0, 0, BB_DECK_Z + 0.02);
-    group.add(decal);
+    group.add(tag(decal, 'vinyl'));
   }
 
   // THE TWO ROBOT SIGNS (R401: "Minimum of two ROBOT SIGNS per ROBOT … on opposite or adjacent
@@ -3110,13 +3128,13 @@ export function buildRobotGroup(
     // clearance top and bottom on every chassis this builder can make.
     sign.position.set(0, side * (spec.width / 2 + 0.05), BB_PLATE_H * 0.5);
     sign.quaternion.copy(bbRobotSignOrientation(side));
-    group.add(sign);
+    group.add(tag(sign, 'vinyl'));
     if (plateGeo && plateMat) {
       const plate = new THREE.Mesh(plateGeo, plateMat);
       plate.name = `robot:${id}:plate:${where}`;
       plate.position.set(0, side * (spec.width / 2 + 0.05 + 0.02), BB_PLATE_H * 0.5);
       plate.quaternion.copy(bbRobotSignOrientation(side));
-      group.add(plate);
+      group.add(tag(plate, cosm.plate === 'bold' ? 'fill' : 'alu'));
     }
   }
 
@@ -3205,6 +3223,7 @@ export function buildFrontMarks(spec: RobotSpec, id: number): THREE.Object3D[] {
       framePart(`front:bar|${m.front.x0.toFixed(3)}|${m.front.halfY.toFixed(3)}${barKey(m.front)}`, () => barParts(m.front)),
       frontBarMat(),
     ),
+    'paint',
   );
   front.name = `robot:${id}:front:bar`;
   front.position.set(0, 0, barZ);
@@ -3222,6 +3241,7 @@ export function buildFrontMarks(spec: RobotSpec, id: number): THREE.Object3D[] {
       }),
       solidMat(BB_FRONT_INK, 0.45, 0.05),
     ),
+    'paint',
   );
   arrow.name = `robot:${id}:front:arrow`;
   arrow.position.set(0, 0, BB_DECK_Z + 0.02);
@@ -3232,6 +3252,7 @@ export function buildFrontMarks(spec: RobotSpec, id: number): THREE.Object3D[] {
       framePart(`rear:bar|${m.rear.x1.toFixed(3)}|${m.rear.halfY.toFixed(3)}${barKey(m.rear)}`, () => barParts(m.rear)),
       solidMat(BB_REAR_INK, 0.75, 0.05),
     ),
+    'dark',
   );
   rear.name = `robot:${id}:rear:bar`;
   rear.position.set(0, 0, barZ);
@@ -3291,6 +3312,7 @@ export function buildBoxTube(
       }),
       plateMat,
     ),
+    'dark',
   );
   base.name = `robot:${id}:tube:pivot`;
   node.add(base);
@@ -3323,6 +3345,7 @@ export function buildBoxTube(
       }),
       darkMat,
     ),
+    'nylon',
   );
   drums.name = `robot:${id}:tube:drive`;
   node.add(drums);
@@ -3350,7 +3373,7 @@ export function buildBoxTube(
       }
       return parts;
     });
-    const mesh = cast(new THREE.Mesh(geo, tubeMat));
+    const mesh = cast(new THREE.Mesh(geo, tubeMat), 'extr');
     mesh.name = `robot:${id}:tube:s${i}`;
     // NESTED: each stage hangs off the one it slides in, so a stage's own `position.z` is its
     // extension out of its parent and the tip rides on the last one
@@ -3374,6 +3397,7 @@ export function buildBoxTube(
           }),
           collarMat,
         ),
+        'nylon',
       );
       collar.name = `robot:${id}:tube:s${i}:block`;
       mesh.add(collar);
@@ -3397,6 +3421,7 @@ export function buildBoxTube(
       }),
       darkMat,
     ),
+    'nylon',
   );
   wrist.name = `robot:${id}:tube:wrist`;
   level.add(wrist);
@@ -3419,6 +3444,7 @@ export function buildBoxTube(
       }),
       plateMat,
     ),
+    'dark',
   );
   yoke.name = `robot:${id}:tube:yoke`;
   yaw.add(yoke);
@@ -3443,6 +3469,7 @@ export function buildBoxTube(
       }),
       plateMat,
     ),
+    'dark',
   );
   arm.name = `robot:${id}:tube:arm`;
   swing.add(arm);
@@ -3464,6 +3491,7 @@ export function buildBoxTube(
         }),
         darkMat,
       ),
+      'nylon',
     );
     g.add(jaw);
     swing.add(g);
