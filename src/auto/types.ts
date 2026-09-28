@@ -87,6 +87,12 @@ export interface GameAutoAdapter {
    * one (`practiceSetups`), so a robot the auto seats never spawns on top of its partner.
    */
   defaultStartNear?(pose: StartPose): number;
+  /**
+   * Can this build strafe? False for a tank: its auto's path legs are then followed nose- or
+   * tail-first (`load.ts` `tankHeadings`) and steered as a differential drive (`drive.ts`).
+   * Absent means holonomic.
+   */
+  holonomic?(spec: RobotSpec): boolean;
 }
 
 /** What the seat reports for the HUD and the panel. */
@@ -99,4 +105,6 @@ export interface AutoSeatStatus {
   timeS: number;
   /** why the auto could not run, for `state: 'error'` */
   error?: string;
+  /** set while `running`: a path step with no `timeoutS` has asked for power and the robot has not moved for 1.5 s */
+  stuck?: boolean;
 }

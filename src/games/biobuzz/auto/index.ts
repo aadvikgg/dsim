@@ -53,10 +53,22 @@ const valued = (value: number, provenance: string): { value: number; provenance:
  * smoke lane holds the tracking error); the brake model is left to Zenith's default, stopping at
  * the robot file's deceleration, which for DSIM is the drivetrain's own `accel`.
  */
+/** Can this build strafe? The spec's own drive mode (a butterfly starts in mecanum). */
+export function bbHolonomic(spec: RobotSpec): boolean {
+  const dp = driveParams(spec, false);
+  return dp.saturation !== 'tank' && dp.strafeMult !== 0;
+}
+
 export function biobuzzZenithRobot(spec: RobotSpec): unknown {
   const dp = driveParams(spec, false);
-  const tank = dp.saturation === 'tank' || dp.strafeMult === 0;
-  const strafe = tank ? 1 : dp.maxSpeed * dp.strafeMult;
+  const tank = !bbHolonomic(spec);
+  // ⚠️ A TANK IN A MECANUM-ONLY FILE. Zenith's robot schema has no drivetrain kind, so there is no
+  // honest "cannot strafe" to write. It used to say 1 in/s, which priced every leg the file
+  // draws sideways (a constant-heading sweep) at a crawl: StarterBot's garden-cycle estimated
+  // 155 s and TIME_BUDGET fired. DSIM drives a tank's legs nose- or tail-first (`load.ts`
+  // `tankHeadings`), so the sideways cap it states is the FORWARD one: a leg costs what it
+  // costs nose-first. What Zenith still cannot see is the turn into each leg at a corner.
+  const strafe = tank ? dp.maxSpeed : dp.maxSpeed * dp.strafeMult;
   const mountRaw = (spec as { intakeMount?: string }).intakeMount ?? 'front';
   // THE FOOTPRINT IS THE COLLIDER'S, intake reach included (`bbFootprint`, the same extents the
   // chassis collider, the start rules and the pollen solids read), not the bare chassis: a plan
@@ -103,14 +115,22 @@ export function biobuzzZenithRobot(spec: RobotSpec): unknown {
     },
     kinematics: {
       maxForwardVelInPerS: valued(dp.maxSpeed, SIM('top speed (driveParams.maxSpeed)')),
-      maxStrafeVelInPerS: valued(strafe, tank ? SIM('tank: cannot strafe, 1 in/s stands in for zero') : SIM('strafe speed (maxSpeed x strafeMult)')),
+      maxStrafeVelInPerS: valued(
+        strafe,
+        tank
+          ? SIM('tank: cannot strafe; DSIM drives every leg nose- or tail-first, so the sideways cap is the forward top speed (Zenith has no differential drivetrain)')
+          : SIM('strafe speed (maxSpeed x strafeMult)'),
+      ),
       forwardDecelInPerS2: valued(dp.accel, SIM('drive acceleration (driveParams.accel); DSIM brakes as hard as it accelerates')),
       strafeDecelInPerS2: valued(dp.accel, SIM('drive acceleration (driveParams.accel)')),
       accelInPerS2: valued(dp.accel, SIM('drive acceleration (driveParams.accel)')),
       maxAngularVelRadPerS: valued(dp.maxTurn, SIM('turn rate (driveParams.maxTurn)')),
       defaultPathSpeedFraction: valued(0.8, 'CARRIED OVER: Horizon-36596/biobuzz Constants.AutoConstants.AUTO_MAX_POWER'),
       settleS: valued(0.25, 'SET BY HAND: Zenith planner default'),
-      strafeFractionWarn: valued(0.2, 'SET BY HAND: Zenith planner default warning threshold'),
+      // a tank never drives a leg sideways in DSIM, so the mecanum strafe-cost warning is off for it
+      strafeFractionWarn: tank
+        ? valued(1, SIM('tank: legs are driven nose- or tail-first, so the sideways-driving warning does not apply'))
+        : valued(0.2, 'SET BY HAND: Zenith planner default warning threshold'),
       sweepSpeedFraction: valued(0.4, 'SET BY HAND: Zenith planner default for constant-heading sweep legs'),
       follower: {
         library: 'pedro',
@@ -301,6 +321,7 @@ export const BIOBUZZ_AUTO: GameAutoAdapter = {
   // BIOBUZZ's own rules, derived from the field DSIM hands over (so from DSIM's walls)
   rules: (field) => loadSeason(field),
   robot: biobuzzZenithRobot,
+  holonomic: bbHolonomic,
   createHost: (world, robotId) => new BiobuzzAutoHost(world, robotId),
   // BIOBUZZ's canonical frame is BLUE's, and RED is its point mirror (`bbMirror`), which is its
   // own inverse: a RED world pose mirrors back to the canonical one.

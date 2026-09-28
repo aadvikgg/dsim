@@ -8,9 +8,10 @@ import type { HudSnapshot } from '../game';
  */
 type AutoHud = Pick<HudSnapshot, 'auto' | 'phase'>;
 
-/** The line on the second HUD card: the step running, AUTO DONE, or AUTO OFF when it cannot run. */
+/** The line on the second HUD card: the step running (or STUCK on it), AUTO DONE, or AUTO OFF when it cannot run. */
 export function autoHudLine({ auto, phase }: AutoHud): string | null {
   if (!auto) return null;
+  if (auto.state === 'running' && auto.stuck) return `AUTO STUCK ON ${(auto.stepId ?? auto.name).toUpperCase()}`;
   if (auto.state === 'running') return `AUTO · ${(auto.stepId ?? auto.name).toUpperCase()}`;
   const early = phase === 'pre' || phase === 'auto' || phase === 'freeplay';
   if (auto.state === 'done' && (phase === 'auto' || phase === 'freeplay')) return 'AUTO DONE';
