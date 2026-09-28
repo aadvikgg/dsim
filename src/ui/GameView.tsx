@@ -16,6 +16,7 @@ import { effectiveBindings, keyLabel, padBindLabel, padBinds } from '../input/bi
 import { POWER_DRAW_MAX } from '../config';
 import { MobileControls } from './MobileControls';
 import { timerPanel } from './timerPanel';
+import { autoHudLine, autoPreNotice } from './autoHud';
 import { FoulChip } from './FoulChip';
 import { AdSlot, useAdUnitActive } from './AdSlot';
 import { SponsorGameChip } from './Sponsor';
@@ -645,6 +646,7 @@ export function GameView({
     () => effectiveBindings(settings.bindings, hud?.game ?? settings.game),
     [settings.bindings, settings.game, hud?.game],
   );
+  const preAuto = hud ? autoPreNotice(hud) : null;
   const [scene3d, setScene3d] = useState(false);
   useEffect(() => {
     const host = viewportRef.current;
@@ -901,6 +903,14 @@ export function GameView({
               <span aria-hidden="true">MOTIF</span> <MotifDots motif={hud.motif} />
             </p>
           )}
+          {/* THE AUTO, BEFORE THE DRIVER COMMITS: which one AUTO plays, why it will not, or what
+              Zenith flags in it (`autoHud.ts`). A file the seat refuses used to leave the robot
+              sitting through AUTO with this panel saying nothing. */}
+          {preAuto && (
+            <p className={`ds-hint${preAuto.tone === 'ok' ? '' : ` ${preAuto.tone}`}`} role="status">
+              {preAuto.text}
+            </p>
+          )}
           {!coarsePointer && (
             <p className="big">
               Press {keyLabel(effBindings.keys.start[0] ?? 'enter')} or{' '}
@@ -1039,13 +1049,9 @@ function Hud({
   const GameChips = moduleFor(hud.game).hudChips;
   const GamePinnedNotice = moduleFor(hud.game).pinnedNotice;
   const timer = timerPanel(hud);
-  // the auto's line on the second card: which step it is on, while AUTO (or a Free Drive trial) runs
-  const autoLine =
-    hud.auto && hud.auto.state === 'running'
-      ? `AUTO · ${(hud.auto.stepId ?? hud.auto.name).toUpperCase()}`
-      : hud.auto && hud.auto.state === 'done' && (hud.phase === 'auto' || hud.phase === 'freeplay')
-        ? 'AUTO DONE'
-        : null;
+  // the auto's line on the second card: which step it is on while AUTO (or a Free Drive trial)
+  // runs, and AUTO OFF when the file cannot run (`autoHud.ts`)
+  const autoLine = autoHudLine(hud);
   const redScore = hud.alliance === 'red' ? hud.score.total : hud.oppTotal;
   const blueScore = hud.alliance === 'blue' ? hud.score.total : hud.oppTotal;
   // Chain Reaction is scored (its own breakdown); DECODE shows motif + its breakdown.

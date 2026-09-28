@@ -11,7 +11,7 @@
  */
 import type { GameId } from '../games/types';
 import { ZENITH_AUTOS_KEY } from '../storageKeys';
-import { coerceZenithAuto } from './coerce';
+import { coerceZenithAuto, ZENITH_AUTO_MAX_BYTES } from './coerce';
 import type { ZenithAutoSetup } from './types';
 
 /** one auto in the library */
@@ -101,6 +101,17 @@ export function activeZenithAuto(game: GameId): (ZenithAutoSetup & { name: strin
   if (!lib.enabled) return null;
   const e = lib.entries.find((x) => x.id === lib.activeId);
   return e ? { name: e.name, auto: e.auto, ...(e.waypoints ? { waypoints: e.waypoints } : {}) } : null;
+}
+
+/**
+ * The sentence refusing an auto file too big to keep, or null. `saveAutoLibrary` coerces every
+ * entry through `coerceZenithAuto`, which DROPS one over the byte cap without a word, so a caller
+ * that stores an auto (Zenith's Save, an import) asks this first and says so instead: otherwise
+ * the save reports success, the auto is not in the library, and AUTO plays nothing.
+ */
+export function autoTooLarge(text: string): string | null {
+  if (text.length <= ZENITH_AUTO_MAX_BYTES) return null;
+  return `This auto is ${Math.ceil(text.length / 1024)} KB and DSIM keeps autos up to ${ZENITH_AUTO_MAX_BYTES / 1024} KB. Split it into shorter routines.`;
 }
 
 /** A fresh entry id: time plus a counter, unique within one device's library. */

@@ -29,7 +29,7 @@ import type { AutoButtons, AutoCommand, AutoHost, GameAutoAdapter } from '../../
 import { driveParams } from '../../../sim/drivetrain';
 import type { RobotSpec, RobotState, World } from '../../../types';
 import { bbFootprint, bbHopperCap } from '../robot';
-import { BB_HALF_X, BB_HALF_Y } from '../config';
+import { BB_HALF_X, BB_HALF_Y, BB_START_POSES } from '../config';
 
 /** `Constants.AutoConstants.SHOT_SETTLE_MS` on the robot: the wait after the last launch. */
 const SHOT_SETTLE_S = 0.25;
@@ -309,5 +309,12 @@ export const BIOBUZZ_AUTO: GameAutoAdapter = {
     let deg = ((p.h * 180) / Math.PI) % 360;
     if (deg < 0) deg += 360;
     return { x: p.x, y: p.y, headingDeg: deg };
+  },
+  // anchors 0 (TOP) and 1 (BOTTOM) are the pair a 2-robot alliance spreads onto, 123 in apart;
+  // both they and the pose are canonical, so no mirror is needed to compare them (squared
+  // distances: `npm test` keeps engine-defined Math such as `hypot` out of game code)
+  defaultStartNear: (pose) => {
+    const d = (i: number): number => (BB_START_POSES[i].pos.x - pose.x) ** 2 + (BB_START_POSES[i].pos.y - pose.y) ** 2;
+    return d(1) < d(0) ? 1 : 0;
   },
 };

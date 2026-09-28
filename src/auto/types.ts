@@ -81,6 +81,12 @@ export interface GameAutoAdapter {
    * way (`GameSimModule.startLegal`'s note), so the inverse is the game's too.
    */
   canonicalStart(pose: { x: number; y: number; heading: number }, alliance: Alliance): StartPose;
+  /**
+   * Which of the alliance's two default anchors (`startIndex` 0 or 1, the pair a 2-robot
+   * alliance spreads onto) is NEARER this CANONICAL start. A practice partner takes the other
+   * one (`practiceSetups`), so a robot the auto seats never spawns on top of its partner.
+   */
+  defaultStartNear?(pose: StartPose): number;
 }
 
 /** What the seat reports for the HUD and the panel. */

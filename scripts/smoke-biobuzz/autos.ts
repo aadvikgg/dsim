@@ -12,13 +12,17 @@ import { localizeCommand } from '../../src/net/protocol';
 import { GAME_IDS } from '../../src/games/types';
 import { simModuleFor } from '../../src/games/sim';
 import { autoAdapterFor, autoStartPose, createAutoSeat, type AutoSeat } from '../../src/auto/zenithAutos';
-import { ZENITH_AUTO_MAX_BYTES } from '../../src/auto/coerce';
+import { coerceZenithAuto, ZENITH_AUTO_MAX_BYTES } from '../../src/auto/coerce';
 import type { ZenithAutoSetup } from '../../src/auto/types';
 import { cmd, setup, type Check } from './harness';
 import { Room, type Client } from '../../server/room';
 import { CLIENT_CAPS, type ServerMsg } from '../../src/net/protocol';
 import { BB_DEFAULT_SPEC } from '../../src/games/biobuzz/robotConfig';
 import { DEFAULT_ASSISTS } from '../../src/sim/spawn';
+import { defaultSettings, practiceSetups, switchGame } from '../../src/settings';
+import { autoTooLarge } from '../../src/auto/library';
+import { autoHudLine, autoPreNotice } from '../../src/ui/autoHud';
+import type { GameAutoStatus } from '../../src/game';
 
 /**
  * THE AUTO LANE — Zenith autos driven by an auto seat (docs/area/autos.md).
@@ -551,6 +555,96 @@ export function autoChecks(check: Check): void {
       'AUTO: close.auto.json drives to its shoot pose and fires the whole preload',
       shots !== undefined && shots.endS > shots.startS && red.world.robots[0].hopper.length === 0 && before === 4,
       `preload ${before}, holds ${red.world.robots[0].hopper.length}, shots ${JSON.stringify(shots)}`,
+    );
+  }
+
+  // ── solo practice's glue: the partner, the match screen's words, the library's byte cap ────
+  {
+    // THE PARTNER TAKES THE ANCHOR AWAY FROM THE AUTO'S START, not from `settings.startIndex`.
+    // A RED file starting on BOTTOM's anchor, played by BLUE with the setting still on TOP (0):
+    // `practiceSetups` used to read the setting, put the partner on BOTTOM, and the two robots
+    // spawned inside each other and were thrown apart before AUTO began.
+    const file = zen({
+      formatVersion: 3,
+      name: 'bottom-start',
+      alliance: 'RED',
+      start: { pose: { xIn: -46, yIn: 63.17, headingRad: -Math.PI / 2 } },
+      steps: [{ id: 'out', kind: 'path', segments: [{ kind: 'line', from: 'current', to: { xIn: -46, yIn: 35 } }], heading: { mode: 'constant', headingRad: -Math.PI / 2 } }],
+    });
+    const base = switchGame(defaultSettings(), 'biobuzz');
+    const s = {
+      ...base,
+      alliance: 'blue' as const,
+      startIndex: 0,
+      practiceSeats: { ...base.practiceSeats, biobuzz: [{ kind: 'dummy' as const, tier: 'medium' }, { kind: 'none' as const, tier: 'medium' }, { kind: 'none' as const, tier: 'medium' }] as const },
+    };
+    const probeWorld = BIOBUZZ_SIM.createWorld('match', 11, [{ ...setup(0, 'blue', {}, 2), spec: s.spec }], undefined, '2d');
+    const probe = createAutoSeat(probeWorld, 0, file, adapter);
+    const start = probe.loaded ? autoStartPose(probe.loaded, 'blue', adapter) : null;
+    const near = start ? adapter.defaultStartNear?.(start) : undefined;
+    const seat = (index: number) => {
+      const me: RobotSetup = { id: 0, alliance: 'blue', spec: s.spec, assists: s.assists, startIndex: s.startIndex, startPose: start ?? undefined, zenithAuto: file };
+      const w = BIOBUZZ_SIM.createWorld('match', 11, [me, ...practiceSetups(s, 'biobuzz', 11, index).setups], undefined, '2d');
+      const [a, b] = w.robots;
+      return { gap: Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y), at: Math.hypot(a.pos.x - 46, a.pos.y + 63.17) };
+    };
+    check('AUTO solo: the adapter names BOTTOM (1) as the anchor nearest a BOTTOM start', near === 1, String(near));
+    const fixed = seat(near ?? s.startIndex);
+    const old = seat(s.startIndex);
+    check(
+      "AUTO solo: the practice partner spawns at the other end from the auto's start, and the robot sits on it",
+      fixed.gap > 60 && fixed.at < 1,
+      `gap ${fixed.gap.toFixed(1)} in, robot ${fixed.at.toFixed(2)} in off the start`,
+    );
+    check('AUTO solo: (the bug) seated from the setting, the partner lands on the auto’s start', old.gap < 25, `gap ${old.gap.toFixed(1)} in`);
+  }
+  {
+    // THE MATCH SCREEN SAYS WHEN THE AUTO CANNOT RUN, OR WHAT ZENITH FLAGS IN IT. `problems` is
+    // built the way the controller builds it (`seatAuto`: the loaded plan's ERROR findings).
+    const status = (seat: AutoSeat, name: string): GameAutoStatus => ({
+      ...seat.status(),
+      name,
+      problems: seat.loaded ? seat.loaded.findings.filter((f) => f.severity === 'error').map((f) => f.message) : [],
+    });
+    const broken = createAutoSeat(BIOBUZZ_SIM.createWorld('match', 3, [setup(0, 'blue', {}, 2)], undefined, '2d'), 0, { auto: '{"formatVersion":3' }, adapter);
+    const off = status(broken, 'broken');
+    const pre = autoPreNotice({ auto: off });
+    check('AUTO hud: a file the seat cannot load reads AUTO OFF before and during AUTO', autoHudLine({ auto: off, phase: 'pre' }) === 'AUTO OFF' && autoHudLine({ auto: off, phase: 'auto' }) === 'AUTO OFF');
+    check('AUTO hud: ...and not once the driver has the robot', autoHudLine({ auto: off, phase: 'teleop' }) === null);
+    check('AUTO hud: the pre-match panel says why the auto is off', pre?.tone === 'err' && pre.text.startsWith('Auto off: ') && pre.text.includes(off.error ?? '(no error)'), pre?.text);
+    // a RED file whose start is BLUE's anchor, played by BLUE: mirrored into RED's half
+    const wrong = stage(
+      zen({
+        formatVersion: 3,
+        name: 'wrong-half',
+        alliance: 'RED',
+        start: { pose: { xIn: 34, yIn: 63.17, headingRad: -Math.PI / 2 } },
+        steps: [{ id: 'leg', kind: 'path', segments: [{ kind: 'line', from: 'current', to: { xIn: 34, yIn: 40 } }], heading: { mode: 'constant', headingRad: -Math.PI / 2 } }],
+      }),
+      'blue',
+      '2d',
+    );
+    const flagged = status(wrong.seat, 'wrong-half');
+    const note = autoPreNotice({ auto: flagged });
+    check(
+      'AUTO hud: a start Zenith flags (the other half) is named on the pre-match panel, and the auto still plays',
+      flagged.state === 'waiting' && note?.tone === 'warn' && /own half/.test(note.text),
+      note?.text,
+    );
+    // garden-cycle plans with no Zenith errors (checked above)
+    const clean = stage({ auto: readFileSync(join(here, 'fixtures', 'zenith', 'garden-cycle.auto.json'), 'utf8') }, 'blue', '2d');
+    const ok = autoPreNotice({ auto: status(clean.seat, 'garden-cycle') });
+    check('AUTO hud: a clean auto is named as the one AUTO plays', ok?.tone === 'ok' && ok.text === 'garden-cycle plays in AUTO.', ok?.text);
+  }
+  {
+    // THE LIBRARY'S BYTE CAP IS SAID, NOT APPLIED IN SILENCE: `saveAutoLibrary` drops an entry
+    // `coerceZenithAuto` refuses, so Zenith's Save and the import ask `autoTooLarge` first
+    const big = JSON.stringify({ ...probeAuto(), title: 'x'.repeat(ZENITH_AUTO_MAX_BYTES) });
+    const fits = JSON.stringify(probeAuto());
+    check(
+      'AUTO library: an auto over the byte cap is refused with a sentence, exactly where the library would drop it',
+      autoTooLarge(big) !== null && coerceZenithAuto({ auto: big }) === undefined && autoTooLarge(fits) === null && coerceZenithAuto({ auto: fits }) !== undefined,
+      autoTooLarge(big) ?? 'accepted',
     );
   }
 }

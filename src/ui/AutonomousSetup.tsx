@@ -3,6 +3,7 @@ import type { GameSettings } from '../types';
 import { moduleFor } from '../games';
 import {
   AUTO_LIBRARY_MAX,
+  autoTooLarge,
   loadAutoLibrary,
   saveAutoLibrary,
   upsertAuto,
@@ -53,6 +54,15 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
 
   // another tab (or Zenith's Save while this screen is open) may have written the library
   useEffect(() => setLib(loadAutoLibrary(game)), [game]);
+  // ...and so may a Zenith Save that landed while this screen was not the one that opened Zenith
+  // (left and came back while the popup was open: the save updates storage, and its callback
+  // goes to the screen that is gone). Reload on the way back from the popup, so the toggle below
+  // never commits a stale library over the auto Zenith just saved.
+  useEffect(() => {
+    const reload = (): void => setLib(loadAutoLibrary(game));
+    window.addEventListener('focus', reload);
+    return () => window.removeEventListener('focus', reload);
+  }, [game]);
 
   const commit = (next: GameAutoLibrary): void => {
     setLib(next);
@@ -110,6 +120,8 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
     for (const a of autos) {
       try {
         const auto = mod.parseAutoText(a.text);
+        const tooLarge = autoTooLarge(a.text);
+        if (tooLarge) throw new Error(tooLarge);
         next = upsertAuto(next, {
           name: auto.name,
           auto: a.text,
