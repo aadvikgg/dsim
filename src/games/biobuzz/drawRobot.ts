@@ -299,7 +299,7 @@ export function drawBiobuzzRobot(
 function drawFrontBack(ctx: CanvasRenderingContext2D, spec: RobotSpec): void {
   const m = bbFrontMarks(spec);
 
-  // 1. THE LIGHT BAR, full width at the front edge — less the gap a Box Tube's pivot stands in
+  // 1. THE LIGHT BAR, full width at the front edge — less wherever a mechanism stands on it
   for (const sg of bbEndBarSegments(m.front)) {
     ctx.fillStyle = BB_FRONT_INK;
     ctx.fillRect(m.front.x0, sg.y0, m.front.x1 - m.front.x0, sg.y1 - sg.y0);
@@ -311,12 +311,15 @@ function drawFrontBack(ctx: CanvasRenderingContext2D, spec: RobotSpec): void {
   ctx.fillStyle = BB_REAR_INK;
   for (const sg of bbEndBarSegments(m.rear)) ctx.fillRect(m.rear.x0, sg.y0, m.rear.x1 - m.rear.x0, sg.y1 - sg.y0);
 
-  // 3. THE DECK ARROW, pointing at the light bar and away from the plain end
+  // 3. THE DECK ARROW, pointing at the light bar and away from the plain end — where the deck is
+  // clear of the mechanisms (`bbFrontMarks`), or not at all
+  if (!m.arrow) return;
+  const a = m.arrow;
   ctx.fillStyle = BB_FRONT_INK;
   ctx.beginPath();
-  ctx.moveTo(m.arrow.apex, 0);
-  ctx.lineTo(m.arrow.base, m.arrow.half);
-  ctx.lineTo(m.arrow.base, -m.arrow.half);
+  ctx.moveTo(a.apex, a.cy);
+  ctx.lineTo(a.base, a.cy + a.half);
+  ctx.lineTo(a.base, a.cy - a.half);
   ctx.closePath();
   ctx.fill();
   ctx.strokeStyle = 'rgba(17,21,27,0.55)';
@@ -949,7 +952,7 @@ export function bbHeldSlots(spec: RobotSpec, launcher: BbLauncherSpec, lift: BbL
   // held disc sit on top of the one mark that says which way the robot faces. The end BARS are
   // not in this list — they are at the rails, where `hl - 1.2` already keeps a disc out.
   const arrow = bbFrontMarks(spec).arrow;
-  circles.push({ x: (arrow.apex + arrow.base) / 2, y: 0, r: Math.max((arrow.apex - arrow.base) / 2, arrow.half) });
+  if (arrow) circles.push({ x: (arrow.apex + arrow.base) / 2, y: arrow.cy, r: Math.max((arrow.apex - arrow.base) / 2, arrow.half) });
   // NOT the wheels: on a 13.5 in chassis with a centre turret there is no spot that clears both
   // the ring and all four wheels, and a disc over a tyre still reads — a disc over a ring does not.
   const tube = lift ? bbBoxTubeGlyph(spec, lift.mount, bbPlacePointLocal(spec)) : null;

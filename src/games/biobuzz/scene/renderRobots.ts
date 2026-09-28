@@ -100,8 +100,13 @@ import {
   BB_FRONT_ARROW_T,
   BB_FRONT_INK,
   BB_REAR_INK,
+  bbChassisKeepOuts,
+  bbEndBarPieces,
   bbEndBarSegments,
   bbFrontMarks,
+  bbRailGaps,
+  bbRailSegments,
+  type BbKeepOut,
 } from '../parts';
 import { bbFlowerInReach, bbMouths, bbMuzzleLocal, bbPlacePointLocal } from '../robot';
 import { bbSpecKey } from '../specKey';
@@ -329,6 +334,16 @@ function platePlane(along: number, up: number, t: number, holes: number): THREE.
   geo.translate(0, t / 2, 0); // extrusion runs into −y; centre it on the plate's own plane
   return geo;
 }
+
+/**
+ * ⚠️ HOW FAR ONE PART STANDS PROUD OF ANOTHER WHERE THEIR FACES WOULD OTHERWISE SHARE A PLANE (in).
+ * Two faces in one plane, facing the same way, in different materials z-fight: the depth test
+ * picks a winner per pixel and the winner changes as the camera moves, which reads as the part
+ * "meshing". The cameras' near plane is 1 in, so at the orbit camera's 620-in reach the depth
+ * buffer resolves about 0.023 in; 0.04 clears it everywhere with margin. The RENDER lane's "no
+ * co-planar faces" check holds built robots to 0.025.
+ */
+const BB_PROUD = 0.04;
 
 /** a box, pre-placed — the merge below wants world-space geometry, not meshes. */
 function boxAt(sx: number, sy: number, sz: number, x: number, y: number, z: number): THREE.BoxGeometry {
@@ -849,6 +864,31 @@ function wheelGeometry(r: number, w: number): THREE.CylinderGeometry {
  * shape every kit builds and the one `presets.ts` describes in words — so it gets three axles a
  * side; everything else gets the four corners.
  */
+/**
+ * ⚠️ THE BUTTERFLY'S TRACTION SET, AND WHY IT IS USUALLY ONE WHEEL A SIDE. Each 96 mm Hogback used
+ * to sit a fixed 0.5 in inboard of its own corner mecanum, which on a 15-in chassis put the front
+ * and back ones at x = ±0.31 — two wheels 0.62 in apart, 3.78 in across, overlapping almost
+ * completely inside the channel (every legal length under ~18.4 in does it). So: TWO a side only
+ * when both fit clear of each other and of the mecanums; otherwise ONE, centred between the
+ * mecanums, in the largest catalogue Hogback that clears them (96 mm, else 72 mm). Called once per
+ * axle; `null` for the axle that does not carry one.
+ */
+const BUTTERFLY_CLEAR = 0.15;
+function butterflyTraction(spec: RobotSpec, axleX: number): { kind: 'traction' | 'podTraction'; x: number } | null {
+  const mec = BB_WHEEL_PARTS.mecanum.r;
+  const xs = axleXs(spec);
+  const inner = Math.min(...xs.map((v) => Math.abs(v))) - mec; // the mecanums' inboard edges, |x|
+  for (const kind of ['traction', 'podTraction'] as const) {
+    const r = BB_WHEEL_PARTS[kind].r;
+    const tx = inner - BUTTERFLY_CLEAR - r; // one a side, tucked against its own mecanum
+    if (tx - r >= BUTTERFLY_CLEAR / 2) return { kind, x: Math.sign(axleX) * tx };
+  }
+  // one, centred: the front axle carries it
+  if (axleX < 0) return null;
+  const fits = (['traction', 'podTraction'] as const).find((k) => BB_WHEEL_PARTS[k].r + BUTTERFLY_CLEAR <= inner);
+  return { kind: fits ?? 'podTraction', x: 0 };
+}
+
 function axleXs(spec: RobotSpec): number[] {
   // the END axle is set in by the wheel THIS drivetrain carries, not by the channel's own
   // mecanum: a tank's 96 mm Hogback is 0.157 in smaller in the radius and sits that much further
@@ -1226,19 +1266,21 @@ export function buildWheels(spec: RobotSpec, accent: string = TREAD, detail: BbW
       }
       out.nodes.push(wheel);
       if (dt === 'butterfly') {
-        // the MECANUM set is the corner set; the TRACTION set is a real 96 mm Hogback inboard on
-        // its own axle — narrower AND smaller in the radius, so the two read as two different
-        // parts rather than as one fat wheel. `butterflyTank` decides which one is down — the
-        // sync does that, so a preview shows the spawn default (mecanum down).
+        // the MECANUM set is the corner set; the TRACTION set is a real Hogback inboard on its own
+        // axle — narrower AND smaller in the radius, so the two read as two different parts rather
+        // than as one fat wheel. `butterflyTank` decides which one is down — the sync does that, so
+        // a preview shows the spawn default (mecanum down).
         out.roller.push({ node: wheel, z: part.r });
-        const tPart = BB_WHEEL_PARTS.traction;
-        const tx = x - Math.sign(x) * (part.r + tPart.r + 0.5);
-        const tw = buildDriveWheel('traction', detail, accent);
-        tw.name = `robot:wheel:tank:${out.traction.length}`;
-        tw.position.set(tx, sy * wheelY, tPart.r + BB_BUTTERFLY_LIFT);
-        out.nodes.push(tw);
-        out.traction.push({ node: tw, z: tPart.r });
-        out.spin.push({ node: tw, r: tPart.r });
+        const t = butterflyTraction(spec, x);
+        if (t) {
+          const tPart = BB_WHEEL_PARTS[t.kind];
+          const tw = buildDriveWheel(t.kind, detail, accent);
+          tw.name = `robot:wheel:tank:${out.traction.length}`;
+          tw.position.set(t.x, sy * wheelY, tPart.r + BB_BUTTERFLY_LIFT);
+          out.nodes.push(tw);
+          out.traction.push({ node: tw, z: tPart.r });
+          out.spin.push({ node: tw, r: tPart.r });
+        }
       }
     }
   }
@@ -1250,6 +1292,29 @@ export function buildWheels(spec: RobotSpec, accent: string = TREAD, detail: BbW
  *  still visible from straight above through the pocket it does not cover. See `buildFrame`. */
 const BB_TOP_CAP_T = 0.2;
 const BB_TOP_CAP_W = BB_PLATE_T + 0.5;
+/** the full-footprint deck's thickness (in); its top is `BB_DECK_Z` */
+const BB_DECK_T = 0.26;
+
+/**
+ * THE TOP CAPS' PIECES along x, left side then right, with their y-band: each cap GIVES WAY to
+ * whatever stands on it (`bbChassisKeepOuts`). An edge or corner turret's ring reaches the frame
+ * line, so a cap run the full length cut through the ring on 1,297 of the 2,381 builds swept; a
+ * Box Tube pivot on that side does the same.
+ */
+export function bbTopCapSegments(spec: RobotSpec): { a0: number; a1: number }[][] {
+  const hl = spec.length / 2;
+  const keep = [...bbChassisKeepOuts(spec), ...intakeArmKeepOuts(spec)];
+  return ([1, -1] as const).map((sy) => {
+    return bbRailSegments(-hl, hl, bbRailGaps(keep, 'x', bbTopCapBand(spec, sy), BB_TOP_CAP_Z));
+  });
+}
+/** a top cap's y-band on side `sy` (`+1` left) */
+export function bbTopCapBand(spec: Pick<RobotSpec, 'width'>, sy: 1 | -1): [number, number] {
+  const hw = spec.width / 2;
+  return sy > 0 ? [hw - BB_TOP_CAP_W, hw] : [-hw, -hw + BB_TOP_CAP_W];
+}
+/** the top caps' height band */
+export const BB_TOP_CAP_Z: readonly [number, number] = [BB_PLATE_H, BB_PLATE_H + BB_TOP_CAP_T];
 
 /**
  * THE FRAME — side plates, cross members, belly pan, deck, tower. Two merged meshes: the
@@ -1287,9 +1352,10 @@ export function buildFrame(spec: RobotSpec): THREE.Object3D[] {
   const outerY = hw - BB_PLATE_T / 2;
   const innerY = hw - BB_PLATE_T * 1.5 - BB_PLATE_GAP;
   const holes = Math.max(2, Math.round(spec.length / 4.5));
+  const capSegs = bbTopCapSegments(spec);
   // NOT KEYED ON `heightIn`: nothing in the frame depends on it any more, so two builds that
   // differ only in declared height share this buffer.
-  const key = `${spec.length}|${spec.width}|${spec.drivetrain}`;
+  const key = `${spec.length}|${spec.width}|${spec.drivetrain}|${capSegs.map((s) => s.map((g) => `${g.a0.toFixed(3)}:${g.a1.toFixed(3)}`).join(',')).join('/')}`;
 
   // ⚠️ A SWERVE CHASSIS HAS NO WHEEL CHANNEL. The pods bolt UNDER a box frame at `BB_POD_INSET`
   // from each face, and a 1.5-in-wide pod wheel there runs straight through an inner side plate
@@ -1304,16 +1370,22 @@ export function buildFrame(spec: RobotSpec): THREE.Object3D[] {
     const parts: THREE.BufferGeometry[] = [];
     for (const sy of [1, -1] as const) {
       for (const y of plateYs) {
-        const p = platePlane(spec.length, BB_PLATE_H, BB_PLATE_T, holes);
+        // the INNER plate stops a plate's thickness short of each end: run to ±hl, its end face
+        // was in the plane of a full END PLATE's outer face (`buildEndPlate`), which z-fights once
+        // the two carry different surface detail (the physical-materials tier)
+        const inner = y !== outerY;
+        const p = platePlane(inner ? spec.length - 2 * (BB_PLATE_T + BB_PROUD) : spec.length, BB_PLATE_H, BB_PLATE_T, holes);
         p.translate(0, sy * y, BB_PLATE_H / 2);
         parts.push(p);
       }
       // THE TOP CAP — lying ON that side's plate, the one perimeter surface a mechanism never
       // stands on, so a top-down view always has the colour somewhere even on a robot whose deck
       // is covered end to end.
-      parts.push(
-        boxAt(spec.length, BB_TOP_CAP_W, BB_TOP_CAP_T, 0, sy * (hw - BB_TOP_CAP_W / 2), BB_PLATE_H + BB_TOP_CAP_T / 2),
-      );
+      for (const sg of capSegs[sy > 0 ? 0 : 1]) {
+        parts.push(
+          boxAt(sg.a1 - sg.a0, BB_TOP_CAP_W, BB_TOP_CAP_T, (sg.a0 + sg.a1) / 2, sy * (hw - BB_TOP_CAP_W / 2), BB_PLATE_H + BB_TOP_CAP_T / 2),
+        );
+      }
     }
     // THE DECK — the top plate mechanisms bolt to, and the biggest surface a top-down camera sees.
     // ⚠️ IT COVERS THE WHOLE CHASSIS, WHEELS INCLUDED (owner, 2026-09-21: "make the robot's chassis
@@ -1321,7 +1393,7 @@ export function buildFrame(spec: RobotSpec): THREE.Object3D[] {
     // INSET — `length − 2.47` by the inner channel — to avoid "one flat slab", which left the wheel
     // pockets open from above; that ruling is reversed. Every wheel and pod already lives under
     // `BB_DECK_Z − 0.26` (the pod stack is derived from it), so nothing pokes through the lid.
-    parts.push(boxAt(spec.length, spec.width, 0.26, 0, 0, BB_DECK_Z - 0.13));
+    parts.push(boxAt(spec.length, spec.width, BB_DECK_T, 0, 0, BB_DECK_Z - BB_DECK_T / 2));
     return parts;
   });
   const frame = framePart(`frame:${key}`, () => {
@@ -1334,7 +1406,8 @@ export function buildFrame(spec: RobotSpec): THREE.Object3D[] {
     // z-fighting on both planes. One plate thickness in and one deck thickness down shares no face.
     for (const sx of [1, -1] as const) {
       parts.push(
-        boxAt(BB_RAIL_T, hw * 2 - BB_PLATE_T * 2, BB_RAIL_T, sx * (hl - BB_PLATE_T - BB_RAIL_T / 2), 0, BB_DECK_Z - 0.26 - BB_RAIL_T / 2),
+        // (and `BB_PROUD` under the deck's underside: a swerve pod's slew plate tops out there too)
+        boxAt(BB_RAIL_T, hw * 2 - BB_PLATE_T * 2, BB_RAIL_T, sx * (hl - BB_PLATE_T - BB_RAIL_T / 2), 0, BB_DECK_Z - BB_DECK_T - BB_PROUD - BB_RAIL_T / 2),
       );
     }
     // BELLY PAN — thin, low, spanning the inner channel
@@ -1418,9 +1491,14 @@ function buildEndPlate(spec: RobotSpec, end: 'front' | 'back', mouthHalf: number
   const mat = solidMat(chassisFill(spec.chassisColor), 0.55, 0.15);
   const cx = sign * (hl - BB_PLATE_T / 2); // outer face flush with ±hl — never past it
 
+  // ⚠️ UP TO THE DECK'S UNDERSIDE, NOT TO `BB_PLATE_H`. The full-footprint deck already closes the
+  // top `BB_DECK_T` of the end, and a plate run up through it put its outer face and its top face
+  // in the planes of the deck's own end and top faces: z-fighting, visible once the two carry
+  // different surface detail (the physical-materials tier).
+  const top = BB_PLATE_H - BB_DECK_T;
   if (mouthHalf === undefined) {
-    const mesh = cast(new THREE.Mesh(endPlateGeo(BB_PLATE_T, (hw - BB_PLATE_T) * 2, BB_PLATE_H), mat), 'fill');
-    mesh.position.set(cx, 0, BB_PLATE_H / 2);
+    const mesh = cast(new THREE.Mesh(endPlateGeo(BB_PLATE_T, (hw - BB_PLATE_T) * 2, top), mat), 'fill');
+    mesh.position.set(cx, 0, top / 2);
     return [mesh];
   }
 
@@ -1432,7 +1510,7 @@ function buildEndPlate(spec: RobotSpec, end: 'front' | 'back', mouthHalf: number
     const width = Math.max(0.1, Math.abs(outerFace) - innerMag);
     const cy = (s * (Math.abs(outerFace) + innerMag)) / 2;
     const z0 = 0; // floor to plate height — see the header: the frame face is solid already
-    const h = BB_PLATE_H - z0;
+    const h = top - z0;
     const mesh = cast(new THREE.Mesh(endPlateGeo(BB_PLATE_T, width, h), mat), 'fill');
     mesh.position.set(cx, cy, z0 + h / 2);
     out.push(mesh);
@@ -1773,6 +1851,56 @@ const BB_ROLLER_HUB_R = 0.75;
 const BB_ROLLER_FLAP_R = 2.0;
 /** hub bottom `BB3_MOUTH_SLOT_Z + 0.15`, i.e. a bolt's clearance above the open pocket. */
 const BB_ROLLER_Z = BB3_MOUTH_SLOT_Z + BB_ROLLER_HUB_R + 0.15;
+
+/**
+ * THE INTAKE ARMS AS KEEP-OUTS, for the 3D chassis dressing (the top caps and the end bars) —
+ * `buildIntake`'s own arm geometry: the bottom rail, the diagonal rising from it to the axle boss,
+ * and the boss post, cut into 0.25-in slices along the arm so each slice carries the arm's real
+ * height there (the diagonal is under the deck inside the frame and above it outside). A side
+ * mouth's arms cross the end bars' ends and the side caps near the corners (381–462 and 594 of
+ * 2,381 builds swept); a front or back mouth's pass under the caps and give nothing.
+ */
+function intakeArmKeepOuts(spec: RobotSpec): BbKeepOut[] {
+  const hl = spec.length / 2;
+  const hw = spec.width / 2;
+  const out: BbKeepOut[] = [];
+  const armT = INTAKE_RAIL_T;
+  const railZ = BB3_MOUTH_SLOT_Z + 0.25;
+  const bossTop = BB_ROLLER_Z + 0.6;
+  for (const m of bbMouths(spec)) {
+    const f = bbMouthFrame(m, hl, hw);
+    const tip = f.depth;
+    const armX0 = f.rail - 1.1;
+    const armLen = tip - armX0;
+    const outer = tip - BB_ROLLER_FLAP_R;
+    // the frame's own orientation, exact for the four edges
+    const c = Math.round(Math.cos(f.rot));
+    const s = Math.round(Math.sin(f.rot));
+    const toRobot = (x: number, y: number): [number, number] => [f.ox + x * c - y * s, f.oy + x * s + y * c];
+    for (const sg of [1, -1] as const) {
+      const y = sg * (f.half - BB_INTAKE_ARM_INSET - armT / 2);
+      const step = 0.25;
+      for (let x = armX0; x < tip - 1e-9; x += step) {
+        const x1 = Math.min(tip, x + step);
+        // the diagonal's top over this slice (its far end), plus half its 0.34 thickness
+        let top = railZ + ((x1 - armX0) / armLen) * (bossTop - railZ) + 0.2;
+        if (x1 > outer - 0.55 && x < outer + 0.55) top = Math.max(top, bossTop);
+        const [ax, ay] = toRobot(x, y - armT / 2);
+        const [bx, by] = toRobot(x1, y + armT / 2);
+        out.push({
+          what: 'intakeArm',
+          cx: (ax + bx) / 2,
+          cy: (ay + by) / 2,
+          hx: Math.abs(bx - ax) / 2,
+          hy: Math.abs(by - ay) / 2,
+          z0: BB3_MOUTH_SLOT_Z,
+          z1: top,
+        });
+      }
+    }
+  }
+  return out;
+}
 /** how many compliant flaps go round the hub. */
 const BB_ROLLER_FLAPS = 3;
 /** the flaps' thickness (in) — half of it is what the deflection law has to clear the slot by. */
@@ -2166,8 +2294,9 @@ export function buildIntake(
           g.add(yoke);
         }
         // the DEAD AXLE the wheel turns on, strap to strap — what makes the pair read as a
-        // bearing block rather than two loose shelves.
-        const axle = new THREE.CylinderGeometry(0.17, 0.17, wheelZ1 - wheelZ0 + 2 * BB_SIDE_ROLLER_PLATE_T, 8);
+        // bearing block rather than two loose shelves. Proud of both straps, so its ends are not in
+        // the plane of the bosses' outer faces (z-fighting, dark on aluminium).
+        const axle = new THREE.CylinderGeometry(0.17, 0.17, wheelZ1 - wheelZ0 + 2 * BB_SIDE_ROLLER_PLATE_T + 2 * BB_PROUD, 8);
         axle.rotateX(Math.PI / 2);
         axle.translate(wheelX, rollerY, BB_SIDE_ROLLER_Z);
         const axleMesh = cast(new THREE.Mesh(axle, solidMat(ALU_DK, 0.5, 0.5)), 'dark');
@@ -3180,7 +3309,104 @@ export function buildRobotGroup(
     group.userData.tube = tube.rig;
   }
 
+  if (heads.length) restTurretHeads(group, heads, [...intake.nodes, ...group.children.filter((c) => c.name === 'bb-turret' || c.name.endsWith(':tube'))]);
   return group;
+}
+
+/** the rest yaws `restTurretHeads` tries, in order of preference: forward, square, back, diagonal */
+const TURRET_REST_YAWS = [0, Math.PI / 2, -Math.PI / 2, Math.PI, Math.PI / 4, -Math.PI / 4, (3 * Math.PI) / 4, (-3 * Math.PI) / 4];
+/** a head sample closer than this to another part counts as touching it (in) */
+const TURRET_REST_PAD = 0.1;
+/** the sample spacing over each head part (in), and the most samples along one of its edges. At
+ *  3 per edge, a head plate crossed an intake by 1–1.8 in between samples on ~300 double turrets. */
+const TURRET_REST_STEP = 0.75;
+const TURRET_REST_MAX_N = 10;
+
+/**
+ * ⚠️ **THE TURRETS' REST YAW, MEASURED OFF THE BUILT PARTS** (owner, 2026-09-28: "The robot itself
+ * has a lot of overlapping parts"). The match's `sync` aims every head from the sim on its first
+ * frame; the builder preview and the saved-robot thumbnails never sync, so this is the pose they
+ * show. Built facing +x, a head ran its plate and flywheel through the other turret on every
+ * front/back or corner pair of a DOUBLE turret, and through a Box Tube stage beside it; a fixed
+ * "side by side" rule traded those for heads over an intake or into a tube cell on the other side.
+ *
+ * So each candidate in `TURRET_REST_YAWS` is TRIED: both heads (a double turret's stay parallel)
+ * are set to it, and a grid (`TURRET_REST_STEP`) over every head mesh's own box is counted against the boxes of
+ * the parts it could hit — the intakes, the Box Tube and the other turret. The first yaw with the
+ * fewest samples inside one wins, so a build with nothing in the way keeps its heads forward.
+ */
+function restTurretHeads(group: THREE.Group, heads: readonly THREE.Group[], obstacles: readonly THREE.Object3D[]): void {
+  group.updateMatrixWorld(true);
+  const toGroup = group.matrixWorld.clone().invert();
+  const within = (o: THREE.Object3D, roots: readonly THREE.Object3D[]): boolean => {
+    for (let n: THREE.Object3D | null = o; n; n = n.parent) if (roots.includes(n)) return true;
+    return false;
+  };
+  const meshesOf = (roots: readonly THREE.Object3D[]): THREE.Mesh[] => {
+    const out: THREE.Mesh[] = [];
+    for (const r of roots) r.traverse((o) => (o as THREE.Mesh).isMesh && out.push(o as THREE.Mesh));
+    return out;
+  };
+  const boxOf = (m: THREE.Mesh): THREE.Box3 => {
+    if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
+    return m.geometry.boundingBox!;
+  };
+  const m = new THREE.Matrix4();
+  const p = new THREE.Vector3();
+  const score = (): number => {
+    group.updateMatrixWorld(true);
+    let hits = 0;
+    for (const h of heads) {
+      // everything but THIS head's own turret — the other turret's head moves with the candidate
+      const own = h.parent!;
+      const boxes = meshesOf(obstacles)
+        .filter((o) => !within(o, [own]))
+        .map((o) => boxOf(o).clone().applyMatrix4(m.multiplyMatrices(toGroup, o.matrixWorld)).expandByScalar(TURRET_REST_PAD));
+      for (const mesh of meshesOf([h])) {
+        const b = boxOf(mesh);
+        m.multiplyMatrices(toGroup, mesh.matrixWorld);
+        const n = [b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z].map((s) => Math.min(TURRET_REST_MAX_N, Math.max(2, Math.ceil(s / TURRET_REST_STEP) + 1)));
+        for (let i = 0; i < n[0]; i++)
+          for (let j = 0; j < n[1]; j++)
+            for (let k = 0; k < n[2]; k++) {
+              p.set(
+                b.min.x + ((b.max.x - b.min.x) * i) / (n[0] - 1),
+                b.min.y + ((b.max.y - b.min.y) * j) / (n[1] - 1),
+                b.min.z + ((b.max.z - b.min.z) * k) / (n[2] - 1),
+              ).applyMatrix4(m);
+              if (boxes.some((q) => q.containsPoint(p))) hits++;
+            }
+      }
+    }
+    return hits;
+  };
+  // together first, so a double turret's heads stand parallel whenever that is clear…
+  let best = TURRET_REST_YAWS[0];
+  let hits = Infinity;
+  for (const yaw of TURRET_REST_YAWS) {
+    for (const h of heads) h.rotation.z = yaw;
+    const s = score();
+    if (s < hits) [best, hits] = [yaw, s];
+    if (s === 0) break;
+  }
+  for (const h of heads) h.rotation.z = best;
+  // …and each on its own, the other held, when it is not. Swept over 1,947 turreted builds, a
+  // head stood in another assembly on 876 facing forward, 60 with the heads together, 48 apart —
+  // a double turret at a corner with a Box Tube in the next cell, where no pose is clear.
+  if (heads.length > 1) {
+    for (let pass = 0; pass < 2 && hits > 0; pass++) {
+      for (const h of heads) {
+        let keep = h.rotation.z;
+        for (const yaw of TURRET_REST_YAWS) {
+          h.rotation.z = yaw;
+          const s = score();
+          if (s < hits) [keep, hits] = [yaw, s];
+        }
+        h.rotation.z = keep;
+      }
+    }
+  }
+  group.updateMatrixWorld(true);
 }
 
 /**
@@ -3209,54 +3435,70 @@ export function buildRobotGroup(
  * which is the same bargain `buildEndPlates` made — the RENDER lane asserts it for both.
  */
 export function buildFrontMarks(spec: RobotSpec, id: number): THREE.Object3D[] {
-  const m = bbFrontMarks(spec);
+  const shared = bbFrontMarks(spec);
+  // the 3D bars also give way to the intake arms, which the 2D sprite draws flat beside them
+  const keep = [...bbChassisKeepOuts(spec), ...intakeArmKeepOuts(spec)];
+  const m = {
+    ...shared,
+    front: { ...shared.front, pieces: bbEndBarPieces(keep, shared.front.x0, shared.front.x1, shared.front.halfY) },
+    rear: { ...shared.rear, pieces: bbEndBarPieces(keep, shared.rear.x0, shared.rear.x1, shared.rear.halfY) },
+  };
   const out: THREE.Object3D[] = [];
   const barZ = BB_DECK_Z + BB_END_BAR_H / 2;
 
-  // an end bar gives way where a Box Tube's pivot stands on the same rail (`bbFrontMarks`)
-  const barKey = (b: { gap: { y0: number; y1: number } | null }): string =>
-    b.gap ? `|gap${b.gap.y0.toFixed(3)}:${b.gap.y1.toFixed(3)}` : '';
+  // an end bar stops where a mechanism stands on the same rail and runs lower where one passes over
+  // it (`bbFrontMarks`); each piece stands on the deck at its own height
+  const barKey = (b: typeof m.front): string =>
+    b.pieces.map((g) => `|${g.y0.toFixed(3)}:${g.y1.toFixed(3)}:${g.h.toFixed(3)}`).join('');
   const barParts = (b: typeof m.front): THREE.BufferGeometry[] =>
-    bbEndBarSegments(b).map((sg) => boxAt(b.x1 - b.x0, sg.y1 - sg.y0, BB_END_BAR_H, (b.x0 + b.x1) / 2, (sg.y0 + sg.y1) / 2, 0));
-  const front = cast(
-    new THREE.Mesh(
-      framePart(`front:bar|${m.front.x0.toFixed(3)}|${m.front.halfY.toFixed(3)}${barKey(m.front)}`, () => barParts(m.front)),
-      frontBarMat(),
-    ),
-    'paint',
-  );
-  front.name = `robot:${id}:front:bar`;
-  front.position.set(0, 0, barZ);
-  out.push(front);
+    bbEndBarSegments(b).map((sg) => boxAt(b.x1 - b.x0, sg.y1 - sg.y0, sg.h, (b.x0 + b.x1) / 2, (sg.y0 + sg.y1) / 2, sg.h / 2 - BB_END_BAR_H / 2));
+  if (m.front.pieces.length) {
+    const front = cast(
+      new THREE.Mesh(
+        framePart(`front:bar|${m.front.x0.toFixed(3)}|${m.front.halfY.toFixed(3)}${barKey(m.front)}`, () => barParts(m.front)),
+        frontBarMat(),
+      ),
+      'paint',
+    );
+    front.name = `robot:${id}:front:bar`;
+    front.position.set(0, 0, barZ);
+    out.push(front);
+  }
 
-  const arrow = cast(
-    new THREE.Mesh(
-      framePart(`front:arrow|${m.arrow.apex.toFixed(3)}|${m.arrow.base.toFixed(3)}|${m.arrow.half.toFixed(3)}`, () => {
-        const shape = new THREE.Shape();
-        shape.moveTo(m.arrow.apex, 0);
-        shape.lineTo(m.arrow.base, m.arrow.half);
-        shape.lineTo(m.arrow.base, -m.arrow.half);
-        shape.closePath();
-        return [new THREE.ExtrudeGeometry(shape, { depth: BB_FRONT_ARROW_T, bevelEnabled: false })];
-      }),
-      solidMat(BB_FRONT_INK, 0.45, 0.05),
-    ),
-    'paint',
-  );
-  arrow.name = `robot:${id}:front:arrow`;
-  arrow.position.set(0, 0, BB_DECK_Z + 0.02);
-  out.push(arrow);
+  // the deck arrow, where the deck is clear of every mechanism — or not at all (`bbFrontMarks`)
+  const a = m.arrow;
+  if (a) {
+    const arrow = cast(
+      new THREE.Mesh(
+        framePart(`front:arrow|${a.apex.toFixed(3)}|${a.base.toFixed(3)}|${a.half.toFixed(3)}|${a.cy.toFixed(3)}`, () => {
+          const shape = new THREE.Shape();
+          shape.moveTo(a.apex, a.cy);
+          shape.lineTo(a.base, a.cy + a.half);
+          shape.lineTo(a.base, a.cy - a.half);
+          shape.closePath();
+          return [new THREE.ExtrudeGeometry(shape, { depth: BB_FRONT_ARROW_T, bevelEnabled: false })];
+        }),
+        solidMat(BB_FRONT_INK, 0.45, 0.05),
+      ),
+      'paint',
+    );
+    arrow.name = `robot:${id}:front:arrow`;
+    arrow.position.set(0, 0, BB_DECK_Z + 0.02);
+    out.push(arrow);
+  }
 
-  const rear = cast(
-    new THREE.Mesh(
-      framePart(`rear:bar|${m.rear.x1.toFixed(3)}|${m.rear.halfY.toFixed(3)}${barKey(m.rear)}`, () => barParts(m.rear)),
-      solidMat(BB_REAR_INK, 0.75, 0.05),
-    ),
-    'dark',
-  );
-  rear.name = `robot:${id}:rear:bar`;
-  rear.position.set(0, 0, barZ);
-  out.push(rear);
+  if (m.rear.pieces.length) {
+    const rear = cast(
+      new THREE.Mesh(
+        framePart(`rear:bar|${m.rear.x1.toFixed(3)}|${m.rear.halfY.toFixed(3)}${barKey(m.rear)}`, () => barParts(m.rear)),
+        solidMat(BB_REAR_INK, 0.75, 0.05),
+      ),
+      'dark',
+    );
+    rear.name = `robot:${id}:rear:bar`;
+    rear.position.set(0, 0, barZ);
+    out.push(rear);
+  }
 
   return out;
 }
@@ -3304,8 +3546,11 @@ export function buildBoxTube(
           if (b.what !== 'plate') continue;
           parts.push(boxAt(b.u1 - b.u0, b.v1 - b.v0, b.z1 - b.z0, (b.u0 + b.u1) / 2, (b.v0 + b.v1) / 2, (b.z0 + b.z1) / 2));
         }
-        // the axle, through both plates and the base tube's foot
-        const vOut = BB_BOX_TUBE_SECTIONS[0] / 2 + BB_BOX_TUBE_PLATE_GAP + BB_BOX_TUBE_PLATE_T + BB_BOX_TUBE_DRUM_T;
+        // the axle, through both plates and the base tube's foot. It stops `BB_PROUD` INSIDE the
+        // pulley and the spool flange: ending exactly in their outer faces put its end caps in the
+        // same plane as a different material, which z-fights, and standing proud of them would put
+        // it outside the tower's collider boxes.
+        const vOut = BB_BOX_TUBE_SECTIONS[0] / 2 + BB_BOX_TUBE_PLATE_GAP + BB_BOX_TUBE_PLATE_T + BB_BOX_TUBE_DRUM_T - BB_PROUD;
         const axle = new THREE.CylinderGeometry(0.16, 0.16, vOut * 2, 12);
         parts.push(axle);
         return parts;
@@ -3379,16 +3624,23 @@ export function buildBoxTube(
     // extension out of its parent and the tip rides on the last one
     (i === 0 ? pitch : stages[i - 1]).add(mesh);
     stages.push(mesh);
-    // the BEARING BLOCK at the mouth of every tube that another slides in (not the last)
+    // the BEARING BLOCK at the mouth of every tube that another slides in (not the last).
+    // ⚠️ IT STANDS PROUD OF ITS TUBE'S TOP, AND EACH ONE HIGHER THAN THE LAST. Flush, its top face
+    // shared a plane with the tube's wall tops (dark on aluminium: z-fighting), and stowed, every
+    // stage's top is at the same height, so the next block down covers the same ring as this one.
     if (i < BB_BOX_TUBE_SECTIONS.length - 1) {
       const collar = cast(
         new THREE.Mesh(
-          framePart(`tube:collar:${w}`, () => {
+          // keyed on the section length too: the block sits at the tube's TOP, and `L` varies with
+          // where the tube stands (a key without it handed a second robot the first one's blocks)
+          framePart(`tube:collar:${w}:${i}|${L.toFixed(3)}`, () => {
             const h = 0.35;
             const parts: THREE.BufferGeometry[] = [];
             const o = w + 2 * BB_BOX_TUBE_COLLAR;
-            const inner = BB_BOX_TUBE_SECTIONS[i + 1];
-            const zc = L - BB_BOX_TUBE_BASE_BELOW - h / 2;
+            // the bore clears the next stage by `BB_PROUD` a side: cut to its exact width, the
+            // block's inner faces lay in the planes of this tube's own inner wall faces
+            const inner = BB_BOX_TUBE_SECTIONS[i + 1] + 2 * BB_PROUD;
+            const zc = L - BB_BOX_TUBE_BASE_BELOW - h / 2 + BB_PROUD * (i + 1);
             for (const s of [1, -1] as const) {
               parts.push(boxAt(o, (o - inner) / 2, h, 0, (s * (o + inner)) / 4, zc));
               parts.push(boxAt((o - inner) / 2, inner, h, (s * (o + inner)) / 4, 0, zc));
@@ -3416,8 +3668,11 @@ export function buildBoxTube(
   const wrist = cast(
     new THREE.Mesh(
       framePart('tube:wrist', () => {
+        // a hair under `BB_BOX_TUBE_WRIST_TOP`, so the yoke's top bar lying across it is the top face
+        // there rather than a second one in the same plane
         const w = BB_BOX_TUBE_WRIST_HALF * 2;
-        return [boxAt(w, w * 0.8, BB_BOX_TUBE_WRIST_TOP, 0, 0, BB_BOX_TUBE_WRIST_TOP / 2)];
+        const h = BB_BOX_TUBE_WRIST_TOP - BB_PROUD;
+        return [boxAt(w, w * 0.8, h, 0, 0, h / 2)];
       }),
       darkMat,
     ),
@@ -3462,7 +3717,8 @@ export function buildBoxTube(
         const parts: THREE.BufferGeometry[] = [];
         // the arm, hanging along −z from the hinge; the hinge boss; the palm across its end
         parts.push(boxAt(t, w, palmAt + t / 2, 0, 0, -(palmAt - t / 2) / 2));
-        const boss = new THREE.CylinderGeometry(0.1, 0.1, w + 0.24, 12);
+        // proud of the yoke cheeks it turns in (their outer faces are at ±(w/2 + 0.12))
+        const boss = new THREE.CylinderGeometry(0.1, 0.1, w + 0.24 + 2 * BB_PROUD, 12);
         parts.push(boss);
         parts.push(boxAt(t, (BB_BOX_TUBE_JAW_ROOT + BB_BOX_TUBE_JAW_T) * 2, BB_BOX_TUBE_JAW_T * 1.5, 0, 0, -palmAt));
         return parts;

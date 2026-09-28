@@ -102,12 +102,21 @@ import { bbFlowerInReach, bbFootprint, bbMouths, bbPlacePointLocal, bbRobotSolid
 import { chassis3dShapes } from '../../src/games/biobuzz/sim3d/bodies';
 import {
   BB_END_BAR_INSET,
+  BB_END_BAR_H,
+  BB_FRONT_ARROW_T,
   BB_FRONT_INK,
   BB_REAR_INK,
   bbBoxTubeGlyph,
+  bbChassisKeepOuts,
   bbEndBarSegments,
   bbFrontMarks,
+  type BbKeepOut,
 } from '../../src/games/biobuzz/parts';
+import { coerceBiobuzzSpec } from '../../src/games/biobuzz/coerce';
+import { BB_PRESETS } from '../../src/games/biobuzz/config';
+import { BB_STARTER_BOTS } from '../../src/games/biobuzz/presets';
+import { BB_SCORE_MODES } from '../../src/games/biobuzz/mounts';
+import { BB_TOP_CAP_Z, bbTopCapBand, bbTopCapSegments } from '../../src/games/biobuzz/scene/renderRobots';
 import { BB_INTAKE_KINDS, bbIntakeKindOf, bbLiftOf } from '../../src/games/biobuzz/mechs';
 import { drawBiobuzzIntakeReach } from '../../src/games/biobuzz/drawRobot';
 import {
@@ -1660,6 +1669,7 @@ export function renderChecks(check: Check): void {
   cosmeticsChecks(check);
   drawnHeightChecks(check);
   endPlateChecks(check);
+  robotOverlapChecks(check);
   frontBackChecks(check);
   hoodPlateChecks(check);
   freeCamChecks(check);
@@ -1767,7 +1777,7 @@ function frontBackChecks(check: Check): void {
       }
       check(
         `front/back 3D ${tag}: the deck arrow POINTS FORWARD — apex ahead of its own base`,
-        arrow.max.x > arrow.min.x && Math.abs(arrow.max.x - bbFrontMarks(spec).arrow.apex) < 1e-6,
+        arrow.max.x > arrow.min.x && Math.abs(arrow.max.x - (bbFrontMarks(spec).arrow?.apex ?? NaN)) < 1e-6,
         `x[${arrow.min.x.toFixed(3)}, ${arrow.max.x.toFixed(3)}]`,
       );
       // NOT A COLLIDER — inside the frame box both solves already treat as solid, and above the
@@ -1850,7 +1860,7 @@ function frontBackChecks(check: Check): void {
       const arrow = tris.find((t) => t.style === ink);
       check(
         `front/back 2D ${mount}: the deck arrow is filled, and its apex points at the light bar`,
-        !!arrow && Math.abs(arrow.pts[0][0] - m.arrow.apex) < 1e-6 && arrow.pts[0][1] === 0 &&
+        !!arrow && !!m.arrow && Math.abs(arrow.pts[0][0] - m.arrow.apex) < 1e-6 && Math.abs(arrow.pts[0][1] - m.arrow.cy) < 1e-9 &&
           arrow.pts[1][0] < arrow.pts[0][0] && arrow.pts[2][0] < arrow.pts[0][0],
         arrow ? `apex ${arrow.pts[0][0].toFixed(2)} base ${arrow.pts[1][0].toFixed(2)}` : 'no filled triangle in the front ink',
       );
@@ -2278,6 +2288,234 @@ function cosmeticsChecks(check: Check): void {
  * ruling), a corner plate actually covers the wheel or pod it exists to hide, and nothing crosses
  * the mouth's own throat below the slot an element rolls in under.
  */
+/**
+ * ⚠️ **NO PART OF A BUILT ROBOT IS DRAWN THROUGH ANOTHER, AND NO TWO FACES IN DIFFERENT FINISHES
+ * SHARE A PLANE** (owner, 2026-09-28: "The robot itself has a lot of overlapping parts").
+ *
+ * (1) THE CHASSIS DRESSING GIVES WAY, over every launcher on every mount × every Box Tube cell: no
+ *     end-bar piece, deck arrow or top-cap piece overlaps a mechanism's footprint in plan AND in
+ *     height (`bbChassisKeepOuts`). Before, a front- or back-row turret ran through the end bar on
+ *     1,080 of 2,381 builds, an edge ring cut the top cap on 1,297, and a centre ring sat on the
+ *     arrow on 1,190.
+ * (2) NO Z-FIGHTING on built robots: two triangles facing the same way within 0.025 in of one plane
+ *     (the depth buffer's resolution at the orbit camera's 620-in reach, near plane 1 in),
+ *     overlapping by more than 0.02 in² in plan, may not differ in material, finish family or
+ *     shading normal. The Box Tube's slide blocks and wrist, its pivot axle, the side-roller axle and
+ *     the end plates against the deck all did, and flickered.
+ * (3) A RESTING TURRET HEAD stays out of the intakes, the Box Tube and the other turret wherever a
+ *     pose allows it (`restTurretHeads`), and a build with nothing in the way still faces forward.
+ */
+function robotOverlapChecks(check: Check): void {
+  // ── (1) ────────────────────────────────────────────────────────────────────────────────────
+  {
+    const base = BB_DEFAULT_SPEC;
+    const specs: RobotSpec[] = [];
+    for (const kind of BB_SCORE_MODES) {
+      for (const mount of BB_MOUNT_POSITIONS) {
+        for (const lift of [null, ...BB_MOUNT_POSITIONS.filter((m) => m !== 'center')]) {
+          specs.push(coerceBiobuzzSpec({
+            ...base,
+            bbMech: { launcher: { kind, mount, hoodDeg: 45 }, lift: lift ? { kind: 'vslide', mount: lift } : null, intake: { kind: 'sweeper' } },
+          } as RobotSpec));
+        }
+      }
+    }
+    for (const w of [11, 18]) specs.push(coerceBiobuzzSpec({ ...base, length: w, width: w, bbMech: { launcher: { kind: 'turret', mount: 'front', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } } } as RobotSpec));
+    const hitRect = (k: BbKeepOut, x0: number, x1: number, y0: number, y1: number): boolean =>
+      k.r !== undefined
+        ? Math.hypot(Math.max(x0 - k.cx, 0, k.cx - x1), Math.max(y0 - k.cy, 0, k.cy - y1)) < k.r - 1e-6
+        : k.cx + k.hx! > x0 + 1e-6 && k.cx - k.hx! < x1 - 1e-6 && k.cy + k.hy! > y0 + 1e-6 && k.cy - k.hy! < y1 - 1e-6;
+    const inside = (k: BbKeepOut, x: number, y: number): boolean =>
+      k.r !== undefined ? Math.hypot(x - k.cx, y - k.cy) < k.r - 1e-6 : Math.abs(x - k.cx) < k.hx! - 1e-6 && Math.abs(y - k.cy) < k.hy! - 1e-6;
+    let bars = 0, arrows = 0, caps = 0, cut = 0, low = 0, moved = 0, dropped = 0;
+    for (const spec of specs) {
+      const keep = bbChassisKeepOuts(spec);
+      const m = bbFrontMarks(spec);
+      for (const bar of [m.front, m.rear]) {
+        const pieces = bbEndBarSegments(bar);
+        if (pieces.length > 1 || pieces.some((p) => p.y1 - p.y0 < bar.halfY * 2 - 1e-6)) cut++;
+        if (pieces.some((p) => p.h < BB_END_BAR_H)) low++;
+        for (const p of pieces) for (const k of keep) if (k.z0 < BB_DECK_Z + p.h && k.z1 > BB_DECK_Z && hitRect(k, bar.x0, bar.x1, p.y0, p.y1)) bars++;
+      }
+      if (!m.arrow) dropped++;
+      else {
+        if (m.arrow.apex - m.arrow.base < 2.8 - 1e-6 || m.arrow.cy !== 0) moved++;
+        const top = BB_DECK_Z + 0.02 + BB_FRONT_ARROW_T;
+        const a = m.arrow;
+        // the triangle, sampled: 21 columns from base to apex, each 21 points across its width there
+        for (let i = 0; i <= 20; i++) {
+          const x = a.base + ((a.apex - a.base) * i) / 20;
+          const w = a.half * (1 - i / 20);
+          for (let j = 0; j <= 20; j++) {
+            const y = a.cy + w * ((2 * j) / 20 - 1);
+            for (const k of keep) if (k.z0 < top && inside(k, x, y)) arrows++;
+          }
+        }
+      }
+      const segs = bbTopCapSegments(spec);
+      ([1, -1] as const).forEach((sy, i) => {
+        const [y0, y1] = bbTopCapBand(spec, sy);
+        for (const s of segs[i]) for (const k of keep) if (k.z0 < BB_TOP_CAP_Z[1] && k.z1 > BB_TOP_CAP_Z[0] && hitRect(k, s.a0, s.a1, y0, y1)) caps++;
+      });
+    }
+    check(`overlap/dressing: no end-bar piece stands in a mechanism, over ${specs.length} builds`, bars === 0, `${bars} hits`);
+    check('overlap/dressing: ...and the bars really did give way (cut, or run low under a turret head)', cut > 100 && low > 50, `${cut} bars cut, ${low} run low`);
+    check('overlap/dressing: no deck arrow sits under a mechanism', arrows === 0, `${arrows} sample points inside`);
+    check('overlap/dressing: ...and the arrow really did move, shrink or go', moved + dropped > 30, `${moved} moved or shrunk, ${dropped} dropped`);
+    check('overlap/dressing: no top-cap piece cuts through a mechanism', caps === 0, `${caps} hits`);
+    // the default build keeps its arrow ON the centreline, clear of the centre turret's ring
+    const def = bbFrontMarks(coerceBiobuzzSpec(base));
+    check('overlap/dressing: the default build keeps a centred arrow', !!def.arrow && def.arrow.cy === 0, JSON.stringify(def.arrow));
+    // a narrow chassis with a front turret keeps a light bar across the front (run low), not none
+    const narrow = bbFrontMarks(specs[specs.length - 2]);
+    check('overlap/dressing: an 11-in chassis with a front turret still has a light bar at the front',
+      bbEndBarSegments(narrow.front).length > 0, JSON.stringify(narrow.front.pieces));
+  }
+
+  // ── (2) ────────────────────────────────────────────────────────────────────────────────────
+  const hadDoc = 'document' in globalThis;
+  const stubCtx = new Proxy({}, { get: () => () => ({ addColorStop(): void {}, width: 10 }) });
+  if (!hadDoc) (globalThis as { document?: unknown }).document = { createElement: () => ({ width: 0, height: 0, getContext: () => stubCtx, style: {} }) };
+  try {
+    const mk = (extra: Record<string, unknown>): RobotSpec => coerceBiobuzzSpec({ ...BB_DEFAULT_SPEC, ...extra } as RobotSpec);
+    const builds: [string, RobotSpec][] = [
+      ...[...BB_PRESETS, ...BB_STARTER_BOTS].map((s): [string, RobotSpec] => [s.name, coerceBiobuzzSpec(s as RobotSpec)]),
+      ['tube@back', mk({ bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'back' }, intake: { kind: 'sweeper' } } })],
+      ['siderollers+twin', mk({ intakeMount: 'frontback', bbMech: { launcher: { kind: 'twinturret', mount: 'left', mount2: 'right', hoodDeg: 45 }, lift: null, intake: { kind: 'siderollers' } } })],
+      ['swerve+side+tube', mk({ drivetrain: 'swerve', intakeMount: 'side', bbMech: { launcher: { kind: 'turret', mount: 'front', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'backright' }, intake: { kind: 'siderollers' } } })],
+      ['ramp+dumper', mk({ bbMech: { launcher: { kind: 'dumper', mount: 'back', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'left' }, intake: { kind: 'ramp' } } })],
+    ];
+    type Tri = { p: THREE.Vector3[]; n: THREE.Vector3; d: number; key: string; sn: THREE.Vector3; name: string };
+    const fights: string[] = [];
+    let triCount = 0;
+    for (const [label, spec] of builds) {
+      const g = buildRobotGroup(spec, 1, 'red', 'high');
+      g.updateMatrixWorld(true);
+      const tris: Tri[] = [];
+      g.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh) return;
+        const mat = (Array.isArray(m.material) ? m.material[0] : m.material) as THREE.MeshStandardMaterial;
+        if (mat.transparent && mat.opacity < 0.05) return;
+        let fam = '';
+        for (let q: THREE.Object3D | null = m; q; q = q.parent) if (q.userData.bbFamily) { fam = q.userData.bbFamily as string; break; }
+        const pos = m.geometry.getAttribute('position');
+        const nor = m.geometry.getAttribute('normal');
+        const idx = m.geometry.getIndex();
+        const nm = new THREE.Matrix3().getNormalMatrix(m.matrixWorld);
+        const n = idx ? idx.count : pos.count;
+        for (let t = 0; t + 2 < n; t += 3) {
+          const ids = [0, 1, 2].map((k) => (idx ? idx.getX(t + k) : t + k));
+          const p = ids.map((i) => new THREE.Vector3().fromBufferAttribute(pos as THREE.BufferAttribute, i).applyMatrix4(m.matrixWorld));
+          const fn = new THREE.Vector3().subVectors(p[1], p[0]).cross(new THREE.Vector3().subVectors(p[2], p[0]));
+          if (fn.length() < 1e-5) continue;
+          fn.normalize();
+          const sn = new THREE.Vector3();
+          if (nor) for (const i of ids) sn.add(new THREE.Vector3().fromBufferAttribute(nor as THREE.BufferAttribute, i).applyMatrix3(nm).normalize());
+          else sn.copy(fn);
+          sn.normalize();
+          tris.push({ p, n: fn, d: fn.dot(p[0]), key: `${mat.uuid}|${fam}`, sn, name: m.name || m.parent?.name || '?' });
+        }
+      });
+      triCount += tris.length;
+      // bucket by (quantised) normal, then sweep by plane offset
+      const buckets = new Map<string, Tri[]>();
+      for (const t of tris) {
+        const k = `${Math.round(t.n.x * 40)},${Math.round(t.n.y * 40)},${Math.round(t.n.z * 40)}`;
+        (buckets.get(k) ?? buckets.set(k, []).get(k)!).push(t);
+      }
+      const area2 = (A: Tri, B: Tri): number => {
+        const u = Math.abs(A.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+        u.sub(A.n.clone().multiplyScalar(u.dot(A.n))).normalize();
+        const v = new THREE.Vector3().crossVectors(A.n, u);
+        const pr = (q: THREE.Vector3): [number, number] => [q.dot(u), q.dot(v)];
+        const ar = (q: [number, number][]): number => q.reduce((s, a, i) => s + a[0] * q[(i + 1) % q.length][1] - q[(i + 1) % q.length][0] * a[1], 0) / 2;
+        let poly = A.p.map(pr);
+        let clip = B.p.map(pr);
+        if (ar(poly) < 0) poly = poly.reverse();
+        if (ar(clip) < 0) clip = clip.reverse();
+        for (let i = 0; i < 3 && poly.length; i++) {
+          const a = clip[i], b = clip[(i + 1) % 3];
+          const side = (q: [number, number]): number => (b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0]);
+          const next: [number, number][] = [];
+          for (let k = 0; k < poly.length; k++) {
+            const P = poly[k], Q = poly[(k + 1) % poly.length];
+            const sp = side(P), sq = side(Q);
+            if (sp >= 0) next.push(P);
+            if ((sp >= 0) !== (sq >= 0)) { const f = sp / (sp - sq); next.push([P[0] + (Q[0] - P[0]) * f, P[1] + (Q[1] - P[1]) * f]); }
+          }
+          poly = next;
+        }
+        return poly.length >= 3 ? Math.abs(ar(poly)) : 0;
+      };
+      for (const list of buckets.values()) {
+        list.sort((a, b) => a.d - b.d);
+        for (let i = 0; i < list.length; i++) {
+          for (let j = i + 1; j < list.length && list[j].d - list[i].d < 0.025; j++) {
+            const A = list[i], B = list[j];
+            if (A.n.dot(B.n) < 0.9998) continue;
+            if (A.key === B.key && A.sn.dot(B.sn) > 0.9995) continue;
+            const ov = area2(A, B);
+            if (ov > 0.02) fights.push(`${label}: ${A.name} × ${B.name} ${ov.toFixed(3)} in²`);
+          }
+        }
+      }
+      disposeRobotGroup(g);
+    }
+    const uniq = [...new Set(fights.map((f) => f.replace(/ \d+\.\d+ in²$/, '')))];
+    check(`overlap/z-fight: no two faces of a built robot share a plane in different finishes (${builds.length} builds, ${triCount} triangles)`,
+      uniq.length === 0, uniq.slice(0, 6).join('; '));
+    check('overlap/z-fight: ...and the probe saw real geometry (else the check is vacuous)', triCount > 50_000, String(triCount));
+
+    // ── (3) ──────────────────────────────────────────────────────────────────────────────────
+    // THE TURRETS' REST POSE: every head vertex, against the mesh boxes of the intakes, the Box
+    // Tube and the other turret — measured here off the vertices, not the grid `restTurretHeads`
+    // samples. Built facing forward, a head was inside one of them on 876 of 1,947 turreted builds.
+    const headIn = (g: THREE.Group): number => {
+      g.updateMatrixWorld(true);
+      let n = 0;
+      const v = new THREE.Vector3();
+      for (const h of g.userData.turretHeads as THREE.Group[]) {
+        const boxes: THREE.Box3[] = [];
+        for (const c of g.children) {
+          if (c === h.parent || !(c.name === 'bb-turret' || c.name.endsWith(':tube') || c.name.startsWith('robot:intake:'))) continue;
+          c.traverse((o) => { if ((o as THREE.Mesh).isMesh) boxes.push(new THREE.Box3().setFromObject(o).expandByScalar(-0.02)); });
+        }
+        h.traverse((o) => {
+          const m = o as THREE.Mesh;
+          if (!m.isMesh) return;
+          const pos = m.geometry.getAttribute('position');
+          for (let i = 0; i < pos.count; i++) if (boxes.some((b) => b.containsPoint(v.fromBufferAttribute(pos as THREE.BufferAttribute, i).applyMatrix4(m.matrixWorld)))) n++;
+        });
+      }
+      return n;
+    };
+    let rest = 0, ahead = 0, turreted = 0, parallel = 0;
+    for (const kind of ['turret', 'twinturret'] as const)
+      for (const mount of BB_MOUNT_POSITIONS)
+        for (const im of ['front', 'back', 'side', 'frontback'] as const)
+          for (const lift of [null, ...BB_MOUNT_POSITIONS.filter((m) => m !== 'center')]) {
+            const g = buildRobotGroup(mk({ intakeMount: im, bbMech: { launcher: { kind, mount, hoodDeg: 45 }, lift: lift ? { kind: 'vslide', mount: lift } : null, intake: { kind: 'sweeper' } } }), 1, 'red', 'high');
+            const heads = g.userData.turretHeads as THREE.Group[];
+            turreted++;
+            if (heads.length > 1 && heads[0].rotation.z === heads[1].rotation.z) parallel++;
+            if (headIn(g)) rest++;
+            for (const h of heads) h.rotation.z = 0;
+            if (headIn(g)) ahead++;
+            disposeRobotGroup(g);
+          }
+    check(`overlap/turret rest: a resting head stands in another assembly on at most 1 in 20 builds (${turreted} built)`, rest * 20 <= turreted, `${rest} at rest`);
+    check('overlap/turret rest: ...where facing forward it stood in one on over a third', ahead * 3 > turreted && rest * 8 < ahead, `${rest} at rest vs ${ahead} forward`);
+    check('overlap/turret rest: a double turret keeps its heads parallel whenever that is clear (most builds)', parallel * 4 > turreted, `${parallel} parallel`);
+    const def = buildRobotGroup(coerceBiobuzzSpec(BB_DEFAULT_SPEC), 1, 'red', 'high');
+    check('overlap/turret rest: the default build still rests facing forward',
+      (def.userData.turretHeads as THREE.Group[]).every((h) => h.rotation.z === 0), String((def.userData.turretHeads as THREE.Group[]).map((h) => h.rotation.z)));
+    disposeRobotGroup(def);
+  } finally {
+    if (!hadDoc) delete (globalThis as { document?: unknown }).document;
+  }
+}
+
 function endPlateChecks(check: Check): void {
   const MOUNTS = ['front', 'back', 'side', 'frontback'] as const;
   const DRIVETRAINS = ['mecanum', 'swerve', 'tank'] as const;
@@ -6555,13 +6793,26 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
               check('handles/swerve: ...and each pod’s wheel is in the spin list', w.spin.length === 4);
             }
             if (dt === 'butterfly') {
-              check('handles/butterfly: both sets are published, four each', w.traction.length === 4 && w.roller.length === 4);
+              // four corner mecanums, and a traction set of one or two a side: two only where both
+              // fit (the pair used to overlap almost completely on every chassis under ~18.4 in)
+              check('handles/butterfly: both sets are published — four mecanums, and a traction wheel on each side',
+                w.roller.length === 4 && (w.traction.length === 2 || w.traction.length === 4), `${w.roller.length} / ${w.traction.length}`);
               check(
                 'handles/butterfly: ...each with its OWN grounded height (two different parts)',
-                Math.abs(w.traction[0].z - BB_WHEEL_PARTS.traction.r) < 1e-9 &&
+                (Math.abs(w.traction[0].z - BB_WHEEL_PARTS.traction.r) < 1e-9 || Math.abs(w.traction[0].z - BB_WHEEL_PARTS.podTraction.r) < 1e-9) &&
                   Math.abs(w.roller[0].z - BB_WHEEL_PARTS.mecanum.r) < 1e-9,
                 `${w.traction[0].z.toFixed(3)} / ${w.roller[0].z.toFixed(3)}`,
               );
+              // NO TWO WHEELS ON ONE SIDE OVERLAP along the channel (the length check the old fixed
+              // offset failed): each wheel's x-span, radius about its centre
+              let worst = Infinity;
+              for (const sy of [1, -1]) {
+                const side = [...w.traction.map((t) => ({ n: t.node, r: t.z })), ...w.roller.map((t) => ({ n: t.node, r: t.z }))]
+                  .filter((q) => Math.sign(q.n.position.y) === sy)
+                  .sort((p, q) => p.n.position.x - q.n.position.x);
+                for (let i = 1; i < side.length; i++) worst = Math.min(worst, side[i].n.position.x - side[i].r - (side[i - 1].n.position.x + side[i - 1].r));
+              }
+              check('handles/butterfly: ...and no two wheels on a side overlap along the channel', worst >= 0.1, `tightest gap ${worst.toFixed(3)} in`);
             }
             if (dt === 'tank') {
               check('handles/tank: six wheels turn, not four', w.spin.length === 6, `${w.spin.length}`);
@@ -7598,8 +7849,8 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
           const overlap = verts(bars).some((v) => base.some((b) => v.x > b.x0 + 1e-6 && v.x < b.x1 - 1e-6 && v.y > b.y0 + 1e-6 && v.y < b.y1 - 1e-6 && v.z < b.z1));
           check(
             'box tube: a back-mounted tube splits the rear rail round its pivot, and no bar passes through it',
-            !!m.rear.gap && bbEndBarSegments(m.rear).length === 2 && !overlap && !bbFrontMarks({ ...spec, bbMech: { ...spec.bbMech!, lift: null } }).rear.gap,
-            JSON.stringify(m.rear.gap),
+            bbEndBarSegments(m.rear).length === 2 && !overlap && bbEndBarSegments(bbFrontMarks({ ...spec, bbMech: { ...spec.bbMech!, lift: null } }).rear).length === 1,
+            JSON.stringify(m.rear.pieces),
           );
         }
 

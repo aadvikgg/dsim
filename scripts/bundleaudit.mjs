@@ -446,7 +446,12 @@ const BASELINE = {
   // and `renderPreview.ts` do around them — the robot shadow row (`setRobotShadows`),
   // `robotsChanged()`'s identity check replacing the old child-count one, and the probe recapture
   // trigger.
-  scene: { gzip: 221.06 * 1000, budgetCeiling: 250 * 1000 },
+  //
+  // 2026-09-28, TILE JOINTS AND ROBOT OVERLAPS: 225.14 -> 226.59 (+1.45), which crossed the
+  // tolerance, so the baseline moves to it. What was added: the dovetail seam and tile outlines
+  // (`renderTiles.ts`), and in `renderRobots.ts` the intake-arm keep-outs, the butterfly traction
+  // placement, the top-cap and end-bar pieces and the measured turret rest pose (`restTurretHeads`).
+  scene: { gzip: 226.59 * 1000, budgetCeiling: 250 * 1000 },
   // 2026-09-21, THE EIGHT PAINTED ENVIRONMENTS: 4.01 -> 5.56 (+1.55), well inside the 4 KB
   // tolerance, so the number below is deliberately NOT moved — recorded here for the same reason
   // the `scene` note above records its own under-tolerance creep. The growth is DATA:

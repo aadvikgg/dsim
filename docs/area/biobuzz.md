@@ -514,6 +514,40 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
   edge vertices (0.0007 in) and each variant's area (0.012 in²); the Extreme floor shader draws the
   same curve. The seam is a dark hairline: the old light lip over a wide groove read as an
   embossed outline and broke into a beaded line at range.
+- ⚠️ **NO TWO ROBOT PARTS SHARE A PLANE IN DIFFERENT FINISHES, AND NO DRESSING IS DRAWN THROUGH A
+  MECHANISM** (owner, 2026-09-28: "The robot itself has a lot of overlapping parts").
+  - Z-fighting: faces facing the same way within the depth buffer's resolution (0.023 in at the
+    orbit camera's 620 in, near plane 1) flicker when their finishes differ. `BB_PROUD` (0.04,
+    `renderRobots.ts`) is the offset: the Box Tube's slide blocks stand proud of their tubes and
+    clear the next stage's walls, the wrist sits under the yoke bar, the pivot axle stops inside its
+    pulley, the side-roller axle and the arm boss stand proud, the end plates stop under the deck,
+    the inner side plates stop inside the cross members. Measured by rendering each build's parts
+    in flat ID colours at three near planes and counting pixels whose visible part AND shaded
+    colour change: the tube went from ~11k flipping pixels to 11. The RENDER lane's
+    `robotOverlapChecks` holds 9 built robots to it (0.025 in, 0.02 in²). Same-material,
+    same-normal overlaps shade identically and are allowed; the physical-materials tier's detail is
+    per family, so the key is material + family.
+  - Dressing: the end bars, the deck arrow and the top caps read `bbChassisKeepOuts` (`parts.ts`:
+    turret ring, turret head sweep, dumper posts, Box Tube boxes) and, in 3D, the intake arms. A bar
+    STOPS where a part reaches the deck and runs LOW under a turret head, so a narrow chassis keeps a
+    light bar. The arrow stays centred and shrinks before it slides sideways; `null` if nothing fits.
+    Over 2,381 builds: turret × bar 1,080 → 0, ring × cap 1,297 → 0, ring × arrow 1,190 → 0.
+  - The Box Tube's slide-block cache key lacked the section length, so a second robot got the first
+    one's blocks at the wrong height. Keyed now.
+  - The butterfly's inboard traction wheels overlapped each other on every chassis under ~18.4 in;
+    one a side now, centred, in the largest Hogback that clears the mecanums (`butterflyTraction`).
+  - A turret's REST yaw (what the builder preview and thumbnails show; the match aims it on its
+    first frame) is measured, not fixed: `restTurretHeads` tries forward, square, back, diagonal
+    and keeps the first whose head stays out of the intakes, the Box Tube and the other turret —
+    both heads together first, then each alone. Facing forward, a head stood in one of them on 876
+    of 1,947 turreted builds; now 48, all a double turret at a corner beside a tube cell. In the
+    surface-crossing sweep, head × tube/intake went from 26 part pairs (worst 26.9 in of crossing
+    line) to 7 (worst 1.84 in: a double turret's plate grazing an intake arm or tube drive).
+  - STILL OPEN (build rules, not drawing): a Box Tube on a corner cell next to an intake mouth stands
+    in the intake arm (102–366 of 2,381 builds); a turret head's sweep reaches a tube on a
+    neighbouring cell (12–48), which is also where the 48 resting heads above are. Fixing these
+    means a coercer rule, which changes saved builds. Not measured: heads as the sim aims them
+    during a match.
 - ⚠️ **NO REPEATING RELIEF OR SPECK TEXTURE ON A FLOOR** (same day: "there should be nothing in
   graphics that mesh and create weird visual effects"). The mat's grain normal map (four identical
   copies per tile) and the venue ground's 200 hard-edged specks (identical in every 48-in repeat)
