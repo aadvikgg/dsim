@@ -210,10 +210,10 @@ class BiobuzzScene implements GameScene {
   /** set first thing in `dispose`, so a post chunk that lands after teardown allocates nothing */
   private disposed = false;
   /**
-   * The materials tagged `userData.bloomBase` (venue lamp fittings, the robots' front light bar),
-   * collected by `tuneMaterials`. While bloom is on their emissive is raised for THIS scene's
-   * pass and put back straight after it: the robot material is shared with the builder preview
-   * and every other scene, so a value left raised would leak into pictures that have no bloom.
+   * The materials tagged `userData.bloomBase` (the venue's lamp fittings, and nothing on a robot:
+   * a robot part never glows), collected by `tuneMaterials`. While bloom is on their emissive is
+   * raised for THIS scene's pass and put back straight after it: the venue is rebuilt per scene,
+   * but a value left raised would still leak into the next frame's minimap and any other pass.
    */
   private glowMats: THREE.MeshStandardMaterial[] = [];
   private readonly blitScene = new THREE.Scene();
@@ -935,8 +935,8 @@ class BiobuzzScene implements GameScene {
     try {
       this.renderer.render(this.scene, camera);
     } finally {
-      // ALWAYS put them back: the front-bar material and the panel cap are shared with every
-      // other scene, and a throw here tears this one down (game.ts) with them still raised
+      // ALWAYS put them back: the panel cap is shared with every other scene, and a throw here
+      // tears this one down (game.ts) with it and the lamps still raised
       if (glow !== 1) {
         this.setGlow(1);
         setClearPanelCap(null);

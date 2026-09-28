@@ -313,8 +313,8 @@ export interface GraphicsSettings {
   /** the environment map's SPECULAR contribution on metals (`envMapIntensity`). */
   reflections: boolean;
   /**
-   * The EIGHTEENTH row (2026-09-27, Extreme): a glow around the scene's lamps, robot front bars
-   * and the brightest glints, drawn by three's UnrealBloom pass in the lazy post-processing chunk.
+   * The EIGHTEENTH row (2026-09-27, Extreme): a glow around the venue's lamps and the brightest
+   * glints, drawn by three's UnrealBloom pass in the lazy post-processing chunk. Never a robot part.
    * A boolean, not a strength: the strength, radius and threshold are tuned once for this field
    * (`scene/renderPost.ts`) and a slider would be a way to wash the field out.
    */

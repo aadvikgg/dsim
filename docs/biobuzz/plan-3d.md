@@ -424,7 +424,7 @@ One preset picker and every setting under it; changing a setting switches the pr
 | Environment | procedural room / HDRI set (on demand, 4.5) | procedural | procedural | HDRI | HDRI | HDRI |
 | Environment lighting | off / on | off | off | on | on | on |
 | Reflections | off / on (env map on metals) | off | off | on | on | on |
-| Bloom | off / on (lamps, robot front bars, hard glints) | off | off | off | off | on |
+| Bloom | off / on (venue lamps and hard glints; never a robot part) | off | off | off | off | on |
 | Effects | tracers, tint pulse, wheel spin, dust off | minimal | standard | standard | full | full |
 | Field of view | 60 to 90 | 70 | 70 | 70 | 70 | 70 |
 | Camera motion | full / reduced (also from `prefers-reduced-motion`) | reduced | full | full | full | full |

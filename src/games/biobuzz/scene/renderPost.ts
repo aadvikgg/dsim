@@ -193,11 +193,13 @@ class FieldGtaoPass extends GTAOPass {
  *
  * A luminance threshold on this scene cannot tell a lamp from a white surface in sunlight on its
  * own: measured raw (linear, before exposure), lit near-white diffuse is 1.2–1.7, the venue's lamp
- * fittings 1.0–1.95, a robot's front light bar 0.85 plus its lit diffuse. So the things that
- * SHOULD glow are pushed past the threshold instead: `renderScene.ts` multiplies the emissive of
- * every material tagged `userData.bloomBase` by `BLOOM_EMISSIVE_GAIN` for the scene pass while
- * bloom is on, and the threshold sits between the lit-diffuse ceiling and the boosted emissives.
- * Hard metal glints (3–8 raw) clear it too, which is wanted.
+ * fittings 1.0–1.95. So the things that SHOULD glow, the lamps and nothing else, are pushed past
+ * the threshold instead: `renderScene.ts` multiplies the emissive of every material tagged
+ * `userData.bloomBase` by `BLOOM_EMISSIVE_GAIN` for the scene pass while bloom is on, and the
+ * threshold sits between the lit-diffuse ceiling and the boosted emissives. A ROBOT PART NEVER
+ * GLOWS (owner, 2026-09-27): the front light bar is untagged, and its own emissive plus lit white
+ * (about 2.0–2.5 raw) has to stay under the threshold's lower knee. Hard metal glints (3–8 raw)
+ * are real specular highlights and may clear it.
  *
  * THE THRESHOLD IS DISPLAY-NORMALISED. The high pass compares RAW luminance, before tone mapping,
  * and each environment's rig sets its own exposure (1.1–1.38), so a fixed raw threshold would

@@ -570,8 +570,9 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
       skipped creating. The perspective define is flipped when the overhead (ortho) shot is active.
     - **Bloom is SELECTIVE.** A lit white panel (1.2–1.7 raw) is as bright as a lamp (1.0–1.95),
       so no threshold separates them. Materials tagged `userData.bloomBase` (the hall, arena and
-      night lamp fittings, the robots' front bar) are raised ×3.5 for the match's own scene pass only and put
-      back after it, because the front-bar material is shared with the builder preview. The
+      night lamp fittings) are raised for the match's own scene pass only and put back after it.
+      ⚠️ **A ROBOT PART NEVER GLOWS** (owner, 2026-09-27): the front light bar is untagged, and
+      the threshold has to sit above its own emissive plus lit white. The
       threshold is divided by each environment's exposure. The clear panels' output is capped
       (`setClearPanelCap`, a shared uniform, a no-op at rest) for the same pass, or a lit
       perimeter wall blooms into a haze. Studio softboxes are untagged: a diffuser, not a lamp.
