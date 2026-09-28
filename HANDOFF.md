@@ -1,3 +1,15 @@
+# HANDOFF — 2026-09-27n (BIOBUZZ Full: the reconcile is a rollback, so the client stops firing elements it never picked up)
+
+**State: pushed on `alpha`.** `npm test`, `build`, `server:check`, `bundleaudit`, `docaudit` pass. Client only, no deploy. **Not on `main`** (owner's call).
+
+- **Owner:** after 27m, "Not just replaying sound tho. It just doesnt shoot sometimes."
+- **Cause:** not lost packets. Every miss had an EMPTY room hopper: the client had predicted picking up an element the room never picked up, then fired it. `rewindEngineTo` moved each body back from the predicted tick but kept a lead's worth of future Rapier contact state, so a replay did not reproduce the room even from an exact snapshot (no network, identical inputs: 9.8% of replays on a different capture, 7.3% on a different shot). Captures came out early (p10 −6 to −12 ticks) and the client showed ~2x the room's pickups.
+- **Fix:** the Full world tier saves its engine (`saveEngineState`, Rapier `takeSnapshot` + the engine's maps) on every even tick it predicts or replays; `rewindEngineTo` restores the save for the snapshot's tick, then compares bodies. Also: "matches the snapshot" is now within the wire's 1e-3 rounding (`REWIND_EPS`), not `POSE_EPS`, which was teleporting and waking every element on every reconcile.
+- **Measured** (real `Room`, bot driving, fire held, 150 s): phantom shots turret 28 → 0, default build 29 → 2, dumper at 150 ms with stalls 4 → 5 (aim-gate, hopper loaded); pickup cues ~2x → 1.03-1.1x of real; full reconciles halve.
+- **Cost:** Chrome, 4 robots: save 0.6 ms (~1.2 MB), rollback rewind 1.1 ms, `step3d` 0.8 ms; ~30-40 ms CPU per second of play extra. Auto's world probe counts it; the slip rule measures from the adopt now.
+- **Next if it matters:** save every 4th tick and step forward from the older save (halves the cost); or send `fireReadyAt` unrounded (server) for the last aim/cadence flips.
+- The probes behind the numbers are not committed; `predict.ts` "world predict: WITHOUT/WITH a save" is the kept reproduction.
+
 # HANDOFF — 2026-09-27m (online: one shot sound per shot; a snapshot's rounded clocks rebuilt)
 
 **State: pushed on `alpha`.** `npm test`, `build`, `server:check`, `bundleaudit`, `docaudit` pass. Client only, no deploy. **Not on `main`** (a push there is a production client deploy; owner's call).
