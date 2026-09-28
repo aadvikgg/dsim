@@ -1,5 +1,5 @@
 /**
- * GRAPHICS SETTINGS — the eighteen dials of `docs/biobuzz/plan-3d.md` §4.4, their five preset
+ * GRAPHICS SETTINGS — the nineteen dials of `docs/biobuzz/plan-3d.md` §4.4, their five preset
  * columns, and the per-device store that holds them.
  *
  * ── WHY PER DEVICE, AND NOT IN `GameSettings` ──────────────────────────────────────────────
@@ -11,7 +11,7 @@
  *
  * ── THE SHAPE, AND WHY THERE ARE THREE FIELDS AND NOT ONE ──────────────────────────────────
  * `{ preset, tier, settings }`.
- *   • `settings` is the truth — eighteen values, and the only thing the renderer ever reads.
+ *   • `settings` is the truth — nineteen values, and the only thing the renderer ever reads.
  *   • `preset` is what the PICKER shows: one of the five named columns, `auto`, or `custom`
  *     the moment any single setting differs from the column it claims.
  *   • `tier` is one of the five columns ALWAYS, even under `custom`/`auto`, because the PIXEL
@@ -25,7 +25,7 @@
  * GraphicsSection.tsx` renders it. A headless smoke lane can import it with no DOM at all.
  */
 
-// ────────────────────────────────────────────────────────────────────── the eighteen values ──
+// ────────────────────────────────────────────────────────────────────── the nineteen values ──
 
 /**
  * §4.4 row 2 — the draw-loop frame cap, in frames per second, with TWO SENTINELS.
@@ -229,6 +229,24 @@ export type MeshDetail = 'low' | 'high';
 export type ElementDetail = 'sphere' | 'cad';
 
 /**
+ * The NINETEENTH row (2026-09-27, Extreme) — what the surfaces are made of.
+ *
+ *   standard — the flat-colour `MeshStandardMaterial`s every tier has always drawn
+ *   physical  — measured finishes (bare aluminium is a metal, powder coat and plastics are
+ *               dielectrics, rubber is rubber), procedural surface detail (foam stipple, powder-
+ *               coat orange peel, extrusion lines, roller pips), and a ROOM PROBE: metals and the
+ *               polycarbonate reflect the venue that is actually drawn, not the HDRI photograph
+ *               the venue geometry hides
+ *
+ * Owner, 2026-09-27, on the first Extreme: "Adding accurate texture, material, and reflection
+ * matters more [than glow]." A row of its own, asked of the SETTINGS like `wantsPost`, so a Custom
+ * branched from High can have it. The code lives in a lazy chunk (`scene/renderSurfaces.ts`),
+ * fetched the first time it is on. A string and not a boolean so a later step (a baked probe, a
+ * downloaded texture set) is a third value rather than a second row.
+ */
+export type MaterialModel = 'standard' | 'physical';
+
+/**
  * §4.4 row 12 — how much of the cosmetic layer runs.
  *   minimal  — no landing reticle, no rolling spin on the elements, no wheel rotation
  *   standard — reticle + rolling spin + wheels
@@ -295,7 +313,7 @@ export const ENVIRONMENT_IDS: readonly EnvironmentId[] = [
   'monochrome-studio',
 ];
 
-/** THE EIGHTEEN (§4.4's seventeen rows, Bloom among them since Extreme, plus `elementDetail`, this build's own). In §4.4's own table order, so the two can be diffed by eye. */
+/** THE NINETEEN (§4.4's eighteen rows, Bloom and Materials among them since Extreme, plus `elementDetail`, this build's own). In §4.4's own table order, so the two can be diffed by eye. */
 export interface GraphicsSettings {
   /** 50–200 % of CSS pixels, before the tier's pixel budget caps the backbuffer. */
   renderScale: number;
@@ -307,6 +325,7 @@ export interface GraphicsSettings {
   anisotropy: Anisotropy;
   meshDetail: MeshDetail;
   elementDetail: ElementDetail;
+  materials: MaterialModel;
   environment: EnvironmentId;
   /** image-based lighting: `scene.environment` set, or lights only. */
   envLighting: boolean;
@@ -402,6 +421,7 @@ export const GFX_PRESETS: Record<GraphicsTier, GraphicsSettings> = {
     anisotropy: 1,
     meshDetail: 'low',
     elementDetail: 'sphere',
+    materials: 'standard',
     environment: 'room',
     envLighting: false,
     reflections: false,
@@ -422,6 +442,7 @@ export const GFX_PRESETS: Record<GraphicsTier, GraphicsSettings> = {
     anisotropy: 4,
     meshDetail: 'high',
     elementDetail: 'sphere',
+    materials: 'standard',
     environment: 'room',
     envLighting: false,
     reflections: false,
@@ -442,6 +463,7 @@ export const GFX_PRESETS: Record<GraphicsTier, GraphicsSettings> = {
     anisotropy: 8,
     meshDetail: 'high',
     elementDetail: 'cad',
+    materials: 'standard',
     environment: 'school-hall',
     envLighting: true,
     reflections: true,
@@ -462,6 +484,7 @@ export const GFX_PRESETS: Record<GraphicsTier, GraphicsSettings> = {
     anisotropy: 16,
     meshDetail: 'high',
     elementDetail: 'cad',
+    materials: 'standard',
     environment: 'school-hall',
     envLighting: true,
     reflections: true,
@@ -485,10 +508,13 @@ export const GFX_PRESETS: Record<GraphicsTier, GraphicsSettings> = {
     anisotropy: 16,
     meshDetail: 'high',
     elementDetail: 'cad',
+    materials: 'physical',
     environment: 'school-hall',
     envLighting: true,
     reflections: true,
-    bloom: true,
+    // OFF, not on (owner, 2026-09-27): the Extreme budget goes to what surfaces ARE, not to glow.
+    // Bloom stays a switch for anyone who wants the lamps to flare.
+    bloom: false,
     effects: 'full',
     hfov: GFX_FOV_DEFAULT,
     cameraMotion: 'full',
@@ -586,6 +612,7 @@ export function coerceGraphicsSettings(raw: unknown, base: GraphicsSettings): Gr
     anisotropy: oneOf<Anisotropy>([1, 4, 8, 16], o.anisotropy, base.anisotropy),
     meshDetail: oneOf<MeshDetail>(['low', 'high'], o.meshDetail, base.meshDetail),
     elementDetail: oneOf<ElementDetail>(['sphere', 'cad'], o.elementDetail, base.elementDetail),
+    materials: oneOf<MaterialModel>(['standard', 'physical'], o.materials, base.materials),
     environment: oneOf<EnvironmentId>(ENVIRONMENT_IDS, o.environment, base.environment),
     envLighting: typeof o.envLighting === 'boolean' ? o.envLighting : base.envLighting,
     reflections: typeof o.reflections === 'boolean' ? o.reflections : base.reflections,
@@ -642,7 +669,7 @@ export function getGraphics(): GraphicsState {
   return state;
 }
 
-/** just the eighteen — the shape every renderer call site actually wants. */
+/** just the nineteen — the shape every renderer call site actually wants. */
 export function getGraphicsSettings(): GraphicsSettings {
   return getGraphics().settings;
 }
@@ -796,6 +823,12 @@ export function shadowBlurSamples(q: ShadowQuality): number {
  */
 export function wantsPost(s: GraphicsSettings): boolean {
   return s.ao !== 'off' || s.bloom;
+}
+
+/** Does this set of settings need the SURFACES chunk (`scene/renderSurfaces.ts`: physical
+ * materials, procedural surface detail, the room probe)? Asked of the settings, like `wantsPost`. */
+export function wantsSurfaces(s: GraphicsSettings): boolean {
+  return s.materials === 'physical';
 }
 
 /**

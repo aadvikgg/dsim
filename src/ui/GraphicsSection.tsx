@@ -72,7 +72,7 @@ import { rangeFill } from './rangeFill';
 import { useCoarsePointer } from './useCoarsePointer';
 
 /**
- * GRAPHICS — the eighteen settings of `docs/biobuzz/plan-3d.md` §4.4, the preset that sets them
+ * GRAPHICS — the nineteen settings of `docs/biobuzz/plan-3d.md` §4.4, the preset that sets them
  * all at once, and the environment picker of §4.5.
  *
  * ── WHY IT IS ITS OWN SECTION AND NOT A BLOCK INSIDE "AUDIO AND VISUAL" ────────────────────
@@ -759,9 +759,9 @@ export function GraphicsSection() {
       </section>
 
       {/* ── EVERYTHING BELOW IS AN OVERRIDE OF THE PRESET ────────────────────────────────
-          The Quality preset sets seventeen of these eighteen values, which six flat panels in a
-          row never said: the one control almost everybody wants had the same weight as seventeen
-          they will never touch. (The eighteenth, `perfOverlay`, has no row here at all — it moved
+          The Quality preset sets eighteen of these nineteen values, which six flat panels in a
+          row never said: the one control almost everybody wants had the same weight as eighteen
+          they will never touch. (The nineteenth, `perfOverlay`, has no row here at all — it moved
           to Audio and Visual.) Folded, the preset is the screen; open, the panels are exactly
           as they were.
 
@@ -934,6 +934,24 @@ export function GraphicsSection() {
             options={[
               { v: 'sphere' as const, t: 'Smooth' },
               { v: 'cad' as const, t: 'Perforated', d: '2,300 triangles each' },
+            ]}
+          />
+          {/* MATERIALS (Extreme). Physical is the measured-finish pass: metals are metals,
+              coatings and plastics are not, surfaces carry their real texture, and reflections
+              show the room that is drawn. Its cost is a download and a few more shader
+              programs, which the sub-line states. */}
+          <OptRow
+            label="Materials"
+            value={s.materials}
+            cols="two"
+            onPick={set('materials')}
+            options={[
+              { v: 'standard' as const, t: 'Standard' },
+              {
+                v: 'physical' as const,
+                t: 'Physical',
+                d: 'Measured finishes and room reflections. Downloads once, the first time you turn it on',
+              },
             ]}
           />
           <OptRow

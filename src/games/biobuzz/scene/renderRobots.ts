@@ -174,27 +174,16 @@ function solidMat(color: string, roughness = 0.6, metalness = 0.1): THREE.MeshSt
 }
 
 /**
- * THE FRONT LIGHT BAR'S MATERIAL — the ONE emissive on a robot, and the only reason it is not
- * `solidMat`. A matte white bar is the same grey as the deck under the hive's shadow, which is
- * where a driver most needs to know which end is the front; `emissive` at full strength makes it
- * a light rather than a painted stripe, and it needs no light of its own to do it. Cached and
- * SHARED like every other material here, so `disposeRobotGroup` leaves it alone.
+ * THE FRONT BAR'S MATERIAL: matte white, the deck arrow's own `solidMat`, and NOT emissive.
+ *
+ * It was a light (`emissive` at 0.85) on the reasoning that a matte white bar goes grey in the
+ * hive's shadow. No robot mesh receives a shadow (`cast` sets `castShadow` only), so it never
+ * did, and a robot part that glows is not a part a real FTC robot has (owner, 2026-09-27:
+ * "Robot front bars shouldn't glow. There's no need for it to."). It is a white bar that reads
+ * against the chassis by colour and height, like the chevron beside it.
  */
-let FRONT_BAR_MAT: THREE.MeshStandardMaterial | null = null;
 function frontBarMat(): THREE.MeshStandardMaterial {
-  if (!FRONT_BAR_MAT) {
-    FRONT_BAR_MAT = new THREE.MeshStandardMaterial({
-      color: BB_FRONT_INK,
-      emissive: BB_FRONT_INK,
-      emissiveIntensity: 0.85,
-      roughness: 0.35,
-      metalness: 0,
-    });
-    // NOT tagged for bloom (`userData.bloomBase`), on purpose: a robot part is not a light source
-    // and must never glow (owner, 2026-09-27). Bloom is for the venue's lamps.
-    SHARED_MAT.add(FRONT_BAR_MAT);
-  }
-  return FRONT_BAR_MAT;
+  return solidMat(BB_FRONT_INK, 0.45, 0.05);
 }
 
 /** every mesh this module builds casts a shadow; nothing here receives one back onto itself
@@ -3187,9 +3176,9 @@ export function buildRobotGroup(
  *
  *  • `front:bar` — the full-width light bar, its outer face FLUSH with the front rail and
  *    standing `BB_END_BAR_H` above the deck, so it breaks the chassis silhouette from a chase
- *    camera and is still a bright full-width line from directly overhead. It is `emissive` at full strength: the field is lit for aluminium
- *    and a matte white bar goes grey in the hive's shadow, which is exactly where a driver is
- *    when they most need to know which way they are pointing.
+ *    camera and is still a bright full-width line from directly overhead. It is matte white and
+ *    lit like any other part: it was emissive once, and a robot part never glows (see
+ *    `frontBarMat`).
  *  • `front:arrow` — the deck chevron, extruded a hair so it takes an edge highlight rather than
  *    reading as a decal sticker.
  *  • `rear:bar` — a plain rail in the chassis' own structural dark. It carries NO stripes: the

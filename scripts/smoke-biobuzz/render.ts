@@ -337,6 +337,7 @@ import {
   shadowMapSize,
   sliderPosFromFps,
   wantsPost,
+  wantsSurfaces,
   type GraphicsTier,
 } from '../../src/games/biobuzz/graphics/settings';
 import {
@@ -1713,8 +1714,8 @@ function frontBackChecks(check: Check): void {
     }
   }
   check(
-    'front/back 3D: the light bar is EMISSIVE — a matte white bar goes grey in the hive’s shadow',
-    /emissive: BB_FRONT_INK,/.test(readFileSync(join(SCENE_DIR, 'renderRobots.ts'), 'utf8')),
+    'front/back 3D: NOTHING on a robot is emissive — the front bar is matte white, a robot part never glows (owner, 2026-09-27)',
+    !/emissive/.test(readFileSync(join(SCENE_DIR, 'renderRobots.ts'), 'utf8').replace(/\/\/.*$|\/\*[\s\S]*?\*\//gm, '')),
   );
   check(
     'front/back 3D: the 0.7-in nose box is GONE (it is what the report was about)',
@@ -3421,10 +3422,11 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
     GFX_NOT_OFFERED.map((n) => n.label).join(', '),
   );
   check(
-    'only Extreme turns ambient occlusion and bloom on',
-    GFX_TIERS.filter((t) => t !== 'extreme').every((t) => GFX_PRESETS[t].ao === 'off' && GFX_PRESETS[t].bloom === false) &&
+    'only Extreme turns ambient occlusion and physical materials on, and NO column turns bloom on (owner: realism over glow)',
+    GFX_TIERS.filter((t) => t !== 'extreme').every((t) => GFX_PRESETS[t].ao === 'off' && GFX_PRESETS[t].materials === 'standard') &&
+      GFX_TIERS.every((t) => GFX_PRESETS[t].bloom === false) &&
       GFX_PRESETS.extreme.ao === 'ssao' &&
-      GFX_PRESETS.extreme.bloom === true,
+      GFX_PRESETS.extreme.materials === 'physical',
   );
   check(
     'every preset is exactly itself (matchesPreset is the `custom` test and must not misfire)',
@@ -3447,11 +3449,11 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
     check('every pair of tier columns differs in at least two settings', thin.length === 0, thin.join(', '));
   }
   check(
-    'Extreme differs from Ultra in renderScale, shadows, ao and bloom',
+    'Extreme differs from Ultra in renderScale, shadows, ao and materials',
     GFX_PRESETS.extreme.renderScale !== GFX_PRESETS.ultra.renderScale &&
       GFX_PRESETS.extreme.shadows !== GFX_PRESETS.ultra.shadows &&
       GFX_PRESETS.extreme.ao !== GFX_PRESETS.ultra.ao &&
-      GFX_PRESETS.extreme.bloom !== GFX_PRESETS.ultra.bloom,
+      GFX_PRESETS.extreme.materials !== GFX_PRESETS.ultra.materials,
   );
   check(
     'wantsPost is false for every column except Extreme, and true for Extreme',
@@ -3664,6 +3666,16 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
       coerceGraphicsSettings({ bloom: true }, GFX_PRESETS.low).bloom === true && coerceGraphicsSettings({ bloom: false }, GFX_PRESETS.extreme).bloom === false,
     );
     check('junk in bloom falls back to the base column, same as any other boolean row', coerceGraphicsSettings({ bloom: 'yes' }, GFX_PRESETS.high).bloom === GFX_PRESETS.high.bloom);
+    check(
+      'materials round-trips, and a blob from before the row existed reads its base column',
+      coerceGraphicsSettings({ materials: 'physical' }, GFX_PRESETS.low).materials === 'physical' &&
+        coerceGraphicsSettings({}, GFX_PRESETS.extreme).materials === 'physical' &&
+        coerceGraphicsSettings({ materials: 'pbr' }, GFX_PRESETS.high).materials === 'standard',
+    );
+    check(
+      'wantsSurfaces reads the SETTINGS: a Custom branched from High with physical materials wants the chunk, Extreme does, Ultra does not',
+      wantsSurfaces({ ...GFX_PRESETS.high, materials: 'physical' }) && wantsSurfaces(GFX_PRESETS.extreme) && !wantsSurfaces(GFX_PRESETS.ultra),
+    );
     // THE FOV SLIDER WENT HORIZONTAL (owner, 2026-09-24: "keep human fov in mind"). A blob from
     // before carries a VERTICAL `fov`: the old default becomes the new one (an untouched preset
     // still reads as that preset), anything else is what it showed across a 16:9 screen, and
