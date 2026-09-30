@@ -36,18 +36,29 @@ export interface ZenithProject {
   autos: Record<string, string>;
 }
 
-export interface ZenithSessionOptions {
+/** what one `open` carries: the project, and the auto to open first */
+export interface ZenithOpen {
   project: ZenithProject;
-  /** the auto to open first */
   open?: string;
+}
+
+export interface ZenithSessionOptions {
+  /**
+   * The project and the auto to open, BUILT AT EACH `ready`. A reload inside the popup (or the
+   * gate's re-login) says `ready` again; answering it with the project captured at launch handed
+   * Zenith the library as it was before this session's own Saves, so a saved edit came back old
+   * and a saved new auto vanished from the picker.
+   */
+  project(): ZenithOpen;
   /** store a saved auto; resolve null when stored, or the sentence to show when refused */
   onSave(name: string, text: string): Promise<string | null>;
   /** run an auto and resolve its trace; absent = no "Simulate in DSIM" */
   onRun?(name: string, text: string): Promise<unknown>;
   /** the popup went away */
   onClosed?(): void;
-  /** a recorded run to lay over `open`, posted right behind the project (Zenith waits for the open) */
+  /** a recorded run of `traceAuto`, posted right behind a project that opens it (Zenith waits for the open) */
   trace?: unknown;
+  traceAuto?: string;
 }
 
 export interface ZenithSession {
@@ -82,15 +93,16 @@ export function openZenith(o: ZenithSessionOptions): ZenithSession | null {
   };
   const sendOpen = (): void => {
     opened = true;
+    const { project, open } = o.project();
     post({
       type: 'open',
       protocol: PROTOCOL,
-      project: o.project,
-      ...(o.open ? { open: o.open } : {}),
+      project,
+      ...(open ? { open } : {}),
       readOnlyRobot: true,
       capabilities: { simulate: !!o.onRun },
     });
-    if (o.trace !== undefined && o.open) post({ type: 'trace', auto: o.open, trace: o.trace });
+    if (o.trace !== undefined && open && open === o.traceAuto) post({ type: 'trace', auto: open, trace: o.trace });
   };
 
   const onMessage = (e: MessageEvent): void => {
