@@ -93,6 +93,13 @@ Save comes back as `save` and is validated with `parseAutoText` before it is sto
 DSIM" is answered with `runAutoHeadless`'s trace. Messages are read only from the popup DSIM
 opened and from Zenith's origin (`VITE_ZENITH_URL`, default the public app). `zenithLaunch.ts`
 is the one place a screen opens it; `window.open` must run inside the click, so it is synchronous.
+⚠️ **THE PROJECT IS BUILT AT EVERY `ready`**, from the library as it is then: a reload in the popup
+(or the gate's re-login) used to get the project captured at launch, so saved edits came back old.
+A reload reopens the auto the session saved last. ⚠️ **A SAVE NEVER REPLACES AN AUTO THE SESSION
+DID NOT SEND**: every New in Zenith names its auto `new-auto`, so a save under a library name the
+session never sent is stored under a free one (`new-auto-2`), and a new auto into a full library
+(12) is refused with a sentence instead of dropping the oldest, which could be the one AUTO plays.
+The one waypoints file sent is the opened auto's, with the other autos' names merged in.
 
 ## Traces
 

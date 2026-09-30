@@ -1,3 +1,15 @@
+# HANDOFF — 2026-09-30a (Zenith host: reloads, name clashes, a full library, merged waypoints)
+
+**State: branch `fix/zenith-host-library-safety`, for a PR into `alpha`.** `build`, `server:check`, `bundleaudit`, `docaudit` pass. `npm test`: shared passes; BIOBUZZ fails one check, `fieldDims.gen.ts is exactly what emit-dims.mjs renders`, which reads only the field CAD files this branch does not touch (`npm run field-cad` regenerates it). Client only, no server deploy. Not on `main`.
+
+- **Owner:** fix the DSIM-side bugs from Zenith's pre-release UX sweep (DSIM-1, DSIM-2, DSIM-3), PRs into `alpha` only; the sweep's recommendation to merge waypoints on DSIM's side (DSIM-5) was approved with the rest.
+- **DSIM-1** (`zenithHost.ts`): `project` is a function, called at every `ready`. `zenithLaunch.ts` rebuilds from `loadAutoLibrary` and reopens the auto the session saved last.
+- **DSIM-2** (`zenithLaunch.ts`): `own` holds the names the session sent or saved; a save under any other existing name goes to `freeAutoName` (`new-auto-2`, …) and `alias` keeps Zenith's name on it. Zenith's own bar still says it saved `new-auto`; DSIM's notice names the real entry.
+- **DSIM-3:** a new name into a full library is refused (`saved` `ok:false` with the sentence); `upsertAuto` itself still caps, for the other callers.
+- **DSIM-5:** `mergeWaypoints`: the opened auto's file wins every name, the others fill in, newest first. Two autos with different `start`s show the opened one's in Zenith; play is unaffected (`load.ts` uses each auto's own).
+- **Verified:** a throwaway vite-SSR harness (not committed) drove `launchZenith` through `ready`/`save` with a stubbed popup: every case failed on `alpha` and passes here. Not run in a real browser.
+- **Not done:** DSIM-4, DSIM-6 to DSIM-13; the `open` flags for a new auto and a build version wait on Zenith's host-protocol field names.
+
 # HANDOFF — 2026-09-28b (BIOBUZZ robots: no z-fighting, no dressing through mechanisms)
 
 **State: pushed on `alpha`.** `npm test` (shared 2870, BIOBUZZ 5381), `build`, `server:check`, `bundleaudit` (scene baseline raised 221.06 → 226.59 KB for the keep-outs and the rest-pose search), `docaudit`, `uiaudit` pass. Client only (the 2D sprite's marks changed with the 3D ones; nothing the sim reads). Not on `main`.
