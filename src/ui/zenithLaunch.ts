@@ -40,9 +40,10 @@ export function launchZenith(o: LaunchOptions): string | null {
   const alias = new Map<string, string>();
   /** the auto a reload should open: the one this session saved last, else the one it opened */
   let reopen: string | null = entry0?.name ?? null;
-  const readWaypoints = (text: string | undefined): unknown => {
+  const readWaypoints = (text: string | undefined): WaypointsFile | undefined => {
     try {
-      return text ? JSON.parse(text) : undefined;
+      const w = text ? (JSON.parse(text) as unknown) : undefined;
+      return w && typeof w === 'object' ? (w as WaypointsFile) : undefined;
     } catch {
       return undefined;
     }
@@ -52,7 +53,7 @@ export function launchZenith(o: LaunchOptions): string | null {
     project: () => {
       const lib = loadAutoLibrary(game);
       const entry = reopen === null ? null : (lib.entries.find((e) => e.name === reopen) ?? null);
-      const waypoints = entry ? readWaypoints(entry.waypoints) : undefined;
+      const waypoints = entry ? mergeWaypoints(readWaypoints(entry.waypoints), lib, entry, readWaypoints) : undefined;
       const autos: Record<string, string> = {};
       for (const e of lib.entries) autos[e.name] = e.auto;
       if (entry) for (const e of lib.entries) own.add(e.name);
@@ -120,4 +121,35 @@ function freeAutoName(lib: GameAutoLibrary, base: string): string {
   let i = 2;
   while (names.has(`${base}-${i}`)) i += 1;
   return `${base}-${i}`;
+}
+
+interface WaypointsFile {
+  waypoints?: Record<string, unknown>;
+  [k: string]: unknown;
+}
+
+/**
+ * ONE WAYPOINTS FILE FOR THE WHOLE LIBRARY. `zenith-host/1` carries one waypoints file, and each
+ * library auto keeps its own, so sending only the opened auto's made every other auto in Zenith's
+ * picker fail with "No waypoint named start". The opened auto's file is the base and wins every
+ * name; the other autos' waypoints fill in the names it lacks, newest auto first. Play is
+ * unaffected: `load.ts` inlines each auto against its OWN waypoints.
+ */
+function mergeWaypoints(
+  base: WaypointsFile | undefined,
+  lib: GameAutoLibrary,
+  opened: { id: string },
+  read: (text: string | undefined) => WaypointsFile | undefined,
+): WaypointsFile | undefined {
+  const merged: Record<string, unknown> = { ...(base?.waypoints ?? {}) };
+  let template: WaypointsFile | undefined = base;
+  for (const e of lib.entries) {
+    if (e.id === opened.id) continue;
+    const w = read(e.waypoints);
+    if (!w?.waypoints || typeof w.waypoints !== 'object') continue;
+    template ??= w;
+    for (const [name, point] of Object.entries(w.waypoints)) if (!(name in merged)) merged[name] = point;
+  }
+  if (!template) return undefined;
+  return { ...template, waypoints: merged };
 }
