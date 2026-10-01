@@ -501,17 +501,64 @@ export function renderChecks(check: Check): void {
    * below has always walked all of `src/` — this is the same statement about the other chunk.
    */
   const threeRx = /from\s+['"]three(\/[^'"]*)?['"]|import\(\s*['"]three(\/[^'"]*)?['"]\s*\)/;
-  const isSceneFile = (p: string): boolean => p.startsWith(SCENE_DIR + sep) || p.startsWith(SCENE_DIR + '/');
+  /**
+   * TWO LAZY ZONES may import three.js (`docs/robot-import-plan.md` §4): this game's `scene/` and
+   * the robot importer's `src/robotImport/engine/`. Each is reached only by a dynamic `import()`
+   * — the scene's below, the engine's in the block after this one.
+   */
+  const ENGINE_DIR = join(root, 'src', 'robotImport', 'engine');
+  const inDir = (p: string, dir: string): boolean => p.startsWith(dir + sep) || p.startsWith(dir + '/');
+  const isSceneFile = (p: string): boolean => inDir(p, SCENE_DIR);
   const threeOutside: string[] = [];
   const threeInside: string[] = [];
+  const threeInEngine: string[] = [];
   for (const p of walkTs(join(root, 'src'))) {
     codeLines(p).forEach((line, i) => {
       if (!threeRx.test(line)) return;
-      (isSceneFile(p) ? threeInside : threeOutside).push(`${relPosix(p)}:${i + 1}`);
+      (isSceneFile(p) ? threeInside : inDir(p, ENGINE_DIR) ? threeInEngine : threeOutside).push(`${relPosix(p)}:${i + 1}`);
     });
   }
   check('every scene/ render file that uses three.js actually imports it (else the next check is vacuous)', threeInside.length > 0);
-  check("'three' (bare or a subpath) is imported ONLY by files under scene/, across all of src/", threeOutside.length === 0, threeOutside.join(', '));
+  check('the robot importer engine imports three.js too (else its boundary checks are vacuous)', threeInEngine.length > 0);
+  check(
+    "'three' (bare or a subpath) is imported ONLY under scene/ and src/robotImport/engine/, across all of src/",
+    threeOutside.length === 0,
+    threeOutside.join(', '),
+  );
+
+  // ---- the importer engine is reached ONLY through engineLoader.ts's one dynamic import ----
+  /**
+   * Same two rules the scene keeps, for the same reason: a STATIC import of anything under
+   * `src/robotImport/engine/` from outside it would pull three.js and the loaders into whatever
+   * chunk that file lives in (the main chunk, for the editor), and a SECOND dynamic specifier would
+   * split the engine into facades `bundleaudit` cannot route to `importer`. Type-only imports are
+   * erased by the compiler and are fine.
+   */
+  {
+    const importRx = /(?:^|[^\w.])(?:import|export)\s+(type\s+)?[^'"]*?from\s+['"]([^'"]+)['"]|import\(\s*['"]([^'"]+)['"]\s*\)/g;
+    const staticEngine: string[] = [];
+    const dynamicEngine: string[] = [];
+    for (const p of walkTs(join(root, 'src'))) {
+      if (inDir(p, ENGINE_DIR)) continue;
+      const src = codeLines(p).join('\n');
+      for (const m of src.matchAll(importRx)) {
+        const spec = m[2] ?? m[3];
+        if (!spec || !spec.startsWith('.')) continue;
+        const target = join(dirname(p), spec);
+        if (!inDir(target, ENGINE_DIR) && target !== ENGINE_DIR) continue;
+        const line = src.slice(0, m.index).split('\n').length;
+        if (m[3]) dynamicEngine.push(`${relPosix(p)}:${line} ${spec}`);
+        else if (!m[1]) staticEngine.push(`${relPosix(p)}:${line}`);
+      }
+    }
+    check('nothing outside src/robotImport/engine/ imports it STATICALLY', staticEngine.length === 0, staticEngine.join(', '));
+    check(
+      "every dynamic import of the engine is engineLoader.ts's one './engine/importerEngine'",
+      dynamicEngine.length > 0 &&
+        dynamicEngine.every((l) => l.startsWith('src/robotImport/engineLoader.ts:') && l.endsWith(' ./engine/importerEngine')),
+      dynamicEngine.join(', '),
+    );
+  }
 
   // ---- nothing outside index.ts imports from ./scene, and index.ts only dynamically ------
   const sceneImportRx = /from\s+['"](\.\/)?scene(\/[^'"]*)?['"]|import\(\s*['"]\.\/scene[^'"]*['"]\s*\)/;
