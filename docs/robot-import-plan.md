@@ -110,7 +110,12 @@ about the origin if the AABB exceeds 18 in, validate `id` against `/^[0-9a-f]{16
 wheels/bands/mech into range. Anything unrecoverable returns `undefined` (the robot plays as its
 parametric fallback). **Idempotent**: `coerce(coerce(x))` deep-equals `coerce(x)`.
 
-### 3.2 The library record (device only, IndexedDB `dsim-robots`, registered in `storageKeys.ts`)
+### 3.2 The library record (device only, IndexedDB `decodesim.robots`, registered in `storageKeys.ts`)
+
+The database is named `decodesim.robots` (`ROBOT_LIBRARY_DB`), not `dsim-robots`: the storage
+registry's checks require the `decodesim.` prefix and forbid that literal anywhere else, which is
+what keeps the privacy page's table complete. `mesh` is in the stored-mesh frame and `top` in the
+top-image frame, both defined in `docs/area/robot-import.md`.
 
 ```ts
 interface LibraryRobot {

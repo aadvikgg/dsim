@@ -29131,5 +29131,325 @@ const dumperSetup = (): RobotSetup => {
   );
 }
 
+/**
+ * ROBOT IMPORT, the importer's DOM-free half (`docs/robot-import-plan.md`, lane 3;
+ * `docs/area/robot-import.md`): the drivetrain catalogue and its mapping onto the sim's 104 mm
+ * wheel, the measuring (hull, reduction, wheels, bands, units, up axis, handedness), the
+ * descriptor's contract shape, the frame constants, and the share file's byte-level GLB edit.
+ * The three.js half is proven in a browser by `scripts/robot-import/harness/`.
+ */
+{
+  const drive = await import('../src/robotImport/drive');
+  const geo = await import('../src/robotImport/geometry');
+  const share = await import('../src/robotImport/shareFile');
+  const rtypes = await import('../src/robotImport/types');
+  const synth = await import('./robot-import/synthRobot');
+  const { driveParams: dp, pushForce: pf, massLimits: ml } = await import('../src/sim/drivetrain');
+  const near = (a: number, b: number, eps = 1e-9): boolean => Math.abs(a - b) <= eps;
+  const Q = 1 / 64;
+  const onGrid = (v: number): boolean => Number.isInteger(v / Q);
+
+  // ---- drive.ts: the catalogue and the mapping -------------------------------------------
+  check(
+    'robot import: goBILDA 19.2:1 direct on a 104 mm wheel is 312 sim rpm',
+    drive.equivalentDriveRpm(drive.motorFreeRpm({ kind: 'gobilda', ratio: '19.2' }), 1, drive.wheelDiameterMm({ kind: 'catalogue', id: 'gobilda-gripforce-104' })) === 312,
+  );
+  {
+    // goBILDA publishes 188:1 as 30 rpm where 6000 ÷ 188.61 is 31.8; every other listing is within 2 %
+    const bad = Object.entries(drive.GOBILDA_RATIOS).filter(([k, r]) => Math.abs(6000 / r.ratio - r.freeRpm) / r.freeRpm > (k === '188' ? 0.07 : 0.02));
+    check('robot import: every goBILDA listed free rpm agrees with 6000 ÷ its exact ratio (2 %; 188:1 is listed rounded)', bad.length === 0, bad.map(([k]) => k).join(', '));
+  }
+  check(
+    'robot import: UltraPlanetary uses the ACTUAL ratios (84:29, 76:21, 68:13), not 3/4/5',
+    near(drive.ULTRAPLANETARY[3], 84 / 29) && near(drive.ULTRAPLANETARY[4], 76 / 21) && near(drive.ULTRAPLANETARY[5], 68 / 13) &&
+      near(drive.motorFreeRpm({ kind: 'revHdHex', cartridges: [4, 5] }), 6000 / ((76 / 21) * (68 / 13))),
+  );
+  check(
+    'robot import: Core Hex 125, NeveRest Orbital 20 344, a 96 mm wheel scales by 96/104, a 2:1 belt halves',
+    drive.motorFreeRpm({ kind: 'revCoreHex' }) === 125 &&
+      drive.motorFreeRpm({ kind: 'neverest', model: 'orbital20' }) === 344 &&
+      near(drive.equivalentDriveRpm(435, 1, 96), (435 * 96) / 104) &&
+      near(drive.equivalentDriveRpm(312, 2, 104), 156),
+  );
+  {
+    const spec = { ...DEFAULT_SPEC, drivetrain: 'mecanum' as const, driveRpm: 312, massLb: 30 };
+    const ro = drive.driveReadout(spec);
+    check(
+      'robot import: the readout IS driveParams / pushForce of the spec (sim truth, not a second model)',
+      ro.topSpeedInS === dp(spec).maxSpeed && ro.accelInS2 === dp(spec).accel && near(ro.pushLbf, pf(spec) / 386.0886) && ro.checks.length === 0,
+    );
+    const hot = drive.driveReadout(spec, { driveRpm: 1620, massLb: 12 });
+    const floor = ml('mecanum', spec.flywheelInertia).min;
+    check(
+      'robot import: rpm and weight outside the sim are CLAMPED and SAID (rpm-high, mass-low)',
+      hot.driveRpm === 600 && hot.massLb === floor && hot.checks.some((c) => c.code === 'rpm-high') && hot.checks.some((c) => c.code === 'mass-low'),
+      `${hot.driveRpm} ${hot.massLb} ${hot.checks.map((c) => c.code)}`,
+    );
+    const bf = drive.driveReadout({ ...spec, drivetrain: 'butterfly', massLb: 30 }, { driveRpm: 312, tankRpm: 900 });
+    check('robot import: a butterfly traction set is clamped to its own envelope', bf.tankRpm === 560 && bf.checks.some((c) => c.code === 'tank-rpm-clamped'));
+    const f = drive.importedDriveFields(spec, { drivetrain: 'tank', motor: { kind: 'gobilda', ratio: '13.7' }, externalRatio: 1, wheel: { kind: 'catalogue', id: 'gobilda-mecanum-96' }, massLb: 33 }, { length: 19, width: 14.5 });
+    check('robot import: the parametric fields carry the clamped gearing and a legal box', f.drivetrain === 'tank' && near(f.driveRpm, Math.round(((435 * 96) / 104) * 100) / 100) && f.massLb === 33 && f.length === 18 && f.width === 14.5);
+  }
+
+  // ---- geometry.ts: hull and reduction ----------------------------------------------
+  {
+    const sq = geo.convexHull([{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 2 }, { x: 0, y: 2 }, { x: 1, y: 1 }, { x: 1, y: 0 }, { x: 0.5, y: 0.5 }]);
+    check('robot import: hull drops interior and collinear points, CCW, starts at the lowest x', sq.length === 4 && geo.polygonArea(sq) === 4 && sq[0].x === 0 && sq[0].y === 0);
+    const circle = Array.from({ length: 64 }, (_, k) => ({ x: 9 * Math.cos((2 * Math.PI * k) / 64), y: 9 * Math.sin((2 * Math.PI * k) / 64) }));
+    const r = geo.reduceHull(geo.convexHull(circle), 16);
+    // the largest distance from any input vertex to the reduced polygon's boundary, measured here
+    let worst = 0;
+    for (const p of circle) {
+      let d = Infinity;
+      for (let i = 0; i < r.hull.length; i++) {
+        const a = r.hull[i];
+        const b = r.hull[(i + 1) % r.hull.length];
+        const t = Math.max(0, Math.min(1, ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / ((b.x - a.x) ** 2 + (b.y - a.y) ** 2)));
+        d = Math.min(d, Math.hypot(a.x + t * (b.x - a.x) - p.x, a.y + t * (b.y - a.y) - p.y));
+      }
+      worst = Math.max(worst, d);
+    }
+    check(
+      'robot import: a 64-gon reduces to ≤ 16 vertices, an inner approximation, and REPORTS its measured deviation',
+      r.hull.length <= 16 && r.hull.every((p) => circle.some((c) => c.x === p.x && c.y === p.y)) && near(r.deviation, worst, 1e-6),
+      `dev ${r.deviation.toFixed(4)} worst ${worst.toFixed(4)}`,
+    );
+    check('robot import: the reduction deviation of a 16-gon cut of a 9-in circle is under r(1 − cos π/16)', r.deviation <= 9 * (1 - Math.cos(Math.PI / 16)) + 1e-6, r.deviation.toFixed(4));
+    const fin = geo.finishHull(circle, 16);
+    check(
+      'robot import: a finished hull is on the 1/64 grid, convex CCW, and re-quantising it changes nothing',
+      fin.hull.every((p) => onGrid(p.x) && onGrid(p.y)) && geo.polygonArea(fin.hull) > 0 && JSON.stringify(geo.quantiseHull(fin.hull)) === JSON.stringify(fin.hull),
+    );
+  }
+
+  // ---- wheels -----------------------------------------------------------------------
+  {
+    // three points within the 1-in link of each other: one wheel's contact patch
+    const patch = (cx: number, cy: number): number[] => [cx - 0.3, cy - 0.4, cx + 0.3, cy - 0.4, cx, cy + 0.4];
+    const four = [...patch(6, 6), ...patch(6, -6), ...patch(-6, 6), ...patch(-6, -6)];
+    const d4 = geo.detectWheels(four);
+    check(
+      'robot import: four contact patches → FL, FR, BL, BR in that order',
+      !!d4.wheels && d4.wheels[0].x > 0 && d4.wheels[0].y > 0 && d4.wheels[1].x > 0 && d4.wheels[1].y < 0 && d4.wheels[2].x < 0 && d4.wheels[2].y > 0 && d4.wheels[3].x < 0 && d4.wheels[3].y < 0,
+      JSON.stringify(d4.wheels),
+    );
+    const six = [...four, ...patch(0, 6), ...patch(0, -6)];
+    const d6 = geo.detectWheels(six);
+    check(
+      'robot import: a 6-wheel tank keeps the four CORNER wheels and says so',
+      !!d6.wheels && d6.wheels.every((w) => Math.abs(w.x) > 5) && /corner/.test(d6.note),
+      d6.note,
+    );
+    const three = [...patch(6, 6), ...patch(6, -6), ...patch(-6, 0)];
+    const d3 = geo.detectWheels(three);
+    check('robot import: three contacts fail with a reason, not a guess', d3.wheels === null && /3 wheels/.test(d3.note), d3.note);
+    // an intake roller lying on the floor across the front: one long contact, left out
+    const roller = [9, -6, 9, 6];
+    const dr = geo.detectWheels([...four, ...roller], [12, 13]);
+    check('robot import: a long floor contact (an intake) is not a wheel', !!dr.wheels && dr.wheels.every((w) => Math.abs(w.x) === 6) && /long floor contact/.test(dr.note), dr.note);
+    // one wheel's contact line is two cap vertices a wheel-width apart, joined by a mesh EDGE
+    const capPairs = [6, 5.2, 6, 6.8, 6, -5.2, 6, -6.8, -6, 5.2, -6, 6.8, -6, -5.2, -6, -6.8];
+    const de = geo.detectWheels(capPairs, [0, 1, 2, 3, 4, 5, 6, 7]);
+    const unjoined = geo.detectWheels(capPairs);
+    check(
+      'robot import: a wheel’s two contact ends joined by a mesh edge are ONE wheel (without the edge, two)',
+      !!de.wheels && de.contacts.length === 4 && unjoined.contacts.length === 8,
+      de.note,
+    );
+    const reversed: number[] = [];
+    for (let i = four.length - 2; i >= 0; i -= 2) reversed.push(four[i], four[i + 1]);
+    const dd = geo.detectWheels(reversed);
+    check('robot import: wheel detection does not depend on point order', JSON.stringify(dd.wheels) === JSON.stringify(d4.wheels));
+  }
+
+  // ---- units, up axis, handedness, on the synthetic robot in every file frame ----------
+  {
+    const ID = '0123456789abcdef';
+    type Fmt = import('../src/robotImport/types').ModelFormat;
+    const frames: [string, Fmt, (v: [number, number, number]) => [number, number, number], string, string][] = [
+      ['glTF m Y-up', 'glb', synth.FRAMES.gltf, 'm', '+y'],
+      ['STL mm Z-up', 'stl', synth.FRAMES.cadMm, 'mm', '+z'],
+      ['PLY cm Z-up', 'ply', synth.FRAMES.cadCm, 'cm', '+z'],
+      ['OBJ in Y-up (format default +Z)', 'obj', synth.FRAMES.yUpIn, 'in', '+y'],
+    ];
+    const descriptors: string[] = [];
+    for (const [label, fmt, map, unit, up] of frames) {
+      const parts = synth.synthParts(synth.synthRobot(), map);
+      const { measurement: m } = geo.measureParts(parts, geo.defaultImportSetup(), { format: fmt });
+      const d = geo.buildDescriptor({ id: ID, measurement: m });
+      descriptors.push(JSON.stringify(d));
+      const ys = d.hull.map((p) => p.y);
+      check(
+        `robot import [${label}]: units ${unit}, up ${up}, 18 × 14.5 × 15 in`,
+        m.units === unit && m.up === up && near(m.size.length, 18, 1e-3) && near(m.size.width, 14.5, 1e-3) && near(m.size.height, 15, 1e-3),
+        `${m.units} ${m.up} ${m.size.length.toFixed(3)} ${m.size.width.toFixed(3)} ${m.size.height.toFixed(3)}`,
+      );
+      check(
+        `robot import [${label}]: NOT MIRRORED — the left-side flag is at +y 7.5, the right rail at −7`,
+        near(Math.max(...ys), 7.5) && near(Math.min(...ys), -7),
+        JSON.stringify(d.hull),
+      );
+      check(
+        `robot import [${label}]: wheels at (±5.5, ±5.5) about the wheelbase centre`,
+        JSON.stringify(d.wheels) === JSON.stringify([{ x: 5.5, y: 5.5 }, { x: 5.5, y: -5.5 }, { x: -5.5, y: 5.5 }, { x: -5.5, y: -5.5 }]),
+        JSON.stringify(d.wheels),
+      );
+    }
+    check('robot import: all four file frames give the same hull and wheels', new Set(descriptors.map((s) => JSON.stringify({ h: JSON.parse(s).hull, w: JSON.parse(s).wheels }))).size === 1);
+
+    // every one of the six "up" orientations of a Z-up mm file is found from the geometry
+    const misses: string[] = [];
+    for (const U of rtypes.UP_AXES) {
+      const R = geo.orientation(U, 0);
+      const map = (v: [number, number, number]): [number, number, number] => [0, 1, 2].map((k) => (R[0][k] * v[0] + R[1][k] * v[1] + R[2][k] * v[2]) * 25.4) as [number, number, number];
+      for (const six of [false, true]) {
+        const { measurement: m } = geo.measureParts(synth.synthParts(synth.synthRobot({ sixWheel: six }), map), geo.defaultImportSetup(), { format: 'stl' });
+        if (m.up !== U || m.wheelSource !== 'detected') misses.push(`${U}${six ? ' 6w' : ''} → ${m.up}`);
+      }
+    }
+    check('robot import: the up axis is found in all six orientations, 4- and 6-wheel', misses.length === 0, misses.join(', '));
+
+    check(
+      'robot import: units from the largest extent — 457.2 → mm, 0.4572 → m, 45.72 → cm, 18 → in',
+      geo.detectUnits(457.2, null).unit === 'mm' && geo.detectUnits(0.4572, null).unit === 'm' && geo.detectUnits(45.72, null).unit === 'cm' && geo.detectUnits(18, null).unit === 'in',
+    );
+    {
+      // a millimetre file the player forced to inches: oversize, and the hint names mm
+      const parts = synth.synthParts(synth.synthRobot(), synth.FRAMES.cadMm);
+      const { measurement: m } = geo.measureParts(parts, { ...geo.defaultImportSetup(), units: 'in' }, { format: 'stl' });
+      const d = geo.buildDescriptor({ id: ID, measurement: m });
+      const b = geo.bbox(d.hull);
+      check(
+        'robot import: a mm file read as inches is blocked as oversize, with a units hint that names mm',
+        m.checks.some((c) => c.code === 'oversize' && c.level === 'block') && m.checks.some((c) => c.code === 'units-suspect' && /set Units to mm/.test(c.message)),
+        m.checks.map((c) => c.code).join(','),
+      );
+      check('robot import: even then the descriptor is legal (scaled into 18 × 18, heights clamped)', b.maxX - b.minX <= 18 && b.maxY - b.minY <= 18 && d.heightIn <= 18);
+    }
+  }
+
+  // ---- the descriptor's contract shape ------------------------------------------------
+  {
+    const parts = synth.synthParts(synth.synthRobot(), synth.FRAMES.cadMm);
+    const run = (): ReturnType<typeof geo.buildDescriptor> => {
+      const { measurement } = geo.measureParts(parts, geo.defaultImportSetup(), { format: 'step', fileUnit: 'mm' });
+      return geo.buildDescriptor({ id: '0123456789abcdef', measurement, mech: { intakes: [{ edge: 'front', from: 5.25, to: -4.75 }], shooter: { x: -1, y: 0.25, z: 14 } } });
+    };
+    const d = run();
+    const nums: number[] = [];
+    const walk = (v: unknown): void => {
+      if (typeof v === 'number') nums.push(v);
+      else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+    };
+    walk({ hull: d.hull, wheels: d.wheels, bands: d.bands, mech: d.mech, heightIn: d.heightIn });
+    const b = geo.bbox(d.hull);
+    check(
+      'robot import: descriptor v1, 16-hex id, CCW hull of 3..16 inside 18 × 18, height (0, 18]',
+      d.v === 1 && /^[0-9a-f]{16}$/.test(d.id) && d.hull.length >= 3 && d.hull.length <= 16 && geo.polygonArea(d.hull) > 0 && b.maxX - b.minX <= 18 && b.maxY - b.minY <= 18 && d.heightIn > 0 && d.heightIn <= 18,
+    );
+    check('robot import: every descriptor number is a multiple of 1/64 in', nums.every(onGrid), nums.filter((n) => !onGrid(n)).join(','));
+    check('robot import: every wheel is inside the hull', (d.wheels ?? []).every((w) => geo.insetDepth(w, d.hull) >= 0));
+    check(
+      'robot import: ≤ 3 bands, z0 < z1 inside [0, height], ≤ 12 vertices each, the tower band narrower than the base',
+      !!d.bands && d.bands.length >= 2 && d.bands.length <= 3 && d.bands.every((x) => x.z0 < x.z1 && x.z0 >= 0 && x.z1 <= d.heightIn && x.hull.length >= 3 && x.hull.length <= 12) &&
+        Math.abs(geo.polygonArea(d.bands[d.bands.length - 1].hull)) < Math.abs(geo.polygonArea(d.bands[0].hull)) / 2,
+      JSON.stringify(d.bands?.map((x) => [x.z0, x.z1, x.hull.length])),
+    );
+    check(
+      'robot import: mechanism spans shift into robot-local and sort (from < to)',
+      !!d.mech?.intakes && d.mech.intakes[0].from < d.mech.intakes[0].to && !!d.mech.shooter && d.mech.shooter.x === 0 && d.mech.shooter.y === 0.5,
+      JSON.stringify(d.mech),
+    );
+    check('robot import: the descriptor is ≤ 2 KB of JSON and deterministic', JSON.stringify(d).length <= 2048 && JSON.stringify(run()) === JSON.stringify(d), String(JSON.stringify(d).length));
+  }
+
+  // ---- frames --------------------------------------------------------------------------
+  {
+    const M = rtypes.STORED_MESH_TO_ROBOT;
+    const N = rtypes.ROBOT_TO_STORED_MESH;
+    const app = (m: readonly number[], v: number[]): number[] => [0, 1, 2].map((r) => m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r]);
+    const k = 1 / 0.0254;
+    check(
+      'robot import: stored GLB → robot: glTF +Z (front) is +x, +X is +y (left), +Y is +z (up), metres → inches',
+      JSON.stringify(app(M, [0, 0, 1]).map((v) => v / k)) === '[1,0,0]' && JSON.stringify(app(M, [1, 0, 0]).map((v) => v / k)) === '[0,1,0]' && JSON.stringify(app(M, [0, 1, 0]).map((v) => v / k)) === '[0,0,1]',
+    );
+    const rt = app(M, app(N, [3, -2, 7]));
+    check('robot import: the two stored-mesh matrices are inverses', rt.every((v, i) => near(v, [3, -2, 7][i], 1e-9)));
+    const f = geo.topImageFrame([{ x: -8, y: -7 }, { x: 10, y: -7 }, { x: 10, y: 7.5 }, { x: -8, y: 7.5 }]);
+    const front = geo.robotToTopPixel({ x: 9, y: f.cy }, f);
+    const left = geo.robotToTopPixel({ x: f.cx, y: 7 }, f);
+    const back = geo.topPixelToRobot(front.u, front.v, f);
+    check(
+      'robot import: top image — front is image UP, left is image LEFT, side = box + 1 in, and the mapping inverts',
+      front.v < f.px / 2 && near(front.u, f.px / 2) && left.u < f.px / 2 && near(f.sideIn, 19) && near(back.x, 9, 1e-9) && near(back.y, f.cy, 1e-9),
+    );
+  }
+
+  // ---- shareFile.ts: byte-level GLB edit ------------------------------------------------
+  {
+    const bin = new Uint8Array([1, 2, 3, 4, 5, 6, 7]);
+    const glb = share.buildGlb({ asset: { version: '2.0', extras: { keep: 1 } }, buffers: [{ byteLength: 7 }] }, bin);
+    const setup = geo.defaultImportSetup();
+    const out = share.writeShareFile(glb, { game: 'biobuzz', name: 'Test bot', spec: { ...DEFAULT_SPEC, name: 'Test bot' }, setup });
+    const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    const jl = dv.getUint32(12, true);
+    const binAt = 20 + jl;
+    const r = share.readShareFile(out);
+    const jsonBytes = out.subarray(20, 20 + jl);
+    const close = jsonBytes.lastIndexOf(0x7d); // the JSON's final '}'
+    check(
+      'robot import: share file — header length matches, chunks 4-aligned, JSON padded with spaces, BIN copied byte for byte',
+      dv.getUint32(8, true) === out.byteLength && out.byteLength % 4 === 0 && jl % 4 === 0 && jsonBytes.subarray(close + 1).every((b) => b === 0x20) &&
+        dv.getUint32(binAt + 4, true) === 0x004e4942 && JSON.stringify(Array.from(out.subarray(binAt + 8, binAt + 8 + 7))) === '[1,2,3,4,5,6,7]',
+    );
+    check(
+      'robot import: share file round trip — format, version, game, name, setup survive; other extras kept',
+      r.ok && r.payload.game === 'biobuzz' && r.payload.name === 'Test bot' && JSON.stringify(r.payload.setup) === JSON.stringify(setup) &&
+        (r.json.asset as { extras: { keep: number } }).extras.keep === 1,
+    );
+    const again = share.writeShareFile(out, { game: 'chain', name: 'Renamed', spec: DEFAULT_SPEC, setup });
+    const r2 = share.readShareFile(again);
+    check('robot import: writing a share file twice replaces the block, never stacks it', r2.ok && r2.payload.name === 'Renamed' && again.byteLength < out.byteLength + 64);
+    const errs = [
+      share.readShareFile(glb),
+      share.readShareFile(out.subarray(0, out.byteLength - 8)),
+      share.readShareFile(new Uint8Array(out.byteLength).fill(7)),
+      share.readShareFile(share.writeShareFile(glb, { game: 'decode', name: 'x', spec: DEFAULT_SPEC, setup }).slice(0, 10)),
+    ].map((x) => (x.ok ? 'ok' : x.error));
+    const future = share.buildGlb({ asset: { version: '2.0', extras: { dsim: { format: 'dsim-robot', v: 2, game: 'biobuzz', spec: {}, setup: {}, name: 'x' } } } });
+    const badGame = share.buildGlb({ asset: { version: '2.0', extras: { dsim: { format: 'dsim-robot', v: 1, game: 'pong', spec: {}, setup: {}, name: 'x' } } } });
+    const r3 = share.readShareFile(future);
+    const r4 = share.readShareFile(badGame);
+    check(
+      'robot import: malformed share files are refused with a reason (plain GLB, truncated, not GLB, too short, newer, unknown game)',
+      JSON.stringify(errs) === JSON.stringify(['not-dsim', 'bad-length', 'not-glb', 'too-short']) && !r3.ok && r3.error === 'newer-version' && !r4.ok && r4.error === 'bad-payload',
+      JSON.stringify(errs),
+    );
+  }
+
+  // ---- the boundaries the main chunk relies on --------------------------------------------
+  {
+    const rd = (f: string): string => readFileSync(f, 'utf8').replace(/\r\n/g, '\n').replace(/^\s*(\/\/|\*|\/\*).*$/gm, '');
+    const domFree = ['types.ts', 'geometry.ts', 'drive.ts', 'shareFile.ts'].map((f) => joinPath('src', 'robotImport', f));
+    const offenders = domFree.filter((f) => /\b(document|window|indexedDB|localStorage)\b|from ['"]three/.test(rd(f)));
+    check('robot import: types, geometry, drive and shareFile touch no DOM and no three.js', offenders.length === 0, offenders.join(', '));
+    const lib = rd(joinPath('src', 'robotImport', 'library.ts'));
+    check(
+      'robot import: the library opens IndexedDB under the REGISTERED name, and imports no three.js',
+      /indexedDB\.open\(ROBOT_LIBRARY_DB,/.test(lib) && /from '\.\.\/storageKeys'/.test(lib) && !/from ['"]three/.test(lib),
+    );
+    const opens: string[] = [];
+    const walkIdb = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = joinPath(dir, e.name);
+        if (e.isDirectory()) walkIdb(p);
+        else if (/\.tsx?$/.test(e.name) && /indexedDB\.open\(/.test(rd(p))) opens.push(p);
+      }
+    };
+    walkIdb('src');
+    check('robot import: nothing else in src/ opens an IndexedDB database', opens.length === 1 && opens[0].endsWith(joinPath('robotImport', 'library.ts')), opens.join(', '));
+  }
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

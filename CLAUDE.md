@@ -49,6 +49,7 @@ mostly of the form "the obvious thing is wrong, and here is the measurement that
 | adding a game — `src/games/types.ts`, `index.ts`, `sim.ts`, `src/seasons.ts` | [docs/area/adding-a-game.md](docs/area/adding-a-game.md) | 1.0k |
 | `src/ads/**` · `server/kofi.ts` · `src/legalText.ts` · `src/storageKeys.ts` | [docs/area/monetization.md](docs/area/monetization.md) | 2.2k |
 | `src/sponsor.ts` · `src/ui/Sponsor.tsx` · `electron/**` | [docs/area/sponsor.md](docs/area/sponsor.md) | 0.9k |
+| `src/robotImport/**` | [docs/area/robot-import.md](docs/area/robot-import.md) | 1.9k |
 
 ⚠️ **`src/sim/` is TWO guides.** It is the shared deterministic core (physics.md) *and* it is
 where DECODE's own rules live (decode.md) — they predate the game seam and were deliberately
@@ -56,9 +57,8 @@ not relocated. Editing `src/sim/penalties.ts` or `src/sim/goal.ts` means both.
 
 Also on demand, not in the routing table because they are not keyed to a path:
 `docs/ui-standard.md` (the CSS rules `npm run uiaudit` enforces) · `docs/deploy.md` ·
-`docs/capacity.md` · `docs/netcodeplan.md` · `docs/roadmap.md` (the eight roadmap items and
-their state) · `docs/coordination-board.md` (**retired** — `.coord.retired.json` is in the repo
-root, every `coord` command is a no-op, ignore it) · `docs/handoff-archive.md`.
+`docs/capacity.md` · `docs/netcodeplan.md` · `docs/roadmap.md` (the eight items and their
+state) · `docs/coordination-board.md` (retired, ignore) · `docs/handoff-archive.md`.
 
 **These are links, NOT `@imports`.** A CLAUDE.md `@path` import is loaded eagerly into every
 session, which is the exact cost this split exists to remove. If you find yourself converting
