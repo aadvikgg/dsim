@@ -263,6 +263,36 @@ session and this is not needed by most of them. The `governs:` line above is rea
 - `robotIntersectsRect` (SAT) exists because thin zones can be fully covered by a robot body
   with no corner inside.
 
+## Imported robots (`RobotSpec.imported`, `src/sim/imported.ts`)
+
+Contract: `docs/robot-import-plan.md` §3.1 and §4.
+
+- **Every imported-robot branch runs only when `spec.imported` is present.** Standard robots step
+  byte-identically, and smoke pins it (`IMP_STANDARD_PINS`: `worldHash` plus an FNV of the whole
+  world's JSON, a four-robot contact run in all three games and BIOBUZZ 3D, recorded before the
+  branches existed). Never send a standard robot down a hull path: edge normals taken from corner
+  differences round differently from `rot(…, heading)` and move `step()` for everybody.
+- `coerceImported` is the sanitiser: hull recomputed (monotone chain, CCW), 1/64-in grid, ≤ 16
+  vertices, bounding box ≤ 18 in (uniform scale), origin ≥ 1 in inside the hull (else recentred),
+  idempotent. `coerceSpec` resolves it in step 1, from the RAW input only (absent means a
+  standard robot, never `base`'s import), and sets `length`/`width` from the hull's bounding box
+  before the game's clamps. Those two are the parametric fallback, not the shape: DECODE's sloped
+  intake caps `length` at 15 while the hull stays 18.
+- The shape is `robotHullLocal(spec)` / `robotHullWorld(r)` (convex, CCW).
+  `footprintExtents` / `robotExtents` return the hull's bounding box with NO intake reach (the
+  hull includes the intake); treat them as a bound. `robotCorners` stays the four clockwise
+  corners of that box for every robot, because standard code indexes it and sums over it in order.
+- Collider: Rapier `convexHull`, stated `shoveMass`, centre of mass at the origin, inertia of a
+  uniform lamina in the hull's shape (`chassisInertia`). Turn rate comes from the wheelbase
+  (`importedHalfDiag`): wheels where a standard chassis puts them turn it exactly as fast.
+  `importedWheels` speaks FL, FR, BL, BR; `wheelLocals`/`wheelContacts` speak FL, FR, BR, BL.
+- The wall square-up's flush is the hull edge facing the surface (`importedFlushRel`), not
+  `mod π/2`. Contacts, SAT, start legality and every zone/contact foul read hull vertices and
+  edge normals (`polySatGap`, `polyGap`, `polysOverlap`, `polyFeature`).
+- Artifact solids are the CLOSED hull (`importedSolids`, BIOBUZZ's slot too) until the mechanism
+  lane carves the mouth. BIOBUZZ 2D has no pin round, so a POLLEN pressed into a wall is
+  squeezed into any chassis; smoke pins that an import does exactly what a standard chassis does.
+
 ## Robot spec, builder, and drive feel
 
 - ⚠️ **TOGGLE BUTTONS ARE DEBOUNCED** (`debouncedPress`, `src/sim/robot.ts`; `TOGGLE_DEBOUNCE_S`

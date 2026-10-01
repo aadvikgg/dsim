@@ -468,6 +468,24 @@ import {
   chainStorageMax,
 } from '../src/games/chain/config';
 import { CHAIN_CATALYST_MOUNTS, CHAIN_INTAKE_MOUNTS, CHAIN_TURRET_POSITIONS, MOUNT_ANGLE, RAIL_DIR, catalystMountOf, catalystMountPositions, catalystSwingOf, isSwingMount, swingAxesFor, intakeMountOf, isEdgePos, isTurreted, mountsClash, shooterMountOf, turretLocal, turretRadius } from '../src/games/chain/mounts';
+import { isDeepStrictEqual } from 'node:util';
+import {
+  IMPORT_MAX_EXTENT,
+  IMPORT_ORIGIN_MARGIN,
+  IMPORT_QUANTUM,
+  coerceImported,
+  importedHalfDiag,
+  polyBounds,
+  polyFeature,
+  rotatedPolyBounds,
+} from '../src/sim/imported';
+import { robotHullWorld } from '../src/sim/physics';
+import { robotHullLocal } from '../src/sim/field';
+import { wheelLocals, chassisInertia } from '../src/sim/robot';
+import { placeGroundArtifact } from '../src/sim/world';
+import { bbFootprintGap, bbRobotsContact } from '../src/games/biobuzz/penalties';
+import { bbEvalStart, bbStartBox } from '../src/games/biobuzz/start';
+import type { ImportedRobot } from '../src/types';
 
 // the sim now steps a Rapier physics world (robots) — load the WASM before any
 // step() runs. tsx runs this file as ESM, so top-level await is available.
@@ -29129,6 +29147,629 @@ const dumperSetup = (): RobotSetup => {
     'watch live: an unattended page does not poll /api/live, and catches up when someone is back',
     /const load = \(\): void => \{[\s\S]{0,600}?if \(userIdle\(\)\) return;/.test(wl) && /onUserActive\(load\)/.test(wl),
   );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// IMPORTED ROBOTS — the sim core (`docs/robot-import-plan.md` §3.1, §4)
+// ════════════════════════════════════════════════════════════════════════════
+
+/** a pentagon with a pointed nose: 18 long (−8..10), 16 wide, the nose a vertex at (10, 0) */
+const IMP_NOSE: ImportedRobot = {
+  v: 1,
+  id: '0123456789abcdef',
+  hull: [{ x: -8, y: -8 }, { x: 4, y: -8 }, { x: 10, y: 0 }, { x: 4, y: 8 }, { x: -8, y: 8 }],
+  heightIn: 14,
+};
+/** a diamond — a square turned 45°, 18 × 18 bounding box, every corner of the box empty */
+const IMP_DIAMOND: ImportedRobot = {
+  v: 1,
+  id: 'fedcba9876543210',
+  hull: [{ x: 9, y: 0 }, { x: 0, y: 9 }, { x: -9, y: 0 }, { x: 0, y: -9 }],
+  heightIn: 12,
+};
+
+/** FNV-1a of a string — the exact-bytes digest the standard-robot pins use */
+function impFnv(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/** the scripted driver for the pinned runs: chase a robot, then the one after, then a wall corner */
+function impChase(w: World, i: number, tick: number, quiet = false): RobotCommand {
+  const r = w.robots[i];
+  const n = w.robots.length;
+  const phase = Math.floor(tick / 240) % 3;
+  let target = w.robots[(i + 1 + (phase === 1 ? 1 : 0)) % n].pos;
+  if (phase === 2 && i % 2 === 0) target = { x: (i === 0 ? 1 : -1) * 200, y: (tick % 480 < 240 ? 1 : -1) * 200 };
+  const local = rot({ x: target.x - r.pos.x, y: target.y - r.pos.y }, -r.heading);
+  const ang = datan2(local.y, local.x);
+  const driveY = clamp(local.x / 12, -1, 1);
+  const rotate = clamp(-wrapAngle(ang) * 0.8 + (i === 3 ? 0.3 : 0), -1, 1);
+  return {
+    driveY,
+    driveX: clamp(-local.y / 12, -1, 1),
+    rotate,
+    leftDrive: clamp(driveY - rotate, -1, 1),
+    rightDrive: clamp(driveY + rotate, -1, 1),
+    intake: !quiet && tick % 90 < 45,
+    fire: !quiet && tick % 120 === 60,
+  };
+}
+
+/** a four-robot world of game `g` ('bb3d' = BIOBUZZ with 3D physics), seed 4242, robot-centric
+ * drive, with per-slot spec patches */
+function impWorld(g: GameId | 'bb3d', patches: Partial<RobotSpec>[], seed = 4242): { w: World; step: (w: World, dt: number, c: Map<number, RobotCommand>) => void } {
+  const mod = simModuleFor(g === 'bb3d' ? 'biobuzz' : g);
+  const w = mod.createWorld(
+    'match',
+    seed,
+    patches.map((s, i) => ({
+      id: i,
+      alliance: i % 2 === 0 ? 'blue' : 'red',
+      spec: { ...DEFAULT_SPEC, ...s },
+      assists: { fieldCentric: false, aimAssist: true, autoIntake: false, autoFire: false },
+      startIndex: Math.floor(i / 2),
+    })),
+    undefined,
+    g === 'biobuzz' ? '2d' : g === 'bb3d' ? '3d' : undefined,
+  );
+  return { w, step: (ww, dt, c) => mod.step(ww, dt, c) };
+}
+
+/**
+ * THE SCRIPTED STANDARD-ROBOT RUN (plan §4: "a check pins `worldHash` for a scripted
+ * standard-robot run before and after"). Four standard robots — mecanum, a 42 lb 300 rpm tank, a
+ * 16-wide swerve, a 13 × 14 x-drive — chasing each other into contact and into the walls, in AUTO
+ * and in TELEOP, in all three games and in BIOBUZZ 3D. Every 300 ticks: `worldHash` and an FNV of
+ * the WHOLE world's JSON, so a single bit anywhere moves the pin.
+ *
+ * The expected strings were recorded on the tree BEFORE any imported-robot branch existed
+ * (feat/robot-import 350be69d). They are the proof that every one of those branches is
+ * unreachable for a standard robot. If a later, deliberate sim change moves them, re-record them
+ * in the same change and say so — never to make an import change pass.
+ */
+const IMP_STANDARD_PINS: Record<string, string> = {
+  'decode auto': 'rr=2324 1006033633:1372421968 1849460967:3738870646 2634382012:359690952',
+  'decode teleop': 'rr=2360 946394307:2501367006 225761869:605743936 493986716:472312443',
+  'chain auto': 'rr=1433 3899381732:727221967 2184232317:3864926550 897801041:2939605261',
+  'chain teleop': 'rr=1433 1362733034:813588600 2503125743:2162952480 406299361:2823494343',
+  'biobuzz auto': 'rr=968 1984371732:49567932 4205179930:3782745673 1144607943:1933172749',
+  'biobuzz teleop': 'rr=968 3213868192:1380961708 3246259018:1300608822 3349287379:3315032226',
+  'bb3d auto': 'rr=536 3017453969:3234063733 3359223633:3518342206',
+  'bb3d teleop': 'rr=536 1542058217:1431457225 162820593:121201075',
+};
+const IMP_STANDARD_SPECS: Partial<RobotSpec>[] = [
+  { drivetrain: 'mecanum' },
+  { drivetrain: 'tank', massLb: 42, driveRpm: 300 },
+  { drivetrain: 'swerve', width: 16 },
+  { drivetrain: 'xdrive', length: 13, width: 14 },
+];
+function impStandardRun(g: GameId | 'bb3d', phase: 'auto' | 'teleop'): string {
+  const { w, step: st } = impWorld(g, IMP_STANDARD_SPECS);
+  w.match.phase = phase;
+  w.match.phaseTimeLeft = phase === 'auto' ? 30 : 25;
+  const out: string[] = [];
+  let rr = 0;
+  for (let t = 0; t < (g === 'bb3d' ? 600 : 900); t++) {
+    const cmds = new Map<number, RobotCommand>();
+    for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, impChase(w, i, t));
+    st(w, 1 / 60, cmds);
+    rr += w.rrContacts.length;
+    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(w))}`);
+  }
+  return `rr=${rr} ${out.join(' ')}`;
+}
+
+function impStandardCheck(g: GameId | 'bb3d'): void {
+  for (const phase of ['auto', 'teleop'] as const) {
+    const key = `${g} ${phase}`;
+    const got = impStandardRun(g, phase);
+    check(`imported robots: STANDARD robots step byte-identically — ${key} (worldHash + whole-world JSON, ${g === 'bb3d' ? 600 : 900} ticks)`, got === IMP_STANDARD_PINS[key], got);
+  }
+}
+// one block per game, so the sharder can spread them
+{
+  impStandardCheck('decode');
+}
+{
+  impStandardCheck('chain');
+}
+{
+  impStandardCheck('biobuzz');
+}
+{
+  await initPhysics3d();
+  impStandardCheck('bb3d');
+}
+
+/** every invariant a coerced descriptor promises (plan §3.1), as a list of what is broken */
+function impBroken(c: ImportedRobot): string[] {
+  const bad: string[] = [];
+  const onGrid = (v: number) => Number.isFinite(v) && Math.round(v / IMPORT_QUANTUM) * IMPORT_QUANTUM === v && !Object.is(v, -0);
+  const h = c.hull;
+  if (h.length < 3 || h.length > 16) bad.push(`hull has ${h.length} vertices`);
+  for (let i = 0; i < h.length; i++) {
+    const a = h[i];
+    const b = h[(i + 1) % h.length];
+    const d = h[(i + 2) % h.length];
+    if ((b.x - a.x) * (d.y - a.y) - (b.y - a.y) * (d.x - a.x) <= 0) bad.push(`hull not strictly convex CCW at ${i}`);
+    if (!onGrid(a.x) || !onGrid(a.y)) bad.push(`hull vertex ${i} off the 1/64 grid`);
+  }
+  const b = polyBounds(h);
+  if (b.maxX - b.minX > IMPORT_MAX_EXTENT || b.maxY - b.minY > IMPORT_MAX_EXTENT) bad.push('bounding box over 18 in');
+  if (polyFeature(h, { x: 0, y: 0 }).depth < IMPORT_ORIGIN_MARGIN) bad.push('origin not inside by the margin');
+  if (!(c.heightIn >= 1 && c.heightIn <= 18) || !onGrid(c.heightIn)) bad.push(`heightIn ${c.heightIn}`);
+  if (!/^[0-9a-f]{16}$/.test(c.id) || c.v !== 1) bad.push('id/v');
+  if (c.wheels) {
+    if (c.wheels.length !== 4) bad.push('wheel count');
+    for (const w of c.wheels) if (polyFeature(h, w).depth < 0 || !onGrid(w.x) || !onGrid(w.y)) bad.push('wheel outside the hull / off grid');
+  }
+  if (c.bands) {
+    if (c.bands.length > 3) bad.push('more than 3 bands');
+    for (let i = 0; i < c.bands.length; i++) {
+      const bd = c.bands[i];
+      if (!(bd.z0 < bd.z1 && bd.z0 >= 0 && bd.z1 <= c.heightIn)) bad.push(`band ${i} z range`);
+      if (i > 0 && c.bands[i - 1].z0 > bd.z0) bad.push('bands not sorted');
+      if (bd.hull.length < 3 || bd.hull.length > 12) bad.push(`band ${i} has ${bd.hull.length} vertices`);
+      for (const p of bd.hull) if (polyFeature(h, p).depth < 0) bad.push(`band ${i} outside the hull`);
+    }
+  }
+  if (c.mech?.intakes) {
+    if (c.mech.intakes.length > 4) bad.push('more than 4 intakes');
+    for (const it of c.mech.intakes) if (!(it.from < it.to)) bad.push('intake from >= to');
+  }
+  if (JSON.stringify(c).length > 2048) bad.push(`descriptor is ${JSON.stringify(c).length} bytes`);
+  return bad;
+}
+
+/**
+ * `coerceImported` over a HOSTILE MATRIX: every input either comes back undefined, or comes back
+ * satisfying every invariant AND as a fixed point — `coerce(coerce(x))` deep-equals `coerce(x)`,
+ * which is what lets it run at settings load, server ingress, `createWorld` and replay re-sim.
+ */
+{
+  const circle = (n: number, r: number, cx = 0, cy = 0) =>
+    Array.from({ length: n }, (_, i) => ({ x: cx + r * dcos((2 * Math.PI * i) / n), y: cy + r * dsin((2 * Math.PI * i) / n) }));
+  const base = IMP_NOSE;
+  const cases: [string, unknown][] = [
+    ['the reference pentagon', base],
+    ['clockwise input', { ...base, hull: [...base.hull].reverse() }],
+    ['duplicate + interior points', { ...base, hull: [...base.hull, ...base.hull, { x: 0, y: 0 }, { x: 1, y: 1 }] }],
+    ['100 vertices on a circle', { ...base, hull: circle(100, 8.7) }],
+    ['NaN / Infinity / strings mixed in', { ...base, hull: [...base.hull, { x: NaN, y: 1 }, { x: Infinity, y: 0 }, { x: '3', y: 2 }, null, 7] }],
+    ['millimetres (25.4×)', { ...base, hull: base.hull.map((p) => ({ x: p.x * 25.4, y: p.y * 25.4 })), heightIn: 14 * 25.4 }],
+    ['slightly oversized (20 wide)', { ...base, hull: [{ x: -9, y: -10 }, { x: 9, y: -10 }, { x: 9, y: 10 }, { x: -9, y: 10 }] }],
+    ['astronomically large', { ...base, hull: base.hull.map((p) => ({ x: p.x * 1e300, y: p.y * 1e300 })) }],
+    ['origin outside the hull (offset 100 in)', { ...base, hull: base.hull.map((p) => ({ x: p.x + 100, y: p.y })) }],
+    ['off-grid noise', { ...base, hull: base.hull.map((p, i) => ({ x: p.x + 0.0031 * i, y: p.y - 0.0017 * i })) }],
+    ['all collinear', { ...base, hull: [{ x: -5, y: 0 }, { x: 0, y: 0 }, { x: 5, y: 0 }] }],
+    ['a 2 × 2 speck', { ...base, hull: [{ x: -1, y: -1 }, { x: 1, y: -1 }, { x: 1, y: 1 }, { x: -1, y: 1 }] }],
+    ['an 18 × 0.5 sliver', { ...base, hull: [{ x: -9, y: -0.25 }, { x: 9, y: -0.25 }, { x: 9, y: 0.25 }, { x: -9, y: 0.25 }] }],
+    ['uppercase id', { ...base, id: '0123456789ABCDEF' }],
+    ['15-char id', { ...base, id: '0123456789abcde' }],
+    ['numeric id', { ...base, id: 12345 }],
+    ['v 2', { ...base, v: 2 }],
+    ['heightIn NaN', { ...base, heightIn: NaN }],
+    ['heightIn 40', { ...base, heightIn: 40 }],
+    ['heightIn -3', { ...base, heightIn: -3 }],
+    ['wheels outside the hull', { ...base, wheels: [{ x: 30, y: 30 }, { x: 30, y: -30 }, { x: -30, y: 30 }, { x: -30, y: -30 }] }],
+    ['wheels in a scrambled order', { ...base, wheels: [{ x: -5, y: -5 }, { x: 3, y: 5 }, { x: -5, y: 5 }, { x: 3, y: -5 }] }],
+    ['three wheels', { ...base, wheels: [{ x: 3, y: 3 }, { x: 3, y: -3 }, { x: -3, y: 3 }] }],
+    ['a NaN wheel', { ...base, wheels: [{ x: 3, y: 3 }, { x: 3, y: -3 }, { x: -3, y: 3 }, { x: NaN, y: 0 }] }],
+    ['four wheels on one point', { ...base, wheels: [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }] }],
+    ['five bands, unsorted, one inverted, one outside', {
+      ...base,
+      bands: [
+        { z0: 10, z1: 14, hull: circle(30, 3) },
+        { z0: 5, z1: 2, hull: circle(5, 2) },
+        { z0: 0, z1: 6, hull: circle(20, 40) },
+        { z0: 2, z1: 99, hull: circle(8, 4, 2, 0) },
+        { z0: 1, z1: 3, hull: circle(6, 1) },
+      ],
+    }],
+    ['a band with a degenerate hull', { ...base, bands: [{ z0: 0, z1: 5, hull: [{ x: 0, y: 0 }, { x: 1, y: 0 }] }] }],
+    ['mech: far shooter, bad edges, reversed spans, ten intakes', {
+      ...base,
+      mech: {
+        shooter: { x: 500, y: -500, z: 99 },
+        place: { x: 0, y: 0, z: -4 },
+        intakes: [
+          { edge: 'top', from: 0, to: 1 },
+          { edge: 'front', from: 5, to: -5 },
+          ...Array.from({ length: 10 }, (_, i) => ({ edge: 'left', from: -i, to: i + 1 })),
+        ],
+      },
+    }],
+    ['mech with nothing valid', { ...base, mech: { shooter: { x: NaN, y: 0, z: 0 }, intakes: [{ edge: 'front', from: 2, to: 2 }] } }],
+    ['100 000 points', { ...base, hull: circle(100000, 8) }],
+    ['null', null],
+    ['a string', 'imported'],
+    ['an array', [base]],
+    ['hull not an array', { ...base, hull: { x: 1, y: 1 } }],
+  ];
+  let valid = 0;
+  for (const [name, raw] of cases) {
+    const c1 = coerceImported(raw);
+    if (!c1) continue;
+    valid++;
+    const c2 = coerceImported(c1);
+    check(`coerceImported idempotent: ${name}`, isDeepStrictEqual(c1, c2), JSON.stringify(c1).slice(0, 160));
+    const bad = impBroken(c1);
+    check(`coerceImported invariants hold: ${name}`, bad.length === 0, bad.join('; '));
+  }
+  check('coerceImported: the hostile matrix exercised both outcomes', valid >= 15 && valid < cases.length, `${valid} of ${cases.length} survived`);
+  const ref = coerceImported(base)!;
+  const want = (name: string) => coerceImported(cases.find(([n]) => n === name)![1]);
+  check('coerceImported: the hull is recomputed — CW input and repeated/interior points give the reference hull', isDeepStrictEqual(want('clockwise input'), ref) && isDeepStrictEqual(want('duplicate + interior points'), ref));
+  check('coerceImported: non-finite points are dropped, not propagated', isDeepStrictEqual(want('NaN / Infinity / strings mixed in'), ref));
+  check('coerceImported: 100 vertices are cut to 16', want('100 vertices on a circle')!.hull.length === 16);
+  {
+    const mm = want('millimetres (25.4×)')!;
+    const b = polyBounds(mm.hull);
+    check('coerceImported: a model in millimetres is scaled uniformly to the 18-in cube (height too)', b.maxX - b.minX <= 18 && b.maxX - b.minX > 17.9 && mm.heightIn < 15, `${b.maxX - b.minX} long, ${mm.heightIn} tall`);
+  }
+  check('coerceImported: an offset hull is recentred on its centroid', polyFeature(want('origin outside the hull (offset 100 in)')!.hull, { x: 0, y: 0 }).depth > 5);
+  for (const n of ['all collinear', 'a 2 × 2 speck', 'an 18 × 0.5 sliver', 'uppercase id', '15-char id', 'numeric id', 'v 2', 'heightIn NaN', 'null', 'a string', 'an array', 'hull not an array']) {
+    check(`coerceImported refuses: ${n}`, want(n) === undefined);
+  }
+  check('coerceImported: heightIn is clamped into [1, 18]', want('heightIn 40')!.heightIn === 18 && want('heightIn -3')!.heightIn === 1);
+  check('coerceImported: wheels outside the hull are walked inside', !!want('wheels outside the hull')!.wheels);
+  check(
+    'coerceImported: wheels are sorted FL, FR, BL, BR',
+    isDeepStrictEqual(want('wheels in a scrambled order')!.wheels, [{ x: 3, y: 5 }, { x: 3, y: -5 }, { x: -5, y: 5 }, { x: -5, y: -5 }]),
+    JSON.stringify(want('wheels in a scrambled order')!.wheels),
+  );
+  check('coerceImported: three wheels, a NaN wheel or no spread drop the wheels', !want('three wheels')!.wheels && !want('a NaN wheel')!.wheels && !want('four wheels on one point')!.wheels);
+  {
+    const bands = want('five bands, unsorted, one inverted, one outside')!.bands ?? [];
+    check('coerceImported: bands — at most 3, the inverted one dropped, sorted by z0', bands.length === 3 && bands[0].z0 <= bands[1].z0 && bands[1].z0 <= bands[2].z0, JSON.stringify(bands.map((b) => [b.z0, b.z1, b.hull.length])));
+  }
+  {
+    const m = want('mech: far shooter, bad edges, reversed spans, ten intakes')!.mech!;
+    check('coerceImported: mech — shooter clamped near the hull, intakes capped at 4 with from < to', m.shooter!.x <= 16 && m.shooter!.y >= -14 && m.shooter!.z <= 24 && m.intakes!.length === 4 && m.intakes![0].edge === 'front' && m.intakes![0].from === -5, JSON.stringify(m));
+  }
+  check('coerceImported: a mech with nothing valid is dropped', want('mech with nothing valid')!.mech === undefined);
+}
+
+/**
+ * `coerceSpec` CARRIES `imported` for every game, through `sanitizePlayer` and `createWorld`, sets
+ * `length`/`width` from the hull's bounding box (then the game's clamps), and stays idempotent.
+ */
+{
+  for (const g of ['decode', 'chain', 'biobuzz'] as GameId[]) {
+    const s = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_NOSE }, DEFAULT_SPEC, g);
+    check(`coerceSpec keeps the import — ${g}`, isDeepStrictEqual(s.imported, coerceImported(IMP_NOSE)));
+    check(`coerceSpec is idempotent with an import — ${g}`, isDeepStrictEqual(coerceSpec(s, DEFAULT_SPEC, g), s));
+    // the hull is 18 × 16; the game's own clamps then apply (DECODE's sloped intake caps length at 15)
+    const lenOk = g === 'decode' ? s.length === 15 : s.length >= 16.5 && s.length <= 18;
+    check(`coerceSpec sizes an import from its hull — ${g}`, lenOk && s.width === 16, `${s.length} × ${s.width}`);
+    const p = sanitizePlayer({ spec: { ...DEFAULT_SPEC, imported: IMP_NOSE } }, g);
+    check(`sanitizePlayer keeps the import — ${g}`, isDeepStrictEqual(p.spec.imported, s.imported));
+    // settings load, through a JSON round trip (localStorage / the account blob)
+    const st = coerceSettings(JSON.parse(JSON.stringify({ game: g, spec: { ...DEFAULT_SPEC, imported: IMP_NOSE } })));
+    check(`settings load keeps the import — ${g}`, isDeepStrictEqual(st.spec.imported, s.imported));
+    const { w } = impWorld(g, [{ imported: IMP_NOSE }, {}]);
+    check(`createWorld keeps the import — ${g}`, isDeepStrictEqual(w.robots[0].spec.imported, s.imported) && w.robots[1].spec.imported === undefined);
+    // absent means a STANDARD robot, never the base's import
+    const back = coerceSpec({ ...DEFAULT_SPEC }, s, g);
+    check(`coerceSpec drops an import the input does not carry, whatever the base had — ${g}`, back.imported === undefined);
+  }
+  {
+    // an in-room `update` that sends a standard spec over an imported one leaves a standard robot
+    const cur = { ...sanitizePlayer({ spec: { ...DEFAULT_SPEC, imported: IMP_NOSE } }, 'decode'), clientId: 'c1' } as LobbyPlayer;
+    const patch = sanitizePlayerPatch(JSON.parse(JSON.stringify({ spec: { ...DEFAULT_SPEC } })), cur, 'decode');
+    const keep = sanitizePlayerPatch(JSON.parse(JSON.stringify({ spec: cur.spec })), cur, 'decode');
+    check('sanitizePlayerPatch: a standard spec over an imported one removes the import; resending the import keeps it', patch.spec?.imported === undefined && isDeepStrictEqual(keep.spec?.imported, cur.spec.imported));
+  }
+  const bad = coerceSpec({ ...DEFAULT_SPEC, imported: { ...IMP_NOSE, id: 'nope' } }, DEFAULT_SPEC, 'decode');
+  check('coerceSpec: an unrecoverable import plays as its parametric fallback', bad.imported === undefined && bad.length === DEFAULT_SPEC.length);
+  const s = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_NOSE }, DEFAULT_SPEC, 'decode');
+  const e = footprintExtents(s);
+  check('footprintExtents of an import is its hull bounding box, no intake reach added', e.front === 10 && e.rear === 8 && e.half === 8, JSON.stringify(e));
+  check('robotHullLocal of an import is its hull; of a standard robot, its footprint rectangle (CCW)', isDeepStrictEqual(robotHullLocal(s), s.imported!.hull) && robotHullLocal(DEFAULT_SPEC).length === 4);
+  const d = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_DIAMOND }, DEFAULT_SPEC, 'chain');
+  // a diamond of side 9√2: J = A·s²/6, so I = m·s²/6 = 27·m
+  check('chassisInertia of an import is its hull lamina about the origin', Math.abs(chassisInertia(10, d) - 270) < 1e-9, `${chassisInertia(10, d)}`);
+}
+
+/**
+ * A POINTED ROBOT MEETS A WALL WITH ITS POINT. Driven nose-first into the audience wall at 30°
+ * off square, the pentagon's nose vertex is the first and deepest thing to touch — where the
+ * bounding box's corner would already be 4 in through the wall — and it then settles with one of
+ * its OWN edges flush (the hull's edge picked for the square-up), not at a rectangle's 90°.
+ */
+{
+  const { w, step: st } = impWorld('decode', [{ imported: IMP_NOSE }]);
+  w.balls.length = 0;
+  w.match.phase = 'teleop';
+  w.match.phaseTimeLeft = 100;
+  const r = w.robots[0];
+  r.pos = { x: 0, y: -50 };
+  r.heading = (-60 * Math.PI) / 180;
+  r.vel = { x: 0, y: 0 };
+  let firstDeepest = -1;
+  let worstHull = Infinity;
+  let worstBox = Infinity;
+  for (let t = 0; t < 240; t++) {
+    st(w, SIM_DT, new Map([[0, cmd({ driveY: 1, leftDrive: 1, rightDrive: 1 })]]));
+    const hull = robotHullWorld(r);
+    let lo = Infinity;
+    let at = -1;
+    hull.forEach((p, i) => {
+      if (p.y < lo) {
+        lo = p.y;
+        at = i;
+      }
+    });
+    worstHull = Math.min(worstHull, lo);
+    worstBox = Math.min(worstBox, ...robotCorners(r).map((c) => c.y));
+    if (firstDeepest < 0 && lo < -FIELD_HALF + 0.5) firstDeepest = at;
+  }
+  const noseIdx = r.spec.imported!.hull.findIndex((p) => p.x === 10 && p.y === 0);
+  check('import vs wall: the NOSE vertex is the first part of the hull to reach the wall', firstDeepest === noseIdx, `vertex ${firstDeepest}, nose ${noseIdx}`);
+  check('import vs wall: the hull never goes through the wall (the collider is the hull)', worstHull > -FIELD_HALF - 0.8, `deepest ${(worstHull + FIELD_HALF).toFixed(2)} in`);
+  check('import vs wall: ...while its bounding box would have been well through it', worstBox < -FIELD_HALF - 2, `box ${(worstBox + FIELD_HALF).toFixed(2)} in`);
+  // flush: some hull edge's outward normal points straight into the wall (−y)
+  const hull = r.spec.imported!.hull;
+  let best = Infinity;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % hull.length];
+    const n = rot({ x: b.y - a.y, y: -(b.x - a.x) }, r.heading);
+    best = Math.min(best, Math.abs(wrapAngle(datan2(n.y, n.x) + Math.PI / 2)));
+  }
+  const rectOff = Math.abs(wrapAngle(r.heading * 4) / 4);
+  check('import vs wall: it settles with one of its OWN edges flush, not at a rectangle angle', best < (3 * Math.PI) / 180 && rectOff > (5 * Math.PI) / 180, `edge off ${((best * 180) / Math.PI).toFixed(2)}°, heading ${((r.heading * 180) / Math.PI).toFixed(1)}°`);
+}
+
+/**
+ * ROBOT-ROBOT CONTACT IS THE HULLS'. Two diamonds whose bounding boxes overlap but whose hulls are
+ * 5.7 in apart record NO `rrContacts` (every zone foul reads them) and the per-game contact tests
+ * agree; nudged until the hulls overlap, all of them do.
+ */
+{
+  const scene = (bx: number, by: number, bSpec: Partial<RobotSpec> = { imported: IMP_DIAMOND }) => {
+    const { w, step: st } = impWorld('decode', [{ imported: IMP_DIAMOND }, bSpec]);
+    w.balls.length = 0;
+    w.match.phase = 'teleop';
+    w.match.phaseTimeLeft = 100;
+    w.robots[0].pos = { x: 0, y: -20 };
+    w.robots[1].pos = { x: bx, y: -20 + by };
+    for (const r of w.robots) {
+      r.heading = 0;
+      r.vel = { x: 0, y: 0 };
+      r.angVel = 0;
+    }
+    const boxesOverlap = polysOverlapBox(w.robots[0], w.robots[1]);
+    st(w, SIM_DT, new Map());
+    return { w, boxesOverlap };
+  };
+  const polysOverlapBox = (a: RobotState, b: RobotState) => {
+    const A = polyBounds(robotCorners(a));
+    const B = polyBounds(robotCorners(b));
+    return A.minX < B.maxX && B.minX < A.maxX && A.minY < B.maxY && B.minY < A.maxY;
+  };
+  const far = scene(13, 13);
+  check('rrContacts: two imports whose BOXES overlap but whose hulls do not record no contact', far.boxesOverlap && far.w.rrContacts.length === 0, `boxes ${far.boxesOverlap}, contacts ${far.w.rrContacts.length}`);
+  check('BIOBUZZ contact + gap read the hulls: no contact, 5.66 in apart', !bbRobotsContact(far.w.robots[0], far.w.robots[1]) && Math.abs(bbFootprintGap(far.w.robots[0], far.w.robots[1]) - 8 / Math.SQRT2) < 0.05, `${bbFootprintGap(far.w.robots[0], far.w.robots[1]).toFixed(3)}`);
+  const near = scene(8.8, 8.8);
+  check('rrContacts: the same two imports with their hulls overlapping do record the contact', near.w.rrContacts.length === 1, `${near.w.rrContacts.length}`);
+  check('BIOBUZZ contact reads the hulls: overlapping hulls are in contact, gap 0', bbRobotsContact(near.w.robots[0], near.w.robots[1]) && bbFootprintGap(near.w.robots[0], near.w.robots[1]) === 0);
+  // a STANDARD robot beside an import: its box against the diamond's empty corner
+  const mixed = scene(16, 16, {});
+  check('rrContacts: a standard robot in the empty corner of an import\'s box is not in contact', mixed.boxesOverlap && mixed.w.rrContacts.length === 0, `boxes ${mixed.boxesOverlap}, contacts ${mixed.w.rrContacts.length}`);
+}
+
+/**
+ * START LEGALITY JUDGES THE HULL — DECODE's G304 (`evalStartPose`), BIOBUZZ's (`bbEvalStart`) and
+ * Chain Reaction's Lab fit (`chainStartExtents`) — and every game spawns an import legally.
+ */
+{
+  const s = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_NOSE }, DEFAULT_SPEC, 'decode');
+  const h45 = 45;
+  const c = dcos(Math.PI / 4);
+  const hb = rotatedPolyBounds(s.imported!.hull, c, c);
+  const boxB = rotatedPolyBounds([{ x: -8, y: -8 }, { x: 10, y: -8 }, { x: 10, y: 8 }, { x: -8, y: 8 }], c, c);
+  // up against the far wall at 45°: the hull clears it by 2 in, the bounding box would be through
+  // it. (Touching is the footprint grown by START_TOUCH_TOL as a square in the ROBOT frame — what
+  // growing the rectangle has always meant — so at 45° it reaches 1.25·√2 = 1.77 in.)
+  const pose = { x: 0, y: FIELD_HALF - hb.maxY - 2, headingDeg: h45 };
+  const ev = evalStartPose(s, pose, 'blue');
+  check('G304 judges the hull: contained where the bounding box would overhang', ev.contained && pose.y + boxB.maxY > FIELD_HALF, `hull top ${(pose.y + hb.maxY).toFixed(2)}, box top ${(pose.y + boxB.maxY).toFixed(2)}`);
+  check('G304 judges the hull: 2 in off the wall is NOT touching (the box corner would be through it)', !ev.touching);
+  check('G304 judges the hull: within START_TOUCH_TOL of the wall IS touching', evalStartPose(s, { ...pose, y: pose.y + 1 }, 'blue').touching);
+  check('footprintCorners of an import are its hull vertices', footprintCorners(s, { x: 0, y: 0 }, 0).length === 5);
+  for (const g of ['decode', 'chain', 'biobuzz'] as GameId[]) {
+    const { w } = impWorld(g, [{ imported: IMP_NOSE }, { imported: IMP_NOSE }, { imported: IMP_DIAMOND }, {}]);
+    const mod = simModuleFor(g);
+    const inside = w.robots.every((r) => {
+      const b = polyBounds(robotHullWorld(r));
+      return b.minX >= -mod.bounds.halfX - 1e-6 && b.maxX <= mod.bounds.halfX + 1e-6 && b.minY >= -mod.bounds.halfY - 1e-6 && b.maxY <= mod.bounds.halfY + 1e-6;
+    });
+    check(`an import spawns with its whole hull inside the field — ${g}`, inside);
+    if (g === 'decode') {
+      const legal = w.robots.every((r) => evalStartPose(r.spec, { x: r.pos.x, y: r.pos.y, headingDeg: (r.heading * 180) / Math.PI }, r.alliance).legal);
+      check('DECODE spawns every import G304-legal by its hull', legal);
+    }
+    if (g === 'biobuzz') {
+      const legal = w.robots.every((r) => bbEvalStart(r.spec, { x: r.pos.x, y: r.pos.y, headingDeg: (r.heading * 180) / Math.PI }, r.alliance).legal);
+      check('BIOBUZZ seats every import G304-legal by its hull', legal);
+    }
+  }
+  const bs = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_NOSE }, DEFAULT_SPEC, 'biobuzz');
+  const box = bbStartBox(bs, { x: 0, y: 0, headingDeg: 45 });
+  check('BIOBUZZ start box at 45° is the turned HULL\'s box, not the turned bounding box', Math.abs(box.x1 - box.x0 - (hb.maxX - hb.minX)) < 1e-9 && box.x1 - box.x0 < boxB.maxX - boxB.minX - 2, `${(box.x1 - box.x0).toFixed(2)} vs ${(boxB.maxX - boxB.minX).toFixed(2)}`);
+  const cs = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_DIAMOND }, DEFAULT_SPEC, 'chain');
+  const ce = chainStartExtents(cs, 45);
+  check('Chain Reaction start extents read the hull: a diamond at 45° is a 12.7 in square, not the 25.5 in box', Math.abs(ce.ex - (9 * c + 0.5)) < 1e-9 && chainHeadingFits(cs, 45), `${ce.ex.toFixed(3)}`);
+  const snapped = chainSnapStartPose(cs, { x: 60, y: 60, headingDeg: 45 });
+  check('Chain Reaction snaps an import to a legal Lab pose', chainStartLegal(cs, { x: snapped.x, y: snapped.y }, snapped.headingDeg));
+}
+
+/**
+ * AN IMPORT PLAYS A MATCH: two imports (a pointed nose on a mecanum, a diamond on a tank) and two
+ * standard robots, chasing into each other and the walls for 900 ticks in every game. No NaN, no
+ * hull past the perimeter, contacts happen, and:
+ *  · DECODE: no ground artifact's centre is ever inside an imported hull — the artifact solve, the
+ *    pin round and `placeGroundArtifact` all read the closed hull.
+ *  · BIOBUZZ: none AWAY FROM THE PERIMETER. Against a wall this game's solve has no pin round, so a
+ *    POLLEN a robot presses into a wall is squeezed into ANY chassis — measured identical for a
+ *    standard robot below — and that is the game's, not the import's.
+ *  · Chain Reaction: its particles are a bespoke 0.6 in/tick plow, not the shared solve, so the
+ *    import is held to the standard robots' own record: particle-ticks inside the two imported
+ *    hulls, against the same two slots' standard footprints in the same scripted run.
+ * Shots are off outside DECODE: an element LANDING on a robot is a landing question, not solids.
+ */
+function impPlayRun(g: GameId, patches: Partial<RobotSpec>[]): { nan: boolean; worstOut: number; rr: number; inside: number[] } {
+  const { w, step: st } = impWorld(g, patches, 77);
+  w.match.phase = 'teleop';
+  w.match.phaseTimeLeft = 100;
+  const bounds = simModuleFor(g).bounds;
+  let worstOut = 0;
+  let nan = false;
+  let rr = 0;
+  const inside = w.robots.map(() => 0);
+  for (let t = 0; t < 900; t++) {
+    const cmds = new Map<number, RobotCommand>();
+    for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, impChase(w, i, t, g !== 'decode'));
+    st(w, SIM_DT, cmds);
+    rr += w.rrContacts.length;
+    w.robots.forEach((r, i) => {
+      if (!Number.isFinite(r.pos.x) || !Number.isFinite(r.pos.y) || !Number.isFinite(r.heading)) nan = true;
+      const b = polyBounds(robotHullWorld(r));
+      worstOut = Math.max(worstOut, b.maxX - bounds.halfX, -bounds.halfX - b.minX, b.maxY - bounds.halfY, -bounds.halfY - b.minY);
+      const shape = robotHullLocal(r.spec);
+      for (const ball of w.balls) {
+        if (ball.state.kind !== 'ground' || ball.z > 0.5) continue;
+        const R = ball.r ?? BALL_RADIUS;
+        const atWall = Math.abs(ball.pos.x) > bounds.halfX - R - 0.25 || Math.abs(ball.pos.y) > bounds.halfY - R - 0.25;
+        if (g === 'biobuzz' && atWall) continue;
+        if (polyFeature(shape, rot({ x: ball.pos.x - r.pos.x, y: ball.pos.y - r.pos.y }, -r.heading)).depth > 0) inside[i]++;
+      }
+    });
+  }
+  return { nan, worstOut, rr, inside };
+}
+function impPlayCheck(g: GameId): void {
+  const run = impPlayRun(g, [
+    { drivetrain: 'mecanum', imported: IMP_NOSE },
+    { drivetrain: 'tank', imported: IMP_DIAMOND },
+    { drivetrain: 'swerve' },
+    { drivetrain: 'mecanum' },
+  ]);
+  // within the solver's resting penetration (`PHYS_CONTAIN_SLOP` 0.75 in): a robot leaning on a
+  // wall sits a hair into it, standard or imported
+  check(`an import plays 900 ticks — ${g}: no NaN, hull inside the perimeter`, !run.nan && run.worstOut < 1, `worst ${run.worstOut.toFixed(3)} in out`);
+  check(`an import plays 900 ticks — ${g}: robots met (rrContacts)`, run.rr > 100, `${run.rr}`);
+  const imp = run.inside[0] + run.inside[1];
+  if (g === 'chain') {
+    const std = impPlayRun(g, [{ drivetrain: 'mecanum' }, { drivetrain: 'tank' }, { drivetrain: 'swerve' }, { drivetrain: 'mecanum' }]);
+    check('an import plays 900 ticks — chain: the plow keeps particles out of an imported hull at least as well as out of a standard footprint', imp <= std.inside[0] + std.inside[1], `import ${imp}, standard ${std.inside[0] + std.inside[1]} particle-ticks`);
+  } else {
+    check(`an import plays 900 ticks — ${g}: no ground artifact centre ever inside an imported hull${g === 'biobuzz' ? ' (away from the perimeter)' : ''}`, imp === 0, `${imp} element-ticks`);
+  }
+}
+/** BIOBUZZ parity: pressing a wall POLLEN, an import and a standard chassis of the same size end
+ * the same — the game's solve squeezes both (no pin round), and the import adds nothing to it */
+{
+  const press = (imported?: ImportedRobot) => {
+    const { w, step: st } = impWorld('biobuzz', [{ length: 18, width: 16, imported }], 5);
+    w.match.phase = 'teleop';
+    w.match.phaseTimeLeft = 100;
+    const half = simModuleFor('biobuzz').bounds.halfY;
+    const ball = w.balls.find((b) => b.state.kind === 'ground')!;
+    w.balls = [ball];
+    const R = ball.r ?? 1.4;
+    ball.pos = { x: 0, y: -half + R };
+    ball.vel = { x: 0, y: 0 };
+    const r = w.robots[0];
+    r.pos = { x: 0, y: -half + 20 };
+    r.heading = Math.PI / 2;
+    r.vel = { x: 0, y: 0 };
+    for (let t = 0; t < 120; t++) st(w, SIM_DT, new Map([[0, cmd({ driveY: -1, leftDrive: -1, rightDrive: -1 })]]));
+    return polyFeature([{ x: -9, y: -8 }, { x: 9, y: -8 }, { x: 9, y: 8 }, { x: -9, y: 8 }], rot({ x: ball.pos.x - r.pos.x, y: ball.pos.y - r.pos.y }, -r.heading)).depth;
+  };
+  const box: ImportedRobot = { ...IMP_NOSE, hull: [{ x: -9, y: -8 }, { x: 9, y: -8 }, { x: 9, y: 8 }, { x: -9, y: 8 }] };
+  const a = press(undefined);
+  const b = press(box);
+  check('BIOBUZZ: an import squeezes a wall POLLEN exactly as a standard chassis of the same size does', Math.abs(a - b) < 0.05, `standard ${a.toFixed(3)}, import ${b.toFixed(3)}`);
+}
+{
+  impPlayCheck('decode');
+}
+{
+  impPlayCheck('chain');
+}
+{
+  impPlayCheck('biobuzz');
+}
+
+/**
+ * AN ARTIFACT IS NEVER LEFT INSIDE AN IMPORT: the solids are the closed hull (every game, BIOBUZZ's
+ * slot included), and `placeGroundArtifact` walks one dropped onto the robot's centre out of it.
+ */
+{
+  const { w } = impWorld('decode', [{ imported: IMP_NOSE }]);
+  const r = w.robots[0];
+  const sol = robotSolids(r, []);
+  check('robotSolids of an import: the closed hull, no intake structure', sol.chassis.kind === 'poly' && sol.structure.length === 0 && isDeepStrictEqual((sol.chassis as { pts: unknown }).pts, r.spec.imported!.hull));
+  const bb = simModuleFor('biobuzz').artifactSolids!(r, [], 1.4);
+  check('BIOBUZZ artifactSolids of an import: the same closed hull', isDeepStrictEqual(bb.chassis, sol.chassis) && bb.structure.length === 0);
+  const ball = w.balls.find((b) => b.state.kind === 'ground')!;
+  ball.pos = { x: r.pos.x + 1, y: r.pos.y + 0.5 };
+  placeGroundArtifact(w, ball, new Map([[r.id, sol]]));
+  const d = polyFeature(r.spec.imported!.hull, rot({ x: ball.pos.x - r.pos.x, y: ball.pos.y - r.pos.y }, -r.heading)).depth;
+  check('placeGroundArtifact walks an artifact out of an imported hull', d <= -BALL_RADIUS + 1e-6, `skin ${(d + BALL_RADIUS).toFixed(3)} in`);
+}
+
+/**
+ * THE WHEELS OVERRIDE TRACTION AND TURN. Same hull, two wheelbases: the narrow one turns faster (its
+ * half-diagonal is its wheelbase's), the traction model and BASE parking read the stated wheels, and
+ * a wheelbase exactly where a standard chassis would put its wheels turns exactly as fast as it.
+ */
+{
+  const narrow = coerceSpec({ ...DEFAULT_SPEC, imported: { ...IMP_NOSE, wheels: [{ x: 2, y: 2 }, { x: 2, y: -2 }, { x: -2, y: 2 }, { x: -2, y: -2 }] } }, DEFAULT_SPEC, 'decode');
+  const wide = coerceSpec({ ...DEFAULT_SPEC, imported: { ...IMP_NOSE, wheels: [{ x: 5, y: 6.5 }, { x: 5, y: -6.5 }, { x: -6, y: 6.5 }, { x: -6, y: -6.5 }] } }, DEFAULT_SPEC, 'decode');
+  check('wheels: wheelLocals reads the stated wheels, in its own FL, FR, BR, BL order', isDeepStrictEqual(wheelLocals(wide), [{ x: 5, y: 6.5 }, { x: 5, y: -6.5 }, { x: -6, y: -6.5 }, { x: -6, y: 6.5 }]));
+  const tn = driveParams(narrow).maxTurn;
+  const tw = driveParams(wide).maxTurn;
+  check('wheels: a narrower wheelbase turns faster', tn > tw * 1.2, `${tn.toFixed(2)} vs ${tw.toFixed(2)} rad/s`);
+  const spin = (spec: RobotSpec) => {
+    const { w, step: st } = impWorld('decode', [spec]);
+    w.balls.length = 0;
+    w.match.phase = 'teleop';
+    w.match.phaseTimeLeft = 100;
+    w.robots[0].pos = { x: 0, y: -20 };
+    let turned = 0;
+    for (let t = 0; t < 60; t++) {
+      const h0 = w.robots[0].heading;
+      st(w, SIM_DT, new Map([[0, cmd({ rotate: 1, leftDrive: -1, rightDrive: 1 })]]));
+      turned += Math.abs(wrapAngle(w.robots[0].heading - h0));
+    }
+    return turned;
+  };
+  const sn = spin(narrow);
+  const sw = spin(wide);
+  check('wheels: in the sim, the narrow wheelbase spins further in one second', sn > sw * 1.2, `${sn.toFixed(2)} vs ${sw.toFixed(2)} rad`);
+  // a wheelbase where a standard 18 × 16 chassis would put its wheels (inset 2.6) turns like that chassis
+  const boxHull: ImportedRobot = { ...IMP_NOSE, hull: [{ x: -9, y: -8 }, { x: 9, y: -8 }, { x: 9, y: 8 }, { x: -9, y: 8 }] };
+  const boxImp = coerceImported(boxHull)!;
+  check('wheels: default wheels on a rectangular hull give the rectangle\'s own half-diagonal', Math.abs(importedHalfDiag(boxImp) - hyp(9, 8)) < 1e-9, `${importedHalfDiag(boxImp)}`);
+  // BASE parking counts the WHEELS: the same robot is fully in on a narrow wheelbase, partly on the default
+  const park = (spec: RobotSpec) => {
+    const { w } = impWorld('decode', [spec]);
+    const zone = baseZone('blue');
+    w.robots[0].pos = { x: (zone.x0 + zone.x1) / 2 - 5, y: (zone.y0 + zone.y1) / 2 };
+    w.robots[0].heading = 0;
+    assessMatchEnd(w);
+    return w.match.scores.blue.base;
+  };
+  const dflt = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_NOSE }, DEFAULT_SPEC, 'decode');
+  check('wheels: BASE parking counts the stated wheels (narrow: full, default: partial)', park(narrow) === 10 && park(dflt) === 5, `${park(narrow)} / ${park(dflt)}`);
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
