@@ -1,6 +1,7 @@
 import type { DrivetrainType, IntakeStyle, RobotSpec } from '../types';
 import * as C from '../config';
 import { clamp, approach, hyp } from '../math';
+import { importedHalfDiag } from './imported';
 
 /** derived per-robot drive parameters. Everything the drivetrain influences
  * comes from the spec: type multipliers × RPM (speed up / accel down) × mass
@@ -61,8 +62,11 @@ export function driveParams(spec: RobotSpec, tankMode = false): DriveParams {
     (C.REF_MASS_LB / spec.massLb) *
     p.accelMult;
   // rotation tops out at wheel speed / half track diagonal, like a real
-  // chassis: faster wheels or a smaller footprint turn quicker
-  const halfDiag = Math.sqrt(spec.length * spec.length + spec.width * spec.width) / 2;
+  // chassis: faster wheels or a smaller footprint turn quicker. An IMPORTED robot turns about its
+  // measured WHEELBASE (`importedHalfDiag`), not about its parametric box.
+  const halfDiag = spec.imported
+    ? importedHalfDiag(spec.imported)
+    : Math.sqrt(spec.length * spec.length + spec.width * spec.width) / 2;
   const maxTurn = Math.min(
     REF_TURN * (maxSpeed / REF_SPEED) * (REF_HALF_DIAG / halfDiag) * p.turnMult,
     C.TURN_MAX_SPEED,

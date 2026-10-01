@@ -398,7 +398,9 @@ export function beamBlock(world: World): void {
   for (const r of world.robots) {
     if (canCrossBeams(r.spec)) continue;
     const e = robotExtents(r);
-    const rad = Math.max(e.half, (e.front + e.rear) / 2) + 0.5;
+    // an IMPORT's hull need not be centred on its origin, so its reach each way is the larger
+    // of its extents, not their average
+    const rad = r.spec.imported ? Math.max(e.half, e.front, e.rear) + 0.5 : Math.max(e.half, (e.front + e.rear) / 2) + 0.5;
     for (const beam of CHAIN_BEAMS) {
       if (!robotIntersectsRect(r, beam.rect)) continue;
       if (beam.axis === 'y') {

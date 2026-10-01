@@ -69,6 +69,7 @@ export function robotSolids(
   heldBalls: readonly Artifact[],
   radius: number = C.BALL_RADIUS,
 ): RobotSolids {
+  if (r.spec.imported) return importedSolids(r, heldBalls, radius);
   const hl = r.spec.length / 2;
   const hw = r.spec.width / 2;
   const preset = C.INTAKE_PRESETS[r.spec.intake];
@@ -127,6 +128,32 @@ export function robotSolids(
     held.push({ kind: 'circle', cx: b.state.lx, cy: b.state.ly, r: b.r ?? radius });
   }
   return { chassis: { kind: 'box', cx: 0, cy: 0, hx: hl, hy: hw }, structure, held };
+}
+
+/**
+ * AN IMPORTED ROBOT'S ARTIFACT SOLIDS: its whole hull as ONE CLOSED convex polygon, no intake
+ * structure, plus the artifacts it holds — for EVERY game (BIOBUZZ's `bbRobotSolids` delegates
+ * here too).
+ *
+ * CLOSED, for now, and that is a stated interim rather than an oversight: the hull is the robot
+ * seen from above with its intake included, so it covers the mouth. Carving the mouth (from
+ * `imported.mech.intakes`) belongs to the mechanism lane, which will return a chassis polygon with
+ * the mouth band removed plus whatever guide structure the game's intake has. Until then an
+ * artifact can never end up inside an imported robot — `placeGroundArtifact` and the pin test both
+ * read this — and an import collects nothing through a floor-level mouth.
+ */
+export function importedSolids(
+  r: RobotState,
+  heldBalls: readonly Artifact[],
+  radius: number = C.BALL_RADIUS,
+): RobotSolids {
+  const held: SolidShape[] = [];
+  for (const b of heldBalls) {
+    if (b.state.kind !== 'held' || b.state.robot !== r.id) continue;
+    held.push({ kind: 'circle', cx: b.state.lx, cy: b.state.ly, r: b.r ?? radius });
+  }
+  const pts = r.spec.imported!.hull.map((p) => ({ x: p.x, y: p.y }));
+  return { chassis: { kind: 'poly', pts }, structure: [], held };
 }
 
 export interface Penetration {

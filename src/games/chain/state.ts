@@ -17,6 +17,7 @@ import {
 import { type ChainEdge, MOUNT_ANGLE, RAIL_DIR, catalystMountOf, catalystMountPositions, catalystSwingOf, intakeMountEdges, intakeMountOf, isEdgePos, mountOrigin } from './mounts';
 import { CHAIN_CATALYST_NEAR, CHAIN_DEFAULT_CATALYST, CHAIN_TRACK_APPROACH, chainCatalystGeom } from './config';
 import { datan2, dcos, dsin, hyp, rot, wrapAngle } from '../../math';
+import { rotatedPolyBounds } from '../../sim/imported';
 
 /**
  * LEGACY, for the frozen DECODE preview only.
@@ -485,6 +486,16 @@ export function chainStartExtents(
   // dcos/dsin, not Math.cos/sin — this is sim source, and the trig discipline is what
   // keeps two engines agreeing on a spawn position (see CLAUDE.md)
   const rad = (headingDeg * Math.PI) / 180;
+  /**
+   * AN IMPORTED ROBOT: its HULL turned to this heading, as half-extents about the robot's origin
+   * (the larger side each way — every rule below assumes a box centred on the pose), plus the
+   * same margin. The hull is the whole robot, so this is at least the chassis box and usually
+   * the real, smaller shape of a robot whose corners are not square.
+   */
+  if (spec.imported) {
+    const b = rotatedPolyBounds(spec.imported.hull, dcos(rad), dsin(rad));
+    return { ex: Math.max(-b.minX, b.maxX) + 0.5, ey: Math.max(-b.minY, b.maxY) + 0.5 };
+  }
   const c = Math.abs(dcos(rad));
   const s = Math.abs(dsin(rad));
   const hl = spec.length / 2;

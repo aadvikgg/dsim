@@ -2,6 +2,7 @@ import type { Alliance, Artifact, RobotCommand, RobotState, Vec2, World } from '
 import * as C from '../../config';
 import { clamp, datan2, dcos, dsin, hyp, nextRandom, rot, wrapAngle } from '../../math';
 import { robotExtents } from '../../sim/physics';
+import { polyFeature } from '../../sim/imported';
 import {
   CHAIN_ACCEL_DEPTH,
   CHAIN_ACCEL_HALF_Y,
@@ -160,6 +161,17 @@ export function updateChain(
       const e = robotExtents(rob);
       const rel = rot({ x: c.pos.x - rob.pos.x, y: c.pos.y - rob.pos.y }, -rob.heading);
       const rr = CHAIN_CATALYST_OD / 2;
+      if (rob.spec.imported) {
+        // an IMPORT: off its hull, along the hull's own nearest-feature normal
+        const f = polyFeature(rob.spec.imported.hull, rel);
+        if (f.depth <= -rr) continue;
+        const push = rot({ x: f.nx, y: f.ny }, rob.heading);
+        c.pos.x += push.x * 0.9;
+        c.pos.y += push.y * 0.9;
+        const shove = Math.max(CHAIN_RING_SLIDE_MIN, hyp(rob.vel.x, rob.vel.y) * 0.25);
+        c.vel = { x: push.x * shove, y: push.y * shove };
+        break;
+      }
       if (rel.x > e.front + rr || rel.x < -e.rear - rr || Math.abs(rel.y) > e.half + rr) continue;
       // shallowest way out (robot-local), then convert back to the world
       const penFwd = e.front + rr - rel.x;
@@ -841,7 +853,20 @@ function interact(
     }
   }
 
-  // plow (not intaking, or no room, or particle outside the mouth): only inside the footprint
+  // plow (not intaking, or no room, or particle outside the mouth): only inside the footprint.
+  // An IMPORT plows with its hull, along the hull's nearest-feature normal — its bounding box
+  // would shove particles from corners the robot does not have.
+  if (rob.spec.imported) {
+    const f = polyFeature(rob.spec.imported.hull, local);
+    if (f.depth <= -r2) return 'none';
+    const n = rot({ x: f.nx, y: f.ny }, rob.heading);
+    b.pos.x += n.x * 0.6;
+    b.pos.y += n.y * 0.6;
+    const rv = hyp(rob.vel.x, rob.vel.y);
+    b.vel.x = n.x * rv * 0.9;
+    b.vel.y = n.y * rv * 0.9;
+    return 'none';
+  }
   if (!inBox) return 'none';
 
   // push out along the min-penetration axis (robot-local), impart robot vel
