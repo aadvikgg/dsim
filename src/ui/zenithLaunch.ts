@@ -38,8 +38,8 @@ export function launchZenith(o: LaunchOptions): string | null {
   /**
    * What the session remembers between saves (`planHostSave`): the names it may write, Zenith's
    * name for each auto it stored under another one, and the waypoints file Zenith was last shown.
-   * A new auto starts from an empty project, so Zenith names it `new-auto` whatever the library
-   * holds, and a second New in Zenith session's Save used to replace the first one's by name.
+   * Zenith names a new auto so it clashes with none of the autos sent, so a save under it lands
+   * as it is; a save under a library name the session never sent (a left-out auto's) is renamed once.
    */
   const state: HostSaveState = { own: new Set(), alias: new Map() };
   /** the auto a reload should open: the one this session saved last, else the one it opened */
@@ -49,8 +49,10 @@ export function launchZenith(o: LaunchOptions): string | null {
     project: () => {
       const lib = loadAutoLibrary(game);
       const entry = reopen === null ? null : (lib.entries.find((e) => e.name === reopen) ?? null);
-      // a new auto sends no autos, so Zenith starts from its template
-      const view = entry ? hostLibraryView(lib, entry) : { autos: {}, leftOut: [] };
+      // a NEW auto sends the library too, with `newAuto`: Zenith names it so it clashes with none of
+      // the autos sent, and starts it at the merged file's `start`. It used to send no autos, so
+      // Zenith named every new auto `new-auto` and DSIM had to rename the second one on save.
+      const view = hostLibraryView(lib, entry);
       for (const n of Object.keys(view.autos)) state.own.add(n);
       state.sent = view.waypoints;
       o.onLeftOut?.(leftOutSentence(view.leftOut));
@@ -63,7 +65,7 @@ export function launchZenith(o: LaunchOptions): string | null {
           ...(view.waypoints ? { waypoints: view.waypoints } : {}),
           autos: view.autos,
         },
-        ...(entry ? { open: entry.name } : {}),
+        ...(entry ? { open: entry.name } : { newAuto: true }),
       };
     },
     ...(entry0 && o.trace !== undefined ? { trace: o.trace, traceAuto: entry0.name } : {}),

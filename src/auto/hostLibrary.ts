@@ -70,9 +70,20 @@ export interface HostLibraryView {
 
 /**
  * The autos and the one waypoints file a session sends. `opened` is the auto to open (its file is
- * the base), or null for a new auto, where the newest auto with a waypoints file is the base.
+ * the base), or null for a new auto, where the base is the auto that leaves the FEWEST others out
+ * (the newest on a tie): two autos that agree on `start` outvote a newer one that does not.
  */
 export function hostLibraryView(lib: GameAutoLibrary, opened: AutoLibraryEntry | null): HostLibraryView {
+  if (opened) return viewFrom(lib, opened);
+  let best = viewFrom(lib, null);
+  for (const e of lib.entries) {
+    const v = viewFrom(lib, e);
+    if (v.leftOut.length < best.leftOut.length) best = v;
+  }
+  return best;
+}
+
+function viewFrom(lib: GameAutoLibrary, opened: AutoLibraryEntry | null): HostLibraryView {
   const order = opened ? [opened, ...lib.entries.filter((e) => e.id !== opened.id)] : lib.entries;
   const merged: Record<string, unknown> = {};
   /** which auto put each name in the merged file */
