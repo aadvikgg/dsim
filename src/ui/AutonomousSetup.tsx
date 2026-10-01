@@ -35,6 +35,8 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
   const [loadFailed, setLoadFailed] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(() => lib.activeId ?? lib.entries[0]?.id ?? null);
   const [notice, setNotice] = useState<{ bad: boolean; text: string } | null>(null);
+  /** the autos the open Zenith session was not given, and why (`onLeftOut`) */
+  const [leftOut, setLeftOut] = useState<string | null>(null);
   const [driven, setDriven] = useState<{ id: string; points: { x: number; y: number }[] } | null>(null);
 
   useEffect(() => {
@@ -171,7 +173,9 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
         setSelectedId(next.entries.find((e) => e.name === name)?.id ?? null);
         setNotice({ bad: false, text: `Saved ${name} from Zenith.` });
       },
+      onLeftOut: setLeftOut,
     });
+    if (error) setLeftOut(null);
     setNotice(error ? { bad: true, text: error } : { bad: false, text: 'Zenith is open in another window. Save there to bring the auto back here.' });
   }
 
@@ -344,6 +348,7 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
           {notice.text}
         </p>
       )}
+      {leftOut && <p className="ds-hint">{leftOut}</p>}
       <p className="ds-hint">
         In a match, solo or in a custom room, the robot starts where the auto does and drives it through AUTO. Ranked
         matches never run one. In Free drive the auto plays once, and Restart plays it again.
