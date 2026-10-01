@@ -273,6 +273,59 @@ export interface RobotSpec {
    * clamp it to 18 (the RULE refuses at `startLegal`; clamping would make it true by construction).
    */
   stowHeightIn?: number;
+  /**
+   * IMPORTED ROBOT (`docs/robot-import-plan.md` §3.1): the measured geometry of a robot the
+   * player imported from CAD. Absent on every standard robot, and every sim branch that reads it
+   * runs only when it is present, so standard robots step byte-identically. An imported spec
+   * still carries the ordinary parametric fields (`length`/`width` = the hull's bounding box,
+   * `massLb`, `driveRpm`, the game's mechanism fields), so a reader that knows nothing about
+   * imports sees a legal rectangle robot. Sanitised by `coerceImported` (`src/sim/imported.ts`).
+   */
+  imported?: ImportedRobot;
+}
+
+/**
+ * The sim descriptor of an imported robot. Robot-local inches, +x forward, +y left, origin at
+ * the wheelbase centre (the hull's bounding-box centre when wheels are unknown). Plain numbers
+ * only, no free text: it rides the roster, `matchStart` and replay setups like any spec field.
+ */
+export interface ImportedRobot {
+  v: 1;
+  /** library id, 16 lowercase hex chars. Names the mesh on the owner's device; never read by
+   *  the sim. */
+  id: string;
+  /** whole-robot footprint seen from above in the starting configuration: convex, CCW, 3..16
+   *  vertices, quantised to 1/64 in, bounding box within 18 × 18 in. */
+  hull: Vec2[];
+  /** top of the model above the floor, inches, (0, 18]. */
+  heightIn: number;
+  /** wheel contact points FL, FR, BL, BR, each inside the hull. Absent = the rectangle default. */
+  wheels?: Vec2[];
+  /** 3D only: up to 3 stacked convex prisms for the tall parts (z0 < z1 within [0, heightIn],
+   *  each hull ≤ 12 vertices). Absent = one prism of `hull` up to `heightIn`. */
+  bands?: ImportedBand[];
+  /** mechanism placements; each game reads the fields it knows. */
+  mech?: ImportedMech;
+}
+
+export interface ImportedBand {
+  z0: number;
+  z1: number;
+  hull: Vec2[];
+}
+
+/** An edge of the hull's bounding box, as a robot-local direction. */
+export type ImportedEdge = 'front' | 'back' | 'left' | 'right';
+
+/** Mechanism placements on an imported robot, robot-local inches. */
+export interface ImportedMech {
+  /** launcher pivot (turret axis or shooter centre); `z` is the release height. */
+  shooter?: { x: number; y: number; z: number };
+  /** intake mouths: which bounding-box edge, and the span along it (lateral coordinate for
+   *  front/back, longitudinal for left/right), `from < to`. */
+  intakes?: { edge: ImportedEdge; from: number; to: number }[];
+  /** placement point (BIOBUZZ Box Tube, Chain Reaction catalyst); `z` is its height. */
+  place?: { x: number; y: number; z: number };
 }
 
 /** Chain Reaction scoring archetype (see `RobotSpec.scoreMode`).
