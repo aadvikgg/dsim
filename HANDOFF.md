@@ -1,14 +1,15 @@
-# HANDOFF — 2026-09-30a (Zenith host: reloads, name clashes, a full library, merged waypoints)
+# HANDOFF — 2026-10-01a (Zenith host: reloads, name clashes, a full library, merged waypoints)
 
-**State: branch `fix/zenith-host-library-safety`, for a PR into `alpha`.** `build`, `server:check`, `bundleaudit`, `docaudit` pass. `npm test`: shared passes; BIOBUZZ fails one check, `fieldDims.gen.ts is exactly what emit-dims.mjs renders`, which reads only the field CAD files this branch does not touch (`npm run field-cad` regenerates it). Client only, no server deploy. Not on `main`.
+**State: branch `fix/zenith-host-library-safety`, for a PR into `alpha`.** `build`, `server:check`, `bundleaudit`, `docaudit`, `uiaudit` and the AUTO lane pass; see the PR for the full `npm test` run against the baseline (BIOBUZZ `fieldDims.gen.ts is exactly what emit-dims.mjs renders` and the machine-dependent `step3d`/reconcile timing checks fail on this machine on any tree). Client only, no server deploy. Not on `main`.
 
-- **Owner:** fix the DSIM-side bugs from Zenith's pre-release UX sweep (DSIM-1, DSIM-2, DSIM-3), PRs into `alpha` only; the sweep's recommendation to merge waypoints on DSIM's side (DSIM-5) was approved with the rest.
+- **Owner:** fix the DSIM-side bugs from Zenith's pre-release UX sweep (DSIM-1, DSIM-2, DSIM-3, DSIM-5, DSIM-13), PRs into `alpha` only. On DSIM-5 the owner ruled **option A**: DSIM merges its library's waypoints into the one file it sends, no protocol change.
 - **DSIM-1** (`zenithHost.ts`): `project` is a function, called at every `ready`. `zenithLaunch.ts` rebuilds from `loadAutoLibrary` and reopens the auto the session saved last.
-- **DSIM-2** (`zenithLaunch.ts`): `own` holds the names the session sent or saved; a save under any other existing name goes to `freeAutoName` (`new-auto-2`, …) and `alias` keeps Zenith's name on it. Zenith's own bar still says it saved `new-auto`; DSIM's notice names the real entry.
-- **DSIM-3:** a new name into a full library is refused (`saved` `ok:false` with the sentence); `upsertAuto` itself still caps, for the other callers.
-- **DSIM-5:** `mergeWaypoints`: the opened auto's file wins every name, the others fill in, newest first. Two autos with different `start`s show the opened one's in Zenith; play is unaffected (`load.ts` uses each auto's own).
-- **Verified:** a throwaway vite-SSR harness (not committed) drove `launchZenith` through `ready`/`save` with a stubbed popup: every case failed on `alpha` and passes here. Not run in a real browser.
-- **Not done:** DSIM-4, DSIM-6 to DSIM-13; the `open` flags for a new auto and a build version wait on Zenith's host-protocol field names.
+- **DSIM-2** (`hostLibrary.ts` `planHostSave`): the session owns the names it sent or saved; a save under any other existing name goes to `freeAutoName` (`new-auto-2`, …) and `alias` keeps Zenith's name on it. Zenith's own bar still says it saved `new-auto`; DSIM's notice names the real entry.
+- **DSIM-3:** a new name into a full library is refused (`saved` `ok:false`, `LIBRARY_FULL_SAVE`); `upsertAuto` itself still caps, for the other callers.
+- **DSIM-5** (`hostLibraryView`): the opened auto's file is the base, the others fill in names, newest first. **An auto with a name at a different pose is left out of `autos`** (it used to be shown with the other auto's pose, and Simulate in DSIM ran it against its own, so the plan edited was not the one played); `onLeftOut` puts one sentence in the Autonomous panel (the match log for Open run in Zenith). Edit in Zenith on that auto makes it the base. Saves store the auto's own file unchanged plus only the names its text uses that the own file lacks (`waypointsForSave`), so a pose never moves; before, a new auto saved from an Edit session got the opened auto's whole file and lost any name it used from another auto.
+- **DSIM-13** (`AutonomousSetup.tsx`): at 12 autos Import and New in Zenith stay, disabled, saying the library is full, with `LIBRARY_FULL` under them.
+- **Checks:** AUTO lane "AUTO host …" (no clash, same pose, a clash left out + its sentence, the base switch, five save cases, the stored pair loads).
+- **Not done:** a real-browser run against a local Zenith; DSIM-4, DSIM-6 to DSIM-12. The `open` flags `newAuto`/`hostBuild` are a separate PR.
 
 # HANDOFF — 2026-09-28b (BIOBUZZ robots: no z-fighting, no dressing through mechanisms)
 

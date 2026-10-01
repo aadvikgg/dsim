@@ -99,7 +99,15 @@ A reload reopens the auto the session saved last. ⚠️ **A SAVE NEVER REPLACES
 DID NOT SEND**: every New in Zenith names its auto `new-auto`, so a save under a library name the
 session never sent is stored under a free one (`new-auto-2`), and a new auto into a full library
 (12) is refused with a sentence instead of dropping the oldest, which could be the one AUTO plays.
-The one waypoints file sent is the opened auto's, with the other autos' names merged in.
+⚠️ **ONE WAYPOINTS FILE, AND A CLASH IS LEFT OUT** (owner's ruling, option A: merge on DSIM's side,
+no protocol change; `src/auto/hostLibrary.ts`). The file sent is the opened auto's, with the other
+autos' names merged in, newest first. An auto that names a waypoint the merged file already holds at
+a different pose is NOT sent: Zenith would draw and edit it against the other auto's pose while DSIM
+plays its own. The Autonomous panel (or the match log) says in one sentence which auto and why; Edit
+in Zenith on that auto makes its file the base. Equal poses are not a clash. Zenith's `save` carries
+no waypoints, so a save stores the auto's OWN file unchanged plus only the names its text uses that
+the own file lacks, from the file the session sent (`waypointsForSave`): a pose it had never moves.
+At 12 autos Import and New in Zenith stay in the panel, disabled, with the reason (`LIBRARY_FULL`).
 
 ## Traces
 
