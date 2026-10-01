@@ -3,6 +3,7 @@ import type { GameSettings } from '../types';
 import { moduleFor } from '../games';
 import {
   AUTO_LIBRARY_MAX,
+  LIBRARY_FULL,
   autoTooLarge,
   loadAutoLibrary,
   saveAutoLibrary,
@@ -87,6 +88,7 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
     }
   }, [mod, adapter, selected, settings.alliance, settings.spec]);
 
+  const full = lib.entries.length >= AUTO_LIBRARY_MAX;
   const running = lib.enabled && !!selected && lib.activeId === selected.id;
 
   // THE COMMANDS AN AUTO CAN USE on this build: read off the same robot file Zenith is handed, so
@@ -248,7 +250,19 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
             </div>
           );
         })}
-        {lib.entries.length < AUTO_LIBRARY_MAX && (
+        {full ? (
+          // FULL: both stay in place, disabled, and say why (they used to vanish at 12)
+          <>
+            <button className="ds-opt ds-opt-add" disabled title={LIBRARY_FULL}>
+              <span className="ot">Import .auto.json</span>
+              <span className="od">The library is full</span>
+            </button>
+            <button className="ds-opt ds-opt-add" disabled title={LIBRARY_FULL}>
+              <span className="ot">New in Zenith</span>
+              <span className="od">The library is full</span>
+            </button>
+          </>
+        ) : (
           <>
             <label className="ds-opt ds-opt-add">
               <span className="ot">Import .auto.json</span>
@@ -262,6 +276,7 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
           </>
         )}
       </div>
+      {full && <p className="ds-hint">{LIBRARY_FULL}</p>}
 
       {selected && (
         <div className="ds-auto">

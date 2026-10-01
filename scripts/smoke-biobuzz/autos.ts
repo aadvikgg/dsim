@@ -23,7 +23,7 @@ import { CLIENT_CAPS, type ServerMsg } from '../../src/net/protocol';
 import { BB_DEFAULT_SPEC } from '../../src/games/biobuzz/robotConfig';
 import { DEFAULT_ASSISTS } from '../../src/sim/spawn';
 import { defaultSettings, practiceSetups, switchGame } from '../../src/settings';
-import { AUTO_LIBRARY_MAX, autoTooLarge, type AutoLibraryEntry, type GameAutoLibrary } from '../../src/auto/library';
+import { AUTO_LIBRARY_MAX, LIBRARY_FULL, autoTooLarge, type AutoLibraryEntry, type GameAutoLibrary } from '../../src/auto/library';
 import {
   hostLibraryView,
   LIBRARY_FULL_SAVE,
@@ -907,6 +907,10 @@ export function autoChecks(check: Check): void {
       'AUTO host save: a NEW auto into a full library is refused with the sentence; an edit of one it holds is not',
       !refused.ok && refused.error === LIBRARY_FULL_SAVE && edited.ok && edited.entry.id === 'f3',
       !refused.ok ? refused.error : 'stored',
+    );
+    check(
+      'AUTO library: the panel’s full-library reason and the save refusal both name the cap',
+      LIBRARY_FULL.includes(`(${AUTO_LIBRARY_MAX})`) && LIBRARY_FULL_SAVE.includes(`(${AUTO_LIBRARY_MAX})`),
     );
   }
 
