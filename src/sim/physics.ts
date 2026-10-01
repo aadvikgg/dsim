@@ -1,18 +1,43 @@
 import type { Alliance, Artifact, RobotCommand, RobotState, Vec2, World } from '../types';
 import * as C from '../config';
-import { classifierRect, footprintExtents, goalFaceNormal, goalLineValue, viewAngleOf, type Rect } from './field';
-import { dot, rot, clamp, hyp, datan2, dcos, dsin } from '../math';
+import { classifierRect, footprintExtents, goalFaceNormal, goalLineValue, rectCorners, robotHullLocal, viewAngleOf, type Rect } from './field';
+import { dot, rot, clamp, hyp, datan2, dcos, dsin, wrapAngle } from '../math';
 import { robotPenetration, type RobotSolids } from './artifactSolids';
 import { activeDrive, driveParams } from './drivetrain';
+import { importedWheels, polyAtPose, polyAxes, polyFeature, polysOverlap } from './imported';
 
 const ALLIANCES: Alliance[] = ['red', 'blue'];
 
 // ------------------------------------------------------------------ OBB ----
 
 /** collision extents in the robot frame: the intake is a physical part of
- * the robot, so the footprint extends forward by its reach */
+ * the robot, so the footprint extends forward by its reach. For an IMPORTED robot, the hull's
+ * bounding box (see `footprintExtents`) — a bound, not the shape. */
 export function robotExtents(r: RobotState): { front: number; rear: number; half: number } {
   return footprintExtents(r.spec);
+}
+
+/**
+ * THE ROBOT'S FOOTPRINT IN THE WORLD: `robotHullLocal` (an imported robot's hull, or a standard
+ * robot's footprint rectangle) placed at the robot's pose — CONVEX, COUNTER-CLOCKWISE.
+ *
+ * Every imported-robot branch in the shared sim reads this; standard robots keep `robotCorners`
+ * on their own paths, which is the same rectangle in a different (clockwise) vertex order —
+ * kept, because float sums over those corners are order-sensitive and standard robots must step
+ * byte-identically.
+ */
+export function robotHullWorld(r: RobotState): Vec2[] {
+  return polyAtPose(robotHullLocal(r.spec), r.pos, dcos(r.heading), dsin(r.heading));
+}
+
+/** the separating axes for a robot pair that involves an import: every distinct edge direction
+ * of both footprints, unit length */
+function pairAxes(a: Vec2[], b: Vec2[]): Vec2[] {
+  const out = polyAxes(a);
+  for (const n of polyAxes(b)) {
+    if (!out.some((m) => Math.abs(m.x * n.y - m.y * n.x) < 1e-12)) out.push(n);
+  }
+  return out;
 }
 
 /** local (robot-frame) storage position of the held ball at `slot` (slot 0 = oldest,
@@ -79,6 +104,15 @@ export function robotCorners(r: RobotState): Vec2[] {
  * chassis — no intake or turret overhang. Base parking counts ONLY these:
  * what touches the floor is what's "in" the zone. */
 export function wheelContacts(r: RobotState): Vec2[] {
+  if (r.spec.imported) {
+    // the import's own wheels (or its hull-derived default), re-ordered from the descriptor's
+    // FL, FR, BL, BR to this function's FL, FR, BR, BL — Chain Reaction's beams index it
+    const w = importedWheels(r.spec.imported);
+    return [w[0], w[1], w[3], w[2]].map((p) => {
+      const q = rot(p, r.heading);
+      return { x: q.x + r.pos.x, y: q.y + r.pos.y };
+    });
+  }
   const ix = Math.max(r.spec.length / 2 - C.WHEEL_INSET, 1);
   const iy = Math.max(r.spec.width / 2 - C.WHEEL_INSET, 1);
   const local = [
@@ -95,6 +129,13 @@ export function wheelContacts(r: RobotState): Vec2[] {
 
 /** closest point on the robot's OBB (incl. intake) to a world point */
 export function closestPointOnRobot(r: RobotState, p: Vec2): Vec2 {
+  if (r.spec.imported) {
+    // the hull's: the point itself when it is inside, else the nearest point of the boundary
+    const loc = rot({ x: p.x - r.pos.x, y: p.y - r.pos.y }, -r.heading);
+    const f = polyFeature(r.spec.imported.hull, loc);
+    const w = rot(f.inside ? loc : f.cp, r.heading);
+    return { x: w.x + r.pos.x, y: w.y + r.pos.y };
+  }
   const e = robotExtents(r);
   const local = rot({ x: p.x - r.pos.x, y: p.y - r.pos.y }, -r.heading);
   const cx = clamp(local.x, -e.rear, e.front);
@@ -105,6 +146,8 @@ export function closestPointOnRobot(r: RobotState, p: Vec2): Vec2 {
 
 /** SAT intersection test between the robot's OBB and an axis-aligned rect */
 export function robotIntersectsRect(r: RobotState, rect: Rect): boolean {
+  // an import: the hull's own edge normals, not the heading's two axes (which are a rectangle's)
+  if (r.spec.imported) return polysOverlap(robotHullWorld(r), rectCorners(rect));
   const rc = robotCorners(r);
   const rectC = [
     { x: rect.x0, y: rect.y0 },
@@ -144,6 +187,7 @@ export function robotIntersectsRect(r: RobotState, rect: Rect): boolean {
  * every corner outside. Axes = the robot's two edge normals + each polygon edge
  * normal. */
 export function robotIntersectsConvex(r: RobotState, poly: Vec2[]): boolean {
+  if (r.spec.imported) return polysOverlap(robotHullWorld(r), poly);
   const rc = robotCorners(r);
   const axes: Vec2[] = [rot({ x: 1, y: 0 }, r.heading), rot({ x: 0, y: 1 }, r.heading)];
   for (let i = 0; i < poly.length; i++) {
@@ -277,7 +321,15 @@ function contactTorqueDelta(
   // torque bias overshoots each tick and the heading buzzes at the wall.
   let flushErr = Infinity;
   let relSigned = 0;
-  if (squareTo) {
+  if (squareTo && r.spec.imported) {
+    // AN IMPORTED HULL IS FLUSH WHEN ONE OF ITS OWN EDGES IS: the edge whose outward normal
+    // points most nearly into the surface (−n) is the face against it, and the remaining tilt is
+    // that edge's angle off it. A rectangle's four edges, 90° apart, are the special case the
+    // branch below folds with `mod π/2`; a hull's edges sit wherever the CAD put them.
+    const rel = importedFlushRel(r, nx, ny);
+    relSigned = rel;
+    flushErr = Math.abs(rel);
+  } else if (squareTo) {
     const q = Math.PI / 2;
     let rel = r.heading - datan2(ny, nx);
     rel -= Math.round(rel / q) * q;
@@ -307,6 +359,29 @@ function contactTorqueDelta(
   const spinRaw = torque * press * C.CONTACT_IMPACT_SPIN * rateMult * spinMult;
   const spin = !squareTo || spinRaw * relSigned <= 0 ? spinRaw : 0;
   return { align, spin, bleed: r.angVel * align < 0, flushErr };
+}
+
+/**
+ * An imported robot's remaining tilt against a surface that pushes it along `(nx, ny)`: over the
+ * hull's edges, the signed angle between the edge's outward normal (in the world) and the
+ * surface's inward direction `−n`, for the edge where that angle is smallest. Signed the way the
+ * rectangle's `heading − atan2(n)` is, so a positive `rel` is reduced by turning negative.
+ */
+function importedFlushRel(r: RobotState, nx: number, ny: number): number {
+  const hull = r.spec.imported!.hull;
+  const want = datan2(-ny, -nx);
+  let best = Infinity;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % hull.length];
+    const ex = b.x - a.x;
+    const ey = b.y - a.y;
+    if (ex === 0 && ey === 0) continue;
+    // outward normal of a CCW edge is (ey, −ex)
+    const rel = wrapAngle(r.heading + datan2(-ex, ey) - want);
+    if (Math.abs(rel) < Math.abs(best)) best = rel;
+  }
+  return best === Infinity ? 0 : best;
 }
 
 /** turn the chassis by a summed contact response */
@@ -339,13 +414,19 @@ function applyTurn(
  */
 export function pointDepthInChassis(r: RobotState, p: Vec2): number {
   const local = rot({ x: p.x - r.pos.x, y: p.y - r.pos.y }, -r.heading);
+  // an import's "chassis" is its whole hull — the same closed polygon `robotSolids` hands the
+  // artifact solve (the mouth is carved by the mechanism lane, not here); outside, the exact
+  // distance rather than the box's per-face one
+  if (r.spec.imported) return polyFeature(r.spec.imported.hull, local).depth;
   const hl = r.spec.length / 2;
   const hw = r.spec.width / 2;
   return Math.min(Math.min(local.x + hl, hl - local.x), Math.min(local.y + hw, hw - local.y));
 }
 
-/** the four corners of the CHASSIS box (no intake reach) — see `pointDepthInChassis` */
+/** the four corners of the CHASSIS box (no intake reach) — see `pointDepthInChassis`. For an
+ * imported robot, the hull's vertices (CCW): its chassis is the hull. */
 export function chassisCorners(r: RobotState): Vec2[] {
+  if (r.spec.imported) return robotHullWorld(r);
   const hl = r.spec.length / 2;
   const hw = r.spec.width / 2;
   return [
@@ -360,6 +441,9 @@ export function chassisCorners(r: RobotState): Vec2[] {
 }
 
 export function pointDepthInRobot(r: RobotState, p: Vec2): number {
+  if (r.spec.imported) {
+    return polyFeature(r.spec.imported.hull, rot({ x: p.x - r.pos.x, y: p.y - r.pos.y }, -r.heading)).depth;
+  }
   const e = robotExtents(r);
   const local = rot({ x: p.x - r.pos.x, y: p.y - r.pos.y }, -r.heading);
   const dx = Math.min(local.x + e.rear, e.front - local.x);
@@ -376,6 +460,9 @@ function mtvOf(
   heading: number,
   rect: Rect,
   centre: Vec2,
+  /** an IMPORTED robot's own unit edge normals, in place of the heading's two axes (which are a
+   *  rectangle's). Absent for every standard robot, whose axis list is unchanged to the bit. */
+  robotAxes?: Vec2[],
 ): { nx: number; ny: number; depth: number } | null {
   const rc = [
     { x: rect.x0, y: rect.y0 },
@@ -383,12 +470,14 @@ function mtvOf(
     { x: rect.x1, y: rect.y1 },
     { x: rect.x0, y: rect.y1 },
   ];
-  const axes = [
-    { x: 1, y: 0 },
-    { x: 0, y: 1 },
-    rot({ x: 1, y: 0 }, heading),
-    rot({ x: 0, y: 1 }, heading),
-  ];
+  const axes = robotAxes
+    ? [{ x: 1, y: 0 }, { x: 0, y: 1 }, ...robotAxes]
+    : [
+        { x: 1, y: 0 },
+        { x: 0, y: 1 },
+        rot({ x: 1, y: 0 }, heading),
+        rot({ x: 0, y: 1 }, heading),
+      ];
   let minOv = Infinity;
   let ax = { x: 0, y: 0 };
   const found: { axis: Vec2; ov: number }[] = [];
@@ -452,6 +541,13 @@ function mtvOf(
 
 /** SAT overlap of the robot's CHASSIS with a rect */
 function classifierMTV(r: RobotState, rect: Rect): { nx: number; ny: number; depth: number } | null {
+  if (r.spec.imported) {
+    const hull = robotHullWorld(r);
+    // the hull's edge directions, minus any the rect's own two axes already cover (an axis listed
+    // twice would count double in the corner blend)
+    const own = polyAxes(hull).filter((n) => Math.abs(n.x) > 1e-12 && Math.abs(n.y) > 1e-12);
+    return mtvOf(hull, r.heading, rect, r.pos, own);
+  }
   return mtvOf(robotCorners(r), r.heading, rect, r.pos);
 }
 
@@ -642,7 +738,9 @@ function squareUpWalls(
   ext: Vec2 | undefined,
 ): void {
   const eps = C.CONTACT_TOUCH_EPS;
-  const corners = robotCorners(r);
+  // an import touches with its hull's vertices — a pointed nose meets the wall at its point,
+  // not at a corner of its bounding box
+  const corners = r.spec.imported ? robotHullWorld(r) : robotCorners(r);
   const walls: [number, number, (c: Vec2) => number][] = [
     [-1, 0, (c) => c.x - halfX],
     [1, 0, (c) => -halfX - c.x],
@@ -667,7 +765,7 @@ function squareUpStatics(
 ): void {
   const eps = C.CONTACT_TOUCH_EPS;
   squareUpWalls(r, preVel, C.FIELD_HALF, C.FIELD_HALF, out, ext);
-  const corners = robotCorners(r);
+  const corners = r.spec.imported ? robotHullWorld(r) : robotCorners(r);
 
   for (const a of ALLIANCES) {
     const contacts: { c: Vec2; d: number }[] = [];
@@ -720,7 +818,7 @@ function squareUpStatics(
 
     const wallDir = rect.x0 <= -C.FIELD_HALF + 0.01 ? -1 : 1;
     if (mtv.nx * wallDir > 0.5) continue;
-    const contacts = robotCorners(r)
+    const contacts = (r.spec.imported ? robotHullWorld(r) : robotCorners(r))
       .filter((c) => c.x > rect.x0 && c.x < rect.x1 && c.y > rect.y0 && c.y < rect.y1)
       .map((c) => ({ c, d: mtv.depth }));
     /**
@@ -765,14 +863,23 @@ function squareUpPair(
   out: { a: number; b: number }[],
   acc: ContactAcc,
 ): void {
-  const ca = robotCorners(a);
-  const cb = robotCorners(b);
-  const axes = [
-    rot({ x: 1, y: 0 }, a.heading),
-    rot({ x: 0, y: 1 }, a.heading),
-    rot({ x: 1, y: 0 }, b.heading),
-    rot({ x: 0, y: 1 }, b.heading),
-  ];
+  /**
+   * A PAIR WITH AN IMPORT IN IT judges the HULLS, over every edge direction either one has —
+   * the heading's two axes are a rectangle's, and on a pointed or chamfered hull they report
+   * contact wherever the two bounding boxes overlap, which is a foul on a robot nobody touched.
+   * Standard pairs keep their four heading axes and their corner order, to the bit.
+   */
+  const imp = a.spec.imported !== undefined || b.spec.imported !== undefined;
+  const ca = imp ? robotHullWorld(a) : robotCorners(a);
+  const cb = imp ? robotHullWorld(b) : robotCorners(b);
+  const axes = imp
+    ? pairAxes(ca, cb)
+    : [
+        rot({ x: 1, y: 0 }, a.heading),
+        rot({ x: 0, y: 1 }, a.heading),
+        rot({ x: 1, y: 0 }, b.heading),
+        rot({ x: 0, y: 1 }, b.heading),
+      ];
   let minPen = Infinity;
   const found: { axis: Vec2; ov: number }[] = [];
   for (const ax of axes) {
@@ -1482,10 +1589,16 @@ function overIntakeRoof(
 function robotTopZ(r: RobotState, p: Vec2): { z: number; overIntake: boolean } | null {
   if (overIntakeRoof(r, p)) return { z: C.intakeLidZ(r.spec), overIntake: true };
   const local = rot({ x: p.x - r.pos.x, y: p.y - r.pos.y }, -r.heading);
-  const hl = r.spec.length / 2;
-  const half = r.spec.width / 2;
   // the chassis top, out to where an artifact's own edge still overlaps it
   const pad = C.BALL_RADIUS;
+  // an imported robot's top is its hull at its measured height
+  if (r.spec.imported) {
+    return polyFeature(r.spec.imported.hull, local).depth >= -pad
+      ? { z: r.spec.imported.heightIn, overIntake: false }
+      : null;
+  }
+  const hl = r.spec.length / 2;
+  const half = r.spec.width / 2;
   if (Math.abs(local.x) <= hl + pad && Math.abs(local.y) <= half + pad) {
     return { z: C.ROBOT_HEIGHT, overIntake: false };
   }
@@ -1627,6 +1740,33 @@ function ballRobotFrontContact(
 }
 
 export function collideBallRobot(b: Artifact, r: RobotState): void {
+  /**
+   * AN IMPORTED ROBOT IS ITS HULL, CLOSED, to an artifact the artifact solve does not own — the
+   * same closed polygon `robotSolids` gives that solve (the mechanism lane carves the mouth).
+   * Ground artifacts are entirely the solve's for an import (its chassis collider IS the whole
+   * hull), so only a FLIGHT artifact is resolved here.
+   */
+  if (r.spec.imported) {
+    if (b.state.kind === 'ground') return;
+    const R = b.r ?? C.BALL_RADIUS;
+    const local = rot({ x: b.pos.x - r.pos.x, y: b.pos.y - r.pos.y }, -r.heading);
+    const f = polyFeature(r.spec.imported.hull, local);
+    const pen = R + f.depth;
+    if (pen <= 0) return;
+    const n = rot({ x: f.nx, y: f.ny }, r.heading);
+    const cl = rot(f.cp, r.heading);
+    const cpw = { x: cl.x + r.pos.x, y: cl.y + r.pos.y };
+    const c = clampBallPosToStatics({ x: b.pos.x + n.x * pen, y: b.pos.y + n.y * pen }, R);
+    b.pos.x = c.x;
+    b.pos.y = c.y;
+    const sv = robotPointVelocity(r, cpw);
+    const vn = (b.vel.x - sv.x) * n.x + (b.vel.y - sv.y) * n.y;
+    if (vn < 0) {
+      b.vel.x -= n.x * vn * (1 + C.BALL_ROBOT_RESTITUTION);
+      b.vel.y -= n.y * vn * (1 + C.BALL_ROBOT_RESTITUTION);
+    }
+    return;
+  }
   // above the mouth's opening the intake is not open — see ballRobotFrontContact
   const overMouth = b.z >= 2 * C.BALL_RADIUS;
   const contact = overMouth ? ballRobotFrontContact(r, b.pos) : ballRobotContact(r, b.pos);

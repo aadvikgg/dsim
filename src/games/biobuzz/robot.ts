@@ -1,6 +1,7 @@
 import type { Artifact, RobotCommand, RobotSpec, RobotState, Vec2, World } from '../../types';
 import { INTAKE_RAIL_T, SIM_DT } from '../../config';
-import type { RobotSolids, SolidShape } from '../../sim/artifactSolids';
+import { importedSolids, type RobotSolids, type SolidShape } from '../../sim/artifactSolids';
+import { importedExtents } from '../../sim/imported';
 import { debouncedPress } from '../../sim/robot';
 import { clamp, datan2, dcos, dsin, hyp, rot, wrapAngle } from '../../math';
 import { GRAVITY } from '../../config';
@@ -152,6 +153,9 @@ export function bbMouths(spec: RobotSpec): LocalRect[] {
  * whose collision box is not a rectangle.
  */
 export function bbFootprint(spec: RobotSpec): { front: number; rear: number; half: number } {
+  // an IMPORTED robot: its hull's bounding box, exactly what `footprintExtents` returns for it
+  // (the hull already includes the sweeper — no reach is added)
+  if (spec.imported) return importedExtents(spec.imported);
   const reach = bbIntakeReach(spec);
   const mount = bbIntakeMountOf(spec);
   const ends = mount === 'front' || mount === 'frontback';
@@ -199,6 +203,9 @@ export function bbRobotSolids(
   heldBalls: readonly Artifact[],
   radius: number = BB_POLLEN_R,
 ): RobotSolids {
+  // an IMPORTED robot is its closed hull plus what it holds (`importedSolids` — the shared
+  // interim until the mechanism lane carves the sweeper's mouth out of it)
+  if (r.spec.imported) return importedSolids(r, heldBalls, radius);
   const hl = r.spec.length / 2;
   const hw = r.spec.width / 2;
   const reach = bbIntakeReach(r.spec);

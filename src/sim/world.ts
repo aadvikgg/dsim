@@ -632,7 +632,11 @@ export function step(world: World, dt: number, commands: Map<number, RobotComman
     }
     for (const b of activeFlight) {
       if (b.z > C.ROBOT_HEIGHT) continue;
-      for (const r of world.robots) collideBallRobot(b, r);
+      for (const r of world.robots) {
+        // an imported robot is as tall as it measured, not `ROBOT_HEIGHT`
+        if (r.spec.imported && b.z > r.spec.imported.heightIn) continue;
+        collideBallRobot(b, r);
+      }
     }
   }
   for (const b of activeFlight) {

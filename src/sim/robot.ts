@@ -4,6 +4,7 @@ import { approach, rot, wrapAngle, hyp, dsin, dcos, datan2, clamp } from '../mat
 import { classifierRect, flywheelSpinTarget, goalCenter, launchTriangles, viewAngleOf } from './field';
 import { activeDrive, driveParams, motorStep, motorStepVec, shoveMass } from './drivetrain';
 import { robotIntersectsConvex } from './physics';
+import { importedInertia, importedWheels } from './imported';
 import { robotsEnabled } from './match';
 
 /** launch is legal when ANY part of the robot is inside a launch zone. Uses a
@@ -233,12 +234,17 @@ export function updateRobot(
     const cw = targetOmega;
     const hx = Math.max(r.spec.length / 2 - C.WHEEL_INSET, 1);
     const hy = Math.max(r.spec.width / 2 - C.WHEEL_INSET, 1);
-    const pos: [number, number][] = [
-      [hx, hy],
-      [hx, -hy],
-      [-hx, hy],
-      [-hx, -hy],
-    ]; // FL, FR, BL, BR — matches drawRobot's wheel order
+    // an imported robot steers its pods where its wheels actually are (FL, FR, BL, BR — the
+    // same order), and the forward kinematics divides by their own Σr² rather than 4(hx² + hy²)
+    const impWheels = r.spec.imported ? importedWheels(r.spec.imported) : null;
+    const pos: [number, number][] = impWheels
+      ? impWheels.map((w): [number, number] => [w.x, w.y])
+      : [
+          [hx, hy],
+          [hx, -hy],
+          [-hx, hy],
+          [-hx, -hy],
+        ]; // FL, FR, BL, BR — matches drawRobot's wheel order
     const maxStep = C.MODULE_SLEW_RATE * dt;
     const speedFrac = clamp(hyp(r.vel.x, r.vel.y) / dp.maxSpeed, 0, 1);
     let sumX = 0;
@@ -299,7 +305,9 @@ export function updateRobot(
     // the command when perfect; the pod errors make it drift + yaw)
     targetFwd = sumX / 4;
     targetStrafe = sumY / 4;
-    targetOmega = sumT / (4 * (hx * hx + hy * hy));
+    targetOmega = impWheels
+      ? sumT / Math.max(pos.reduce((a, [x, y]) => a + x * x + y * y, 0), 1e-6)
+      : sumT / (4 * (hx * hx + hy * hy));
   }
 
   // motor torque–speed integration in the robot frame: accel falls off toward the
@@ -552,6 +560,11 @@ export function updateRobot(
  * the moment arms rather than the world positions. FL/FR/BR/BL, matching `moduleAngles`.
  */
 export function wheelLocals(spec: RobotSpec): { x: number; y: number }[] {
+  if (spec.imported) {
+    // the import's own wheels (`importedWheels` speaks FL, FR, BL, BR; this speaks FL, FR, BR, BL)
+    const w = importedWheels(spec.imported);
+    return [w[0], w[1], w[3], w[2]];
+  }
   const ix = Math.max(spec.length / 2 - C.WHEEL_INSET, 1);
   const iy = Math.max(spec.width / 2 - C.WHEEL_INSET, 1);
   return [
@@ -563,6 +576,8 @@ export function wheelLocals(spec: RobotSpec): { x: number; y: number }[] {
 }
 
 export function chassisInertia(m: number, spec: RobotSpec): number {
+  // an imported robot: a uniform lamina in its hull's shape, about the origin the solver pins
+  if (spec.imported) return importedInertia(m, spec.imported);
   return (m * (spec.length * spec.length + spec.width * spec.width)) / 12;
 }
 
