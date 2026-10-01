@@ -33,6 +33,7 @@ import { serverPhysics } from '../src/games/types';
 import { simModuleFor } from '../src/games/sim';
 import type { GameId, Physics } from '../src/types';
 import type { PendingMatch } from './matchTypes';
+import { hasImportCap, isImportedSpec, type ImportRoomState } from '../src/net/imported';
 import {
   CB_ACTIVE,
   CB_BEHAVIOUR,
@@ -76,6 +77,8 @@ export interface RoomHandle {
   holdsCapacity(): boolean;
   isAbandonable(): boolean;
   spectatorCount(): number;
+  /** what the room holds as far as imported robots go — the join, rejoin and spectate doors read it */
+  importState(): ImportRoomState;
   add(client: Client): void;
   /** a worker room answers with the socket key the spectator's `detach` must carry */
   addSpectator(client: Client): number | void;
@@ -201,6 +204,7 @@ function initialFacts(code: string, config: RoomConfig, capacity: number): RoomF
     holds: true,
     abandonable: true,
     spectators: 0,
+    imports: { hasImport: false, capless: false },
   };
 }
 
@@ -208,7 +212,16 @@ export class RemoteRoom implements RoomHandle {
   private facts: RoomFacts;
   private seq = 0;
   /** populating ops posted and not yet reflected in `facts` */
-  private readonly unacked: { seq: number; kind: 'add' | 'spec' | 'reattach' | 'pending'; uid?: string; id?: string }[] = [];
+  private readonly unacked: {
+    seq: number;
+    kind: 'add' | 'spec' | 'reattach' | 'pending';
+    uid?: string;
+    id?: string;
+    /** an `add` that brings an imported robot, and any `add`/`spec` whose client lacks the cap —
+     *  counted by `importState` until the worker's mirror has them */
+    imp?: boolean;
+    nocap?: boolean;
+  }[] = [];
   private pending: PendingMatch | null = null;
   private tag = '';
   /** keys of the sockets whose `room` is this one */
@@ -335,12 +348,30 @@ export class RemoteRoom implements RoomHandle {
   spectatorCount(): number {
     return this.facts.spectators + this.unackedOf('spec');
   }
+  /**
+   * `Room.importState`, from the mirror. `allows` is answered here (config + the roster this thread
+   * staged, as `stagedFor` is); the other two are the worker's last word PLUS the seats and
+   * watchers posted since, for the reason `canJoin` counts an `add` in flight: two joins inside a
+   * millisecond must each see the other.
+   */
+  importState(): ImportRoomState {
+    return {
+      allows: this.config.kind === 'versus' && !this.pending,
+      hasImport: this.facts.imports.hasImport || this.unacked.some((u) => u.imp),
+      capless: this.facts.imports.capless || this.unacked.some((u) => u.nocap),
+    };
+  }
 
   // ---- writes ----
 
-  private populate(kind: 'add' | 'spec' | 'reattach' | 'pending', uid?: string, id?: string): number {
+  private populate(
+    kind: 'add' | 'spec' | 'reattach' | 'pending',
+    uid?: string,
+    id?: string,
+    flags?: { imp?: boolean; nocap?: boolean },
+  ): number {
     const seq = ++this.seq;
-    this.unacked.push({ seq, kind, uid, id });
+    this.unacked.push({ seq, kind, uid, id, ...flags });
     return seq;
   }
 
@@ -355,7 +386,10 @@ export class RemoteRoom implements RoomHandle {
   add(client: Client): void {
     const sock = sockFor(client.send);
     this.reviveIfForgotten();
-    const seq = this.populate('add', client.userId, client.id);
+    const seq = this.populate('add', client.userId, client.id, {
+      imp: isImportedSpec(client.player.spec),
+      nocap: !hasImportCap(client.caps),
+    });
     this.attached.add(sock);
     this.pool.post(this.slot, { k: 'add', rid: this.rid, seq, sock, client: dataOf(client) });
     // what index.ts reads back as this socket's `conn` and hands to `detach`
@@ -365,7 +399,7 @@ export class RemoteRoom implements RoomHandle {
   addSpectator(client: Client): number {
     const sock = sockFor(client.send);
     this.reviveIfForgotten();
-    const seq = this.populate('spec');
+    const seq = this.populate('spec', undefined, undefined, { nocap: !hasImportCap(client.caps) });
     this.attached.add(sock);
     this.pool.post(this.slot, { k: 'spec', rid: this.rid, seq, sock, client: dataOf(client) });
     return sock;

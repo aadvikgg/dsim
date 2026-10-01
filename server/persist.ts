@@ -22,6 +22,7 @@ import { persistVersusMatch } from './ranked';
 // imports repo.ts, so repo.ts importing it back from here would be a cycle.
 import { scrubSpecNames } from './moderation';
 import { recordScore } from '../src/sim/replay';
+import { isImportedSpec, setupsHaveImported } from '../src/net/imported';
 import { simModuleFor } from '../src/games/sim';
 import { serverPhysics } from '../src/games/types';
 import type { BehaviourReport, DodgeReport, MatchOutcome, PersistOutcome } from './room';
@@ -61,6 +62,21 @@ export async function persistMatch(o: MatchOutcome): Promise<PersistOutcome> {
   const game = o.game ?? 'decode';
   if (!simModuleFor(game).scored) {
     console.log(`[persist] SKIP — unscored game (${game})`);
+    return {};
+  }
+  /**
+   * A RECORD NEVER HOLDS AN IMPORTED ROBOT (docs/area/netcode.md, IMPORTED ROBOTS). A record room
+   * refuses one at the door and `Room.beginMatch` strips it, so this cannot fire in a coherent
+   * deploy; it is the writer's own check, before a replay row or a board row exists, and
+   * `submitRecord` refuses the same case at the table. Ranked cannot reach here with one either
+   * (the queue, the staged join and the re-pick all refuse), and a custom room is allowed to keep
+   * its match, replay stamped format 3.
+   */
+  if (
+    o.config.kind === 'record' &&
+    (setupsHaveImported(o.replay.setups) || o.participants.some((p) => isImportedSpec(p.spec)))
+  ) {
+    console.warn('[persist] SKIP record — an imported robot cannot set a record');
     return {};
   }
   if (!dbEnabled) {

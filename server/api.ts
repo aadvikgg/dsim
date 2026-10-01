@@ -9,6 +9,7 @@ import { BALANCE_VERSION, SIM_DT } from '../src/config';
 import { monthsFor, policyFromEnv, whyNoMonths } from './kofi';
 import { CHALLENGE_FORMATS } from '../src/net/protocol';
 import { sanitizeReplay } from '../src/net/sanitize';
+import { replayHasImported } from '../src/net/imported';
 import { moderateName, scrubName } from './moderation';
 import { LAN_UPLOADS } from './lanUploads';
 import { dbEnabled } from './db/pool';
@@ -407,6 +408,13 @@ async function saveLanUpload(
     return json(400, { error: 'missing or malformed matchId' }), true;
   }
 
+  /* AN IMPORTED ROBOT'S MATCH STAYS ON THE DEVICE. `sanitizeReplay` carries what the sim reads
+     and nothing else, so an upload that holds one is refused outright (400 is a verdict, which
+     `uploadLanRun` retires locally) rather than stored as a match nobody can re-simulate. The
+     client never sends one (`pendingLanUploads`); this is the door behind it. */
+  if (replayHasImported(body.replay)) {
+    return json(400, { error: 'a match with an imported robot stays on the device', code: 'imported' }), true;
+  }
   const replay = sanitizeReplay(body.replay, game);
   if (!replay) return json(400, { error: 'not a playable replay' }), true;
 
@@ -1150,6 +1158,11 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
         body = JSON.parse(await readBody(req)) as Record<string, unknown>;
       } catch {
         return json(400, { error: 'bad request' }), true;
+      }
+      // A RUN WITH AN IMPORTED ROBOT STAYS ON THE DEVICE (docs/area/netcode.md, IMPORTED ROBOTS).
+      // The client keeps it out of its backlog; this is the door behind that one.
+      if (replayHasImported(body.replay)) {
+        return json(400, { error: 'a run with an imported robot stays on the device', code: 'imported' }), true;
       }
       const replay = sanitizeReplay(body.replay, game);
       if (!replay) return json(400, { error: 'not a playable replay' }), true;

@@ -30,6 +30,7 @@ import { VerifyEmailInline } from './VerifyCodeForm';
 import { OptRow, ToggleRow } from './OptRow';
 import { formatLabel, type PendingChallenge } from './challenge';
 import { clearStagedMatch, loadStagedMatch, saveStagedMatch } from '../net/stagedMatch';
+import { standardRobotFor } from '../settings';
 
 /**
  * ONE string for the one fact, on both waiting screens.
@@ -547,17 +548,26 @@ export function Matchmaking({
     a.sfxMatchFound();
   };
 
-  const playerInfo = (): Omit<LobbyPlayer, 'clientId'> => ({
-    name: settings.spec.teamName || 'Player',
-    teamName: settings.spec.teamName,
-    teamNumber: settings.spec.teamNumber,
-    alliance: 'red' as const, // matchmaking assigns the real alliance
-    startIndex: settings.startIndex,
-    startPose: settings.startPose ?? null,
-    ready: false, // the pre-match strategy screen owns readiness now
-    spec: settings.spec,
-    assists: settings.assists,
-  });
+  /**
+   * RANKED USES A STANDARD ROBOT. The server refuses an imported one at the queue door
+   * (`IMPORT_REFUSED_RANKED`), so a player whose active robot is an import queues with the last
+   * standard robot they had (`standardRobotFor`) instead of being turned away; the strategy window
+   * says so and offers the standard ones to swap to. The active robot itself is left alone.
+   */
+  const playerInfo = (): Omit<LobbyPlayer, 'clientId'> => {
+    const spec = standardRobotFor(settings);
+    return {
+      name: spec.teamName || 'Player',
+      teamName: spec.teamName,
+      teamNumber: spec.teamNumber,
+      alliance: 'red' as const, // matchmaking assigns the real alliance
+      startIndex: settings.startIndex,
+      startPose: settings.startPose ?? null,
+      ready: false, // the pre-match strategy screen owns readiness now
+      spec,
+      assists: spec === settings.spec ? settings.assists : (spec.assists ?? settings.assists),
+    };
+  };
   // the sockets that outlive this render read it from here, so it is refreshed every render
   // rather than frozen into whichever closure happened to create them.
   playerInfoRef.current = playerInfo;

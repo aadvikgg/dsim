@@ -1350,6 +1350,69 @@ async function main(): Promise<void> {
     );
 
     /**
+     * ---- AN IMPORTED ROBOT IS NOT A RECORD (docs/area/netcode.md, IMPORTED ROBOTS) -----------
+     * A record room refuses one at the door and strips it at `beginMatch`; `submitRecord` is the
+     * table's own refusal, for a caller that skipped both. DECODE is the control again: the SAME
+     * submission with a standard robot on it is accepted. And a custom match keeps its replay, as
+     * format 3 (the stamp that makes an older build refuse it), with the import intact in its
+     * setups.
+     */
+    {
+      const { DEFAULT_SPEC, DEFAULT_ASSISTS } = await import('../src/sim/spawn');
+      const { REPLAY_FORMAT_IMPORTED } = await import('../src/net/imported');
+      const imp = {
+        v: 1 as const, id: '0123456789abcdef', heightIn: 12,
+        hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }],
+      };
+      let refused = '';
+      try {
+        await repo.submitRecord({
+          userId: 'phys-dec', mode: 'solo', drivetrain: 'mecanum', score: 99,
+          balanceVersion: SEASON, replayId: id2d, game: 'decode',
+          config: { spec: { ...DEFAULT_SPEC, imported: imp }, assists: DEFAULT_ASSISTS },
+        });
+      } catch (e) {
+        refused = e instanceof Error ? e.message : String(e);
+      }
+      check('imports: submitRecord REFUSES a record whose robot is imported', /imported/.test(refused), refused);
+      let refusedPartner = '';
+      try {
+        await repo.submitRecord({
+          userId: 'phys-dec', partnerId: 'phys-a', mode: 'duo', drivetrain: 'mecanum', score: 99,
+          balanceVersion: SEASON, replayId: id2d, game: 'decode',
+          config: { spec: { ...DEFAULT_SPEC }, assists: DEFAULT_ASSISTS, partnerSpec: { ...DEFAULT_SPEC, imported: imp } },
+        });
+      } catch (e) {
+        refusedPartner = e instanceof Error ? e.message : String(e);
+      }
+      check('imports: ...and so does a duo whose PARTNER brought one', /imported/.test(refusedPartner), refusedPartner);
+      // a player of its own: a row under 'phys-dec' would move the personal-best checks below
+      await repo.ensureProfile('phys-imp', 'Importer');
+      const okId = await repo.submitRecord({
+        userId: 'phys-imp', mode: 'solo', drivetrain: 'mecanum', score: 98,
+        balanceVersion: SEASON, replayId: id2d, game: 'decode',
+        config: { spec: { ...DEFAULT_SPEC }, assists: DEFAULT_ASSISTS },
+      });
+      check('imports: ...while the same submission with a standard robot is stored', !!okId);
+
+      const custom = await repo.saveReplay(
+        {
+          format: REPLAY_FORMAT_IMPORTED, balanceVersion: 4, sim: 2, game: 'decode', mode: 'match', seed: 77, ticks: 60,
+          tracks: { 0: [1, 2, 3, 4, 5, 6, 7] },
+          setups: [{ id: 0, alliance: 'red', startIndex: 0, assists: DEFAULT_ASSISTS, spec: { ...DEFAULT_SPEC, imported: imp } }],
+        },
+        SEASON,
+        'decode',
+      );
+      const back = await repo.getReplay(custom);
+      check('imports: a custom room\'s replay is stored as format 3', back?.format === REPLAY_FORMAT_IMPORTED, `format=${back?.format}`);
+      check(
+        'imports: ...with the import still in its setups',
+        (back?.setups[0]?.spec as { imported?: { id?: string } } | undefined)?.imported?.id === imp.id,
+      );
+    }
+
+    /**
      * THE PRE-RULING ROW. Written with raw SQL on purpose: `submitRecord` refuses it now, and
      * the rows that matter are the ones already in the table from before the ruling. Its score
      * is HIGHER than the same player's 3D run, which is the shape that breaks a naive fix —

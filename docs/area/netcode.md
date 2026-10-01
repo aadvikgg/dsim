@@ -320,6 +320,44 @@ The old P2P lockstep/mesh/TURN/Supabase-lobby is DELETED. Full roadmap: `docs/ne
 - **A CUSTOM ROOM PLAYS ZENITH AUTOS** (`docs/area/autos.md`): `{ t: 'zenithAuto' }` behind the
   `'zenithAuto'` server cap, one message, never on the roster; the server's auto seat runs in
   `frameCommands` beside the bots, so its commands are recorded and ride `cmds`. Never ranked.
+- ⚠️ **IMPORTED ROBOTS PLAY IN CUSTOM AND LAN ROOMS ONLY** (`RobotSpec.imported`,
+  `docs/robot-import-plan.md`; rules and sentences in `src/net/imported.ts`). ⚠️ **A SERVER
+  CHANGE, it needs a deploy.** The server decides, the client only avoids sending what will be
+  refused.
+  - **The capability `'robotImport'` is in `CLIENT_CAPS` and `SERVER_CAPS`.** The client offers an
+    imported spec to a room only when the server advertises it (`roomTakesImportedRobots`: the
+    cloud's `serverCaps()`, a LAN server's own presence, or true for a room this tab hosts). An older
+    server's `coerceSpec` drops the field without a word, so the client would predict one robot
+    while the room stepped another. Otherwise the lobby sends the last standard robot and says so.
+  - **It is a hard gate on the room, like `'bb3d'`.** A room that holds an imported robot admits
+    only clients with the cap (join, rejoin, spectate: a watcher steps the world too), and an
+    imported robot is never added to a room that has a seat or watcher without it. One rule,
+    `importAdmission`, asked at the door (`server/index.ts`, from `RoomHandle.importState()`; a
+    worker room mirrors it in `RoomFacts.imports` and counts seats still in flight), again inside
+    `Room.add`/`addSpectator` (the mirror can be a message behind, and the LAN tab host has no door),
+    on an `update` patch that carries an import, and at `startMatch` (refuses with a sentence).
+  - **Where it is refused outright:** the ranked `queue` message, before any attempt exists (a late
+    refusal would charge the other players); a join to a staged ranked room or a record room; an
+    `update` there. `Room.allowsImportedRobots()` is `playsZenithAutos` without the game flag: a
+    `versus` room that is not staged. `beginMatch` strips `imported` from every setup in a room that
+    does not allow it, which covers a rematch and any path that skipped a door. `submitRecord` throws
+    on an imported robot, and `persistMatch` skips a record that holds one.
+  - **Read the wire, not `coerceSpec`.** The doors test what the client SENT (`msg.player.spec`,
+    `msg.patch.spec`). `coerceSpec` starts from the seat's current spec, so a patch that re-picks a
+    standard robot must drop the import itself (`vetImportedPatch`); do not rely on the coercer.
+  - **Replays:** a container with an imported robot is written as `format: 3`
+    (`REPLAY_FORMAT_IMPORTED`); every other replay is still format 2, byte for byte
+    (`REPLAY_FORMAT_BASE`). An older build reads 3 as `future` and refuses it rather than playing a
+    rectangle robot. A custom room still saves its match and replay (watchable by its players and
+    staff, as before). **Practice and LAN runs with an imported robot stay on the device**: marked
+    `imported` in their local index, left out of `pendingPracticeUploads`/`pendingLanUploads`, and
+    refused (400) by `/api/practice` and `/api/lan` as the door behind that.
+  - **`hostWorker.seat()` sanitises the guest's player** (`sanitizePlayer`, caps through
+    `coerceCaps`) like the cloud join. It did not: the roster carried a guest's raw wire spec until
+    the match spawned.
+  - Checks: `smoke.ts` "imports/…" (rules, replay, device-only runs, settings, rooms, source pins
+    for the doors that need a socket), `npm run test:workers` (the mirror, and the real doors on both
+    server shapes), `npm run dbtest` ("imports:").
 - ⚠️ **THE LOAD HOLD: A STARTED `'3d'` MATCH WAITS AT TICK 0 UNTIL EVERY SEAT CAN PLAY IT**
   (owner, 2026-09-24). The gate above was not enough and matches, record runs included, still
   opened behind the loading panel. `physicsReady` is sent from the LOBBY and covers the physics

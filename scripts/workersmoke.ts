@@ -28,7 +28,8 @@ import {
   type RoomConfig,
   type ServerMsg,
 } from '../src/net/protocol';
-import { DEFAULT_ASSISTS, DEFAULT_SPEC } from '../src/sim/spawn';
+import { DEFAULT_ASSISTS, DEFAULT_SPEC, coerceSpec } from '../src/sim/spawn';
+import { IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_REFUSED_HERE, IMPORT_REFUSED_RANKED, IMPORT_ROOM_NEEDS_UPDATE, isImportedSpec } from '../src/net/imported';
 import type { Alliance, RobotCommand } from '../src/types';
 import type { Client } from '../server/room';
 import {
@@ -70,6 +71,14 @@ function makePlayer(name: string, alliance: Alliance, startIndex: number): Omit<
     assists: { ...DEFAULT_ASSISTS },
   };
 }
+
+/** a minimal imported-robot descriptor — the wire only needs it to be present */
+const IMP = {
+  v: 1,
+  id: '0123456789abcdef',
+  heightIn: 12,
+  hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }],
+};
 
 /** a full-throw stick whose direction turns slowly. A straight one pins a DECODE start pose
  *  against its wall (0.1 in on BOTH servers), and one that wanders in magnitude can sit near
@@ -255,6 +264,36 @@ async function partA(): Promise<void> {
   lobby.detach('b2', c3.conn, true);
   const gone = await until(() => (workerPerf() ?? []).every((x) => x.rooms === 0), 10_000, 100);
   check('A: ...and is forgotten again when it empties', gone, JSON.stringify(workerPerf()?.map((x) => x.rooms)));
+
+  // ---- imported robots across the thread (docs/area/netcode.md, IMPORTED ROBOTS) ---------------
+  // The join, rejoin and spectate doors ask `importState()` of the room, and for a room on a
+  // worker that is a MIRROR a message behind plus whatever has been posted since — the same
+  // arrangement `canJoin` counts an add in flight for. The worker's own Room refuses the rest.
+  {
+    const imp = createRoom('wt-imp', () => {}, { kind: 'versus', game: 'decode' });
+    const si = fakeSocket();
+    const ci = clientOn(si, 'i1', 'u-i', 'red');
+    ci.player.spec = { ...ci.player.spec, imported: IMP } as typeof ci.player.spec;
+    check('A: a custom room on a worker allows imported robots (answered on the socket thread)', imp.importState().allows);
+    imp.add(ci);
+    check('A: an imported robot still in flight already counts', imp.importState().hasImport);
+    await until(() => si.msgs('welcome').length > 0, 5000);
+    await until(() => imp.lobbySummary().players === 1, 2000);
+    check('A: ...and so does the mirror once the worker has applied it', imp.importState().hasImport && !imp.importState().capless);
+    const so = fakeSocket();
+    const co = clientOn(so, 'o1', 'u-o', 'blue');
+    co.caps = [];
+    imp.add(co);
+    check('A: a seat without the cap, in flight, counts as one (capless)', imp.importState().capless);
+    await sleep(400);
+    check(
+      'A: the worker room refuses that seat beside an imported robot, with the sentence, and does not seat it',
+      so.msgs('welcome').length === 0 && so.msgs('error').some((m) => (m as { message?: string }).message === IMPORT_ROOM_NEEDS_UPDATE),
+    );
+    check('A: ...and the mirror settles back to no seat without the cap', await until(() => !imp.importState().capless, 3000));
+    const rec = createRoom('wt-imp-rec', () => {}, { kind: 'record', record: 'solo', game: 'decode' });
+    check('A: a record room on a worker does not allow imported robots', !rec.importState().allows);
+  }
 
   // ---- reattach and the report resolvers answer across the thread ----------------------------
   const vs = createRoom('wt-vs', () => {}, { kind: 'versus', game: 'decode' });
@@ -587,6 +626,63 @@ async function scenarios(s: Server): Promise<void> {
     await sleep(100);
   }
   check(L('a solo record run is reaped on a clean close'), capAfter === capRun - 1, `${capRun} → ${capAfter}`);
+
+  // ---- imported robots at the real doors (docs/area/netcode.md, IMPORTED ROBOTS) -----------------
+  // Read off what the client SENT, so the first two do not depend on `coerceSpec` carrying the field.
+  const impP = (name: string, alliance: Alliance) => ({ ...makePlayer(name, alliance, 0), spec: { ...DEFAULT_SPEC, name, imported: IMP } as typeof DEFAULT_SPEC });
+  const stdP = (name: string, alliance: Alliance) => makePlayer(name, alliance, 0);
+  {
+    const X = await open();
+    X.send({ t: 'join', room: newCode(), config: { kind: 'record', record: 'solo', game: 'decode' }, player: impP('X', 'blue'), caps: CLIENT_CAPS });
+    const e = await X.until('error');
+    check(L('a record room refuses an imported robot at the door, with the sentence'), e?.message === IMPORT_REFUSED_HERE, e?.message);
+    X.close();
+    const Q = await open();
+    Q.send({ t: 'queue', mode: '1v1', player: impP('Q', 'red'), homeRegion: '', accessMs: 0, caps: CLIENT_CAPS, game: 'decode' });
+    const qe = await Q.until('error');
+    check(L('the ranked queue refuses an imported robot before any queue attempt exists'), qe?.message === IMPORT_REFUSED_RANKED, qe?.message);
+    Q.close();
+  }
+  {
+    // a seat without the cap is in first, and an import is not added beside it. Read off what the
+    // newcomer SENT, so it does not depend on `coerceSpec` carrying the field.
+    const room2 = newCode();
+    const K = await open();
+    K.send({ t: 'join', room: room2, config: versus, player: stdP('K', 'red'), caps: [] });
+    await K.until('welcome');
+    await K.until('roster', (m) => m.players.length === 1);
+    const M = await open();
+    M.send({ t: 'join', room: room2, config: versus, player: impP('M', 'blue'), caps: CLIENT_CAPS });
+    const me = await M.until('error');
+    check(L('an imported robot is not added to a room with a seat that lacks the cap'), me?.message === IMPORT_MEMBER_NEEDS_UPDATE, me?.message);
+    M.close();
+    K.close();
+  }
+  // the rest read the roster the room holds, which is what `coerceSpec` kept
+  if (isImportedSpec(coerceSpec({ ...DEFAULT_SPEC, imported: IMP }, DEFAULT_SPEC, 'decode'))) {
+    const room = newCode();
+    const P = await open();
+    P.send({ t: 'join', room, config: versus, player: impP('P', 'red'), caps: CLIENT_CAPS });
+    check(L('a custom room seats an imported robot (client with the cap)'), !!(await P.until('welcome')));
+    await P.until('roster', (m) => m.players.length === 1);
+    const O = await open();
+    O.send({ t: 'join', room, config: versus, player: stdP('O', 'blue'), caps: [] });
+    const oe = await O.until('error');
+    check(L('...and turns away a build without the cap, with the sentence, at the door'), oe?.message === IMPORT_ROOM_NEEDS_UPDATE, oe?.message);
+    O.close();
+    const W = await open();
+    W.send({ t: 'spectate', room, caps: [] });
+    const we = await W.until('error');
+    check(L('...and a watcher without it'), we?.message === IMPORT_ROOM_NEEDS_UPDATE, we?.message);
+    W.close();
+    const G = await open();
+    G.send({ t: 'join', room, config: versus, player: stdP('G', 'blue'), caps: CLIENT_CAPS });
+    check(L('...while a build with it is seated'), !!(await G.until('welcome')));
+    P.close();
+    G.close();
+  } else {
+    console.log(`SKIP B[${s.label}]: [needs coerceSpec carry] a room holding an imported robot turns away a build without the cap — coerceSpec does not carry \`imported\` yet`);
+  }
 }
 
 async function spread(s: Server): Promise<void> {

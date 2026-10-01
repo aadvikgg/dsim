@@ -5,7 +5,9 @@ import type { RewardGrant } from '../rewards';
 import type { AccessGroup, BannerKind, LiveRoom, LockdownScope, SiteBanner, StaffRole } from './protocol';
 import type { ReportedUser, ReportRow } from '../report';
 import type { AssistConfig, GameId, RobotSpec } from '../types';
-import { gameServerHttpUrl, setLanFromServer } from './env';
+import { gameServerHttpUrl, lanActive, lanServerHttpUrl, setLanFromServer } from './env';
+import { tabHosting } from '../lan/hosting';
+import { ROBOT_IMPORT_CAP, replayHasImported } from './imported';
 import { getAuthToken } from '../lib/authClient';
 import { readAccountSettings, sendWithTokenRetry } from './authFetch';
 import { DISCORD_REGION } from './discordActivity';
@@ -446,6 +448,37 @@ export function serverCaps(): Promise<string[]> {
 }
 
 /**
+ * MAY AN IMPORTED ROBOT BE SENT TO THE SERVER THIS ROOM IS ON? (docs/area/netcode.md, IMPORTED
+ * ROBOTS.) The server has to advertise `'robotImport'`: an older one drops `spec.imported` without
+ * a word and steps a standard robot while this client predicts the imported one.
+ *
+ * Three answers, because three servers can be on the other end of a room:
+ *  · a room THIS TAB hosts (`tabHosting`) runs this build's own `Room`, so yes;
+ *  · a LAN server reached by address is its own machine, with its own build (the desktop app
+ *    updates on the desktop's schedule), so its OWN presence is asked, not the cloud's;
+ *  · otherwise the cloud's `serverCaps()`.
+ * Any failure reads as "no": the caller then plays the standard robot, which is the safe direction.
+ */
+const lanCapsCache = new Map<string, Promise<boolean>>();
+export function roomTakesImportedRobots(): Promise<boolean> {
+  if (tabHosting()) return Promise.resolve(true);
+  if (lanActive()) {
+    const base = lanServerHttpUrl();
+    if (!base) return Promise.resolve(false);
+    let hit = lanCapsCache.get(base);
+    if (!hit) {
+      hit = fetch(`${base}/api/presence`, { cache: 'no-store' })
+        .then((r) => (r.ok ? (r.json() as Promise<Presence>) : null))
+        .then((p) => Array.isArray(p?.caps) && p.caps.includes(ROBOT_IMPORT_CAP))
+        .catch(() => false);
+      lanCapsCache.set(base, hit);
+    }
+    return hit;
+  }
+  return serverCaps().then((c) => c.includes(ROBOT_IMPORT_CAP));
+}
+
+/**
  * Live presence: who's online + how deep each ranked queue is, so a player can
  * see it BEFORE queueing. Cheap JSON off the same host; poll it (usePresence).
  *
@@ -773,6 +806,9 @@ export async function uploadPracticeRun(
   score: number,
   game?: GameId,
 ): Promise<PracticeRun | null> {
+  // A RUN WITH AN IMPORTED ROBOT NEVER LEAVES THE DEVICE. The caller keeps it out of its backlog
+  // (`pendingPracticeUploads`), the server refuses it, and this is the last line: no request at all.
+  if (replayHasImported(replay)) return null;
   const base = gameServerHttpUrl();
   const token = await getAuthToken();
   if (!base || !token) return null;
@@ -878,6 +914,9 @@ export async function uploadLanRun(
   participants: LanParticipant[],
   game?: GameId,
 ): Promise<LanRun | 'refused' | null> {
+  // as `uploadPracticeRun`: an imported robot's match stays on the host's device ('refused' retires
+  // it from the backlog rather than leaving it at the head of the queue)
+  if (replayHasImported(replay)) return 'refused';
   const base = gameServerHttpUrl();
   const token = await getAuthToken();
   if (!base || !token) return null;

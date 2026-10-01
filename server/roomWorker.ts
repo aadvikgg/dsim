@@ -139,6 +139,7 @@ function pushFacts(rid: number): void {
     if (cid) seats.push([uid, cid]);
     else e.uids.delete(uid); // a seat, once gone, is not reclaimed by account
   }
+  const imp = r.importState();
   const f: RoomFacts = {
     ack: e.ack,
     lobby: r.lobbySummary(),
@@ -149,6 +150,7 @@ function pushFacts(rid: number): void {
     holds: r.holdsCapacity(),
     abandonable: r.isAbandonable(),
     spectators: r.spectatorCount(),
+    imports: { hasImport: imp.hasImport, capless: imp.capless },
   };
   const s = JSON.stringify(f);
   if (s === e.last) return;

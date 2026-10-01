@@ -2,7 +2,7 @@ import { lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from '
 import type { ComponentType, ReactNode } from 'react';
 import { useDialog } from './useDialog';
 import type { GameSettings } from '../game';
-import { hasStoredSettings, loadSettings, saveSettings, switchGame, syncAudioMirrors } from '../settings';
+import { hasStoredSettings, loadSettings, rememberStandardRobot, saveSettings, switchGame, syncAudioMirrors } from '../settings';
 import {
   saveAccountSettings,
   fetchAdminStatus,
@@ -991,7 +991,10 @@ export function App() {
   const update = (next: GameSettings): void => {
     // keep the legacy audio booleans in step with the volume sliders before this
     // blob reaches localStorage or the account (old clients read only those two)
-    const s = syncAudioMirrors(next);
+    // ...and keep `lastStandardSpec` in step, the standard robot ranked and record runs fall back
+    // to while the active one is an import (this is the one choke point every settings write
+    // passes through, so it is the one place that can see a standard robot go by)
+    const s = rememberStandardRobot(settingsRef.current, syncAudioMirrors(next));
     setSettings(s);
     saveSettings(s);
     if (accountUserId) {

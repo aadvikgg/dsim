@@ -77,6 +77,12 @@ export interface RoomFacts {
   holds: boolean;
   abandonable: boolean;
   spectators: number;
+  /**
+   * What the room holds as far as imported robots go (`Room.importState`, minus `allows`, which
+   * the socket thread answers itself from the config and the staged roster). The join, rejoin
+   * and spectate doors read it through `RemoteRoom.importState`.
+   */
+  imports: { hasImport: boolean; capless: boolean };
 }
 
 /** per-worker load, pushed once a second for `/api/perf` */

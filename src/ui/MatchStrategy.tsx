@@ -21,6 +21,8 @@ import { RobotCard } from './RobotCard';
 import { Menu } from './Menu';
 import { MatchAudio } from '../audio';
 import { ConsoleHead } from './ConsoleHead';
+import { isImportedSpec } from '../net/imported';
+import { standardRobotChoices } from '../settings';
 
 /** beep once per second over the final STRAT_TICK_FROM seconds of the strategy
  * deadline, rising in pitch as it nears (like a match countdown). */
@@ -167,10 +169,19 @@ export function MatchStrategy({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startRole, me?.startIndex, me?.startPose, settings.startCat]);
 
+  /**
+   * THE ACTIVE ROBOT IS AN IMPORT, and ranked refuses those (the server does, at the queue door
+   * and again on a re-pick). The room was queued with the last standard robot instead
+   * (`standardRobotFor`), so this row says so and offers STANDARD robots only. A pick here must not
+   * overwrite the imported robot the player has active, so it is remembered as the last standard
+   * one and goes to the room, and the active robot is left alone.
+   */
+  const importedActive = isImportedSpec(settings.spec);
+
   /** re-pick: swap to a saved robot (or any spec) — echoes to the server + persists */
   const pickSpec = (spec: RobotSpec): void => {
-    onSettingsChange({ ...settings, spec });
-    lobby.update({ spec, assists: settings.assists });
+    onSettingsChange(importedActive ? { ...settings, lastStandardSpec: spec } : { ...settings, spec });
+    lobby.update({ spec, assists: importedActive ? (spec.assists ?? settings.assists) : settings.assists });
   };
 
   /** the full builder edits settings.spec live; mirror every change to the server */
@@ -399,8 +410,9 @@ export function MatchStrategy({
         {ranked && (
         <section className="ds-sec">
           <h2>Your robot</h2>
+          {importedActive && <p className="ds-hint">Ranked uses a standard robot.</p>}
           <div className="ds-opts robots">
-            {settings.savedRobots.map((r, i) => {
+            {(importedActive ? standardRobotChoices(settings) : settings.savedRobots).map((r, i) => {
               const active =
                 r.length === mySpec.length &&
                 r.width === mySpec.width &&
@@ -421,9 +433,12 @@ export function MatchStrategy({
                 />
               );
             })}
-            <button className="ds-opt mini" onClick={() => setBuilding(true)}>
-              <span className="ot">Edit build</span>
-            </button>
+            {/* the builder edits the ACTIVE robot, which is the import: not offered while it is */}
+            {!importedActive && (
+              <button className="ds-opt mini" onClick={() => setBuilding(true)}>
+                <span className="ot">Edit build</span>
+              </button>
+            )}
           </div>
         </section>
         )}

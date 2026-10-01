@@ -11,6 +11,7 @@ import {
 } from './sim/spawn';
 import { MAX_SAVED_ROBOTS, MAX_SAVED_STARTS_SUPPORTER } from './config';
 import { GAME_IDS, isGameId } from './games/types';
+import { isImportedSpec } from './net/imported';
 // the BIOBUZZ base robot, for `GAME_DEFAULT_SPEC`. `games/biobuzz/coerce.ts` is a LEAF of the
 // spawn chokepoint (its own header states the rule), so this reaches no further than the
 // `sim/spawn` import above already does.
@@ -218,6 +219,7 @@ function cloneMobileLayout(l: GameSettings['mobileLayout']): GameSettings['mobil
 function pickLoadout(s: GameSettings): GameLoadout {
   return {
     spec: s.spec,
+    lastStandardSpec: s.lastStandardSpec,
     savedRobots: s.savedRobots,
     startIndex: s.startIndex,
     startPose: s.startPose ?? null,
@@ -259,6 +261,74 @@ function defaultSpecFor(game: GameId): RobotSpec {
   return GAME_DEFAULT_SPEC[game] ?? DEFAULT_SPEC;
 }
 
+// ---- THE STANDARD ROBOT (imported robots play in custom rooms only) ---------------------------
+//
+// Ranked, rated challenges and record runs refuse an imported robot (`server/index.ts`, and
+// `docs/area/netcode.md` IMPORTED ROBOTS). Refusing at the door is the server's job; these are the
+// client's half, so a player whose ACTIVE robot is an import is never sent to a door that will
+// turn them away. They play the most recent standard robot this game had, and the picker offers
+// standard robots only.
+
+/** a robot read off storage or the account that must be a STANDARD one: coerced like any robot,
+ *  and dropped (not repaired) if it carries an import, since the point of the field is to hold one
+ *  that does not */
+function coerceStandardSpec(raw: unknown, game: GameId): RobotSpec | undefined {
+  if (typeof raw !== 'object' || raw === null || isImportedSpec(raw)) return undefined;
+  const spec = coerceSpec(raw, undefined, game);
+  return isImportedSpec(spec) ? undefined : spec;
+}
+
+/** the build a picker compares robots by (the six fields `MatchStrategy` always has) plus the name */
+export const sameBuild = (a: RobotSpec, b: RobotSpec): boolean =>
+  a.name === b.name &&
+  a.length === b.length &&
+  a.width === b.width &&
+  a.intake === b.intake &&
+  a.drivetrain === b.drivetrain &&
+  a.driveRpm === b.driveRpm &&
+  a.massLb === b.massLb;
+
+/**
+ * Keep `lastStandardSpec` current as the settings change. Called from `App`'s `update()`, the one
+ * choke point every settings write passes through:
+ *  · the active robot is standard ⇒ it IS the last standard robot;
+ *  · it just became an import, and nothing was remembered yet ⇒ keep the standard one it replaced.
+ * Returns `next` itself when there is nothing to change.
+ */
+export function rememberStandardRobot(prev: GameSettings, next: GameSettings): GameSettings {
+  if (!isImportedSpec(next.spec)) {
+    return next.lastStandardSpec === next.spec ? next : { ...next, lastStandardSpec: next.spec };
+  }
+  if (!next.lastStandardSpec && prev.game === next.game && !isImportedSpec(prev.spec)) {
+    return { ...next, lastStandardSpec: prev.spec };
+  }
+  return next;
+}
+
+/** the STANDARD robots this game offers where an import is not allowed: the last standard one
+ *  first (the preselected card), then the active robot if it is standard, then the saved robots */
+export function standardRobotChoices(s: GameSettings): RobotSpec[] {
+  const out: RobotSpec[] = [];
+  const add = (r: RobotSpec | undefined): void => {
+    if (r && !isImportedSpec(r) && !out.some((o) => sameBuild(o, r))) out.push(r);
+  };
+  add(s.lastStandardSpec);
+  add(s.spec);
+  for (const r of s.savedRobots) add(r);
+  return out;
+}
+
+/**
+ * THE ROBOT TO PLAY WHERE AN IMPORT IS NOT ALLOWED (ranked, record runs, a custom room on a server
+ * without imports): the active robot when it is standard, else the last standard one, else a saved
+ * standard robot, else this game's default. Always a standard spec.
+ */
+export function standardRobotFor(s: GameSettings): RobotSpec {
+  if (!isImportedSpec(s.spec)) return s.spec;
+  const seed = defaultSpecFor(s.game);
+  return standardRobotChoices(s)[0] ?? coerceSpec(seed, seed, s.game);
+}
+
 /** a fresh loadout for a game: its default robot + empty libraries */
 function defaultLoadout(game: GameId): GameLoadout {
   const d = defaultSettings();
@@ -269,6 +339,9 @@ function defaultLoadout(game: GameId): GameLoadout {
     // carries `bbMech`/`heightIn`/`stowHeightIn`/`bbPassTarget`/`massLb` across from the RAW
     // object by name. Passing the seed as `base` alone would drop every one of them.
     spec: coerceSpec(seed, seed, game),
+    // KEY PRESENT, value absent: `switchGame` spreads this over the flat settings, and an absent KEY
+    // would leave the game it just left holding its standard robot in this one
+    lastStandardSpec: undefined,
     savedRobots: [],
     startIndex: d.startIndex,
     startPose: null,
@@ -309,6 +382,7 @@ function coerceLoadout(raw: unknown, game: GameId): GameLoadout {
     : {};
   return {
     spec: r.spec !== undefined ? coerceSpec(r.spec, DEFAULT_SPEC, game) : d.spec,
+    lastStandardSpec: coerceStandardSpec(r.lastStandardSpec, game),
     savedRobots: Array.isArray(r.savedRobots)
       ? r.savedRobots.slice(0, MAX_SAVED_ROBOTS).map((x) => coerceSpec(x, undefined, game))
       : d.savedRobots,
@@ -421,6 +495,10 @@ export function coerceSettings(raw: unknown): GameSettings {
       out.spec = { ...out.spec, assists: coerceAssists(s.assists, PLAYER_ASSISTS) };
     }
     out.assists = coerceAssists(out.spec.assists, PLAYER_ASSISTS);
+    // the last STANDARD robot (ranked / record fall back to it while the active one is imported):
+    // coerced like any robot, and dropped, not repaired, if it is an import
+    const lastStandard = coerceStandardSpec(s.lastStandardSpec, out.game);
+    if (lastStandard) out.lastStandardSpec = lastStandard;
     // saved libraries: validate each entry through the same coercers, cap the count
     if (Array.isArray(s.savedRobots)) {
       out.savedRobots = s.savedRobots.slice(0, MAX_SAVED_ROBOTS).map((r) => coerceSpec(r, undefined, out.game));

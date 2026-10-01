@@ -31,7 +31,9 @@ import { generateRoomCode, normalizeRoomCode, isValidRoomCode, ROOM_CODE_LENGTH 
 import { ConsoleHead } from './ConsoleHead';
 import { useEscape } from './useEscape';
 import { DISCORD_REGION } from '../net/discordActivity';
-import { serverCaps } from '../net/api';
+import { roomTakesImportedRobots, serverCaps } from '../net/api';
+import { IMPORT_FELL_BACK, isImportedSpec } from '../net/imported';
+import { standardRobotFor } from '../settings';
 import { activeZenithAuto } from '../auto/library';
 import { announcePhysicsReady, preloadRoomPhysics } from '../net/roomPhysics';
 import { preloadRoomView } from '../net/roomView';
@@ -284,6 +286,29 @@ export function Lobby({
       alive = false;
     };
   }, []);
+  /**
+   * IMPORTED ROBOTS (docs/area/netcode.md, IMPORTED ROBOTS). A custom room may field one, but only
+   * on a server that says it can (`'robotImport'`): an older one drops the import without a word
+   * and steps a standard robot while this client predicts the imported one. So the imported spec
+   * goes out only once the answer is a yes, and until then — and for good on a server that says
+   * no, and in a record room, which never takes one — the room is sent the last standard robot,
+   * with one line saying so. `importOk` is null while the answer is on its way.
+   */
+  const importedActive = isImportedSpec(settings.spec);
+  const [importOk, setImportOk] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!importedActive) return;
+    let alive = true;
+    void roomTakesImportedRobots().then((ok) => {
+      if (alive) setImportOk(ok);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [importedActive]);
+  const sendImport = importedActive && !isRecord && importOk === true;
+  /** the spec this client puts on the wire: the active robot, or the standard one standing in for an import */
+  const wireSpec = (s: GS): RobotSpec => (isImportedSpec(s.spec) && !sendImport ? standardRobotFor(s) : s.spec);
   /** the tier the host's next "Add a bot" seats. Remembered for the session only: it is a
    *  property of the room being set up, not of the account. */
   const [botTier, setBotTier] = useState<string>(() => moduleFor(roomGame).bot?.defaultTier ?? '');
@@ -509,17 +534,18 @@ export function Lobby({
   /** the player fields this client advertises — the same on a fresh join and on a resume.
    *  An untyped name becomes the literal HERE, not in the box the player is looking at. */
   function myPlayer(): Omit<LobbyPlayer, 'clientId'> {
+    const spec = wireSpec(settings);
     return {
       name: name.trim() || DEFAULT_DRIVER_NAME,
-      teamName: settings.spec.teamName,
-      teamNumber: settings.spec.teamNumber,
+      teamName: spec.teamName,
+      teamNumber: spec.teamNumber,
       // record runs are opponent-free (one alliance) — force blue, matching the server
       alliance: isRecord ? 'blue' : settings.alliance,
       startIndex: settings.startIndex,
       startPose: settings.startPose ?? null,
       ready: false,
-      spec: settings.spec,
-      assists: settings.assists,
+      spec,
+      assists: spec === settings.spec ? settings.assists : (spec.assists ?? settings.assists),
     };
   }
 
@@ -834,8 +860,24 @@ export function Lobby({
   /** the full builder edits settings.spec live; mirror every change to the server */
   const onBuilderChange = (next: GS): void => {
     onSettingsChange(next);
-    lobbyRef.current?.update({ spec: next.spec, assists: next.assists });
+    const spec = wireSpec(next);
+    lobbyRef.current?.update({ spec, assists: spec === next.spec ? next.assists : (spec.assists ?? next.assists) });
   };
+
+  /**
+   * THE SERVER SAID YES AFTER THE JOIN WENT OUT. The join cannot wait on the capability read, so a
+   * seat that joined with the standard stand-in offers its imported robot once the answer lands,
+   * ONCE per robot: a room that refuses it (somebody on an older build) answers with a message and
+   * an unchanged roster, and asking again on every roster frame would only be told again.
+   */
+  const offeredImportRef = useRef<RobotSpec | null>(null);
+  useEffect(() => {
+    if (!sendImport || phase !== 'room' || !me || isImportedSpec(me.spec)) return;
+    if (offeredImportRef.current === settings.spec) return;
+    offeredImportRef.current = settings.spec;
+    lobbyRef.current?.update({ spec: settings.spec, assists: settings.assists });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sendImport, phase, me?.spec, settings.spec]);
 
   const mySpec = me?.spec ?? settings.spec;
   /** is this saved robot the one this seat is bringing? The chassis fields, as the swap row
@@ -1477,6 +1519,9 @@ export function Lobby({
         {me && (
           <section className="ds-sec">
             <h2>Your robot</h2>
+            {/* an imported robot that is NOT going out, and why (see `importOk`): one line */}
+            {importedActive && isRecord && <p className="ds-hint">Record runs use a standard robot.</p>}
+            {importedActive && !isRecord && importOk === false && <p className="ds-hint">{IMPORT_FELL_BACK}</p>}
             {/* WHAT YOU ARE BRINGING, said once. When it is one of your saved robots, the lit
                 card below says it; this line is for a build that is not saved, which no card
                 can show. It used to print over the lit card too, in a second vocabulary. */}

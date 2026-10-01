@@ -14,6 +14,7 @@ import {
   workerPerf,
   type RoomHandle,
 } from './roomHost';
+import { IMPORT_REFUSED_RANKED, importAdmission, isImportedSpec, stripImported } from '../src/net/imported';
 import { coerceCaps, decodeClientMsg, encodeMsg, BB3D_REFUSAL, DEFAULT_ROOM_CONFIG, physicsAllowed, RATED_FORMATS, SERVER_CAPS, type ClientMsg, type LiveRoom, type RoomConfig, type ServerMsg, type SiteStatus } from '../src/net/protocol';
 import { sanitizePlayer } from '../src/net/sanitize';
 import { stripUnentitledCosmetics } from '../src/cosmetics';
@@ -3285,6 +3286,27 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       abandon();
       return;
     }
+    /**
+     * THE IMPORTED-ROBOT GATE (docs/area/netcode.md, IMPORTED ROBOTS), in the same place and for
+     * the same reason as the `'bb3d'` one above: after `applyPending`, so a staged ranked room
+     * already reads as one. Two refusals, both from `importAdmission`: a joiner bringing an
+     * imported robot into a room that may not field one (staged ranked, record) or that holds a
+     * seat or watcher without the capability, and a joiner without the capability walking into a
+     * room that already has an imported robot. The wire is read, not the sanitised player — what
+     * the client SENT is the intent, and it does not depend on what `coerceSpec` kept.
+     * `Room.add` asks the same question again for a mirror that was a message behind.
+     */
+    {
+      const refusal = importAdmission(r.importState(), {
+        imported: isImportedSpec(msg.player?.spec),
+        caps: coerceCaps(msg.caps),
+      });
+      if (refusal) {
+        send({ t: 'error', message: refusal });
+        abandon();
+        return;
+      }
+    }
     let user: Awaited<ReturnType<typeof verifyAuthToken>> = null;
     if (msg.authToken) user = await verifyAuthToken(msg.authToken).catch(() => null);
     // the socket went away mid-join, or a concurrent frame already placed it — either
@@ -3600,6 +3622,14 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       send({ t: 'error', message: BB3D_REFUSAL });
       return;
     }
+    // ...and the same for a watcher of a room that holds an imported robot: it steps that robot too
+    {
+      const refusal = importAdmission(r.importState(), { imported: false, caps: coerceCaps(msg.caps) });
+      if (refusal) {
+        send({ t: 'error', message: refusal });
+        return;
+      }
+    }
     const spec = {
       id,
       send,
@@ -3696,6 +3726,15 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
         if (r && !physicsAllowed(r.physics, coerceCaps(msg.caps))) {
           send({ t: 'error', message: BB3D_REFUSAL });
           return;
+        }
+        // ...and the fourth: a seat held in a room that has an imported robot, taken back by a
+        // build that cannot play it (a tab reloaded onto an older version across a deploy)
+        if (r) {
+          const refusal = importAdmission(r.importState(), { imported: false, caps: coerceCaps(msg.caps) });
+          if (refusal) {
+            send({ t: 'error', message: refusal });
+            return;
+          }
         }
         // hand over EVERY sender, not just `send` — see the note in `Room.reattach`
         const res = r ? r.reattach(msg.clientId, send, sendRaw, backlog, msg.seatToken) : null;
@@ -3843,6 +3882,18 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
           send({ t: 'error', message: BB3D_REFUSAL });
           return;
         }
+        /**
+         * THE FIFTH DOOR: RANKED USES A STANDARD ROBOT, and it is refused HERE for the reason the
+         * BIOBUZZ one above is — before a pairing exists. Refusing at the staged room's door
+         * instead would cancel a pairing and charge the other players for it. Read off what the
+         * client SENT (`msg.player.spec`), not the sanitised spec, so it holds whatever
+         * `coerceSpec` keeps. This one door covers the open pool, a rated challenge and a ranked
+         * 2v2 party alike: they are all this message. (A record run is a `join`, gated above.)
+         */
+        if (isImportedSpec(msg.player?.spec)) {
+          send({ t: 'error', message: IMPORT_REFUSED_RANKED });
+          return;
+        }
         const gen = ++queueGen;
         /** has this queue attempt been overtaken — cancelled, closed, re-issued, or already
          *  seated in a room — while one of its awaits was outstanding? */
@@ -3952,11 +4003,12 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
             // have corrected it. `prof` (fetched above) carries supporter + earned in one
             // query, same as the join path.
             const queuedPlayer = sanitizePlayer(msg.player, coerceGameId(msg.game));
-            queuedPlayer.spec = stripUnentitledCosmetics(
+            // an import never reaches the pool: refused above, and dropped here as the backstop
+            queuedPlayer.spec = stripImported(stripUnentitledCosmetics(
               queuedPlayer.spec,
               !!prof?.supporter,
               prof?.cosmetics ?? [],
-            );
+            ));
             matchmaker.enqueue({
             id,
             send,

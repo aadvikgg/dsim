@@ -442,7 +442,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-hint` | src/ui/shell.css:2131 | 184 |
+| `.ds-hint` | src/ui/shell.css:2131 | 188 |
 | `.ds-hint-caption` | src/ui/shell.css:4197 | 1 |
 
 ## `ds-homestats` — 2
@@ -547,7 +547,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-actions` | src/ui/shell.css:6338 | 24 |
+| `.ds-actions` | src/ui/shell.css:6338 | 25 |
 
 ## `ds-app` — 1
 
@@ -625,7 +625,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-cta` | src/ui/shell.css:1650 | 29 |
+| `.ds-cta` | src/ui/shell.css:1650 | 31 |
 
 ## `ds-ctl` — 1
 
@@ -763,7 +763,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-opts` | src/ui/shell.css:4423 | 39 |
+| `.ds-opts` | src/ui/shell.css:4423 | 40 |
 
 ## `ds-padhint` — 1
 

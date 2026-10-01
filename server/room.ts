@@ -56,6 +56,15 @@ import {
   type ServerMsg,
 } from '../src/net/protocol';
 import { sanitizePlayerPatch } from '../src/net/sanitize';
+import {
+  IMPORT_START_REFUSED,
+  hasImportCap,
+  importAdmission,
+  isImportedSpec,
+  setupsHaveImported,
+  stripImported,
+  type ImportRoomState,
+} from '../src/net/imported';
 import { stripUnentitledCosmetics } from '../src/cosmetics';
 import type { DodgeKind, DodgeVerdict } from '../src/dodge';
 import { absenceOf, chargedForParticipation, EARLY_ABSENT_TICKS, judgeParticipation } from '../src/standing';
@@ -1176,6 +1185,21 @@ export class Room {
   }
 
   add(client: Client): void {
+    /**
+     * THE ROOM'S OWN IMPORTED-ROBOT CHECK, behind the join door's (`server/index.ts`), which asks
+     * a mirror that can be a message behind when this room runs on a worker, and which the LAN
+     * tab host does not have at all (`src/lan/hostWorker.ts` calls this directly). Refused with
+     * the sentence and NOT seated: a robot this room may not field, or a client that cannot play
+     * the one it holds, is not a seat.
+     */
+    const refusal = importAdmission(this.importState(), {
+      imported: isImportedSpec(client.player.spec),
+      caps: client.caps,
+    });
+    if (refusal) {
+      client.send({ t: 'error', message: refusal });
+      return;
+    }
     // the first client to land defines the room's release channel (custom/record
     // rooms are single-channel by construction — the matchmaker segregates ranked)
     if (this.clients.size === 0 && client.channel) this.channel = client.channel;
@@ -1274,6 +1298,13 @@ export class Room {
    * robot id of -1) + a live snapshot immediately, then every broadcast. Never joins
    * the roster / capacity / persistence, and its messages are ignored. */
   addSpectator(client: Client): void {
+    // A WATCHER STEPS THE WORLD, so one on a build without imports cannot watch a match that
+    // holds an imported robot (see `importState`). The door asks the same question first.
+    const refusal = importAdmission(this.importState(), { imported: false, caps: client.caps });
+    if (refusal) {
+      client.send({ t: 'error', message: refusal });
+      return;
+    }
     this.spectators.set(client.id, client);
     client.send({ t: 'welcome', clientId: client.id });
     if (this.world && this.phase === 'match') {
@@ -1856,6 +1887,7 @@ export class Room {
         // sanitize the patch against this player's current config: a spoofed
         // spec/size/assist patch is clamped to legal ranges before it applies
         const patch = sanitizePlayerPatch(msg.patch, c.player, this.game);
+        this.vetImportedPatch(c, msg.patch, patch);
         // ENTITLEMENT STRIP (docs/cosmetics-plan.md §3.3), AFTER the shape clamp above and
         // BEFORE it lands on the roster: a re-pick is the other live point (besides join)
         // where a client DECLARES a spec, and `sanitizePlayerPatch` only shape-validated it
@@ -2025,6 +2057,34 @@ export class Room {
     }
   }
 
+  /**
+   * AN `update` PATCH THAT ADDS, KEEPS OR DROPS AN IMPORTED ROBOT (docs/area/netcode.md,
+   * IMPORTED ROBOTS). Runs on the patch `sanitizePlayerPatch` returned, against what the client
+   * actually SENT (`rawPatch`), because the wire is what states the intent:
+   *
+   *  · the sent spec has no import ⇒ the robot is standard, whatever the patch's base held.
+   *    `coerceSpec` starts from the seat's CURRENT spec, so without this a re-pick of a standard
+   *    robot would keep the import it was meant to replace.
+   *  · the sent spec has one ⇒ it is allowed only where `importAdmission` says (a custom or LAN
+   *    room, a client with the cap, nobody in the room without it). Refused, the whole spec part
+   *    of the patch is dropped and the seat keeps the robot it had; the rest of the patch (ready,
+   *    pose, name) still applies, and the seat is told why.
+   */
+  private vetImportedPatch(c: Client, rawPatch: unknown, patch: ReturnType<typeof sanitizePlayerPatch>): void {
+    if (!patch.spec) return;
+    const sent = (rawPatch as { spec?: unknown } | null)?.spec;
+    if (!isImportedSpec(sent)) {
+      patch.spec = stripImported(patch.spec);
+      return;
+    }
+    const refusal = importAdmission(this.importState(), { imported: true, caps: c.caps });
+    if (!refusal) return;
+    delete patch.spec;
+    delete patch.teamName;
+    delete patch.teamNumber;
+    c.send({ t: 'error', message: refusal });
+  }
+
   private onInput(id: string, tick: number, q: unknown, ack?: number, gen?: number): void {
     // STALE GENERATION: an input produced for a match this room has already replaced.
     // Dropping it is the whole reason a rematch can rebuild in place — see `matchGen`.
@@ -2117,6 +2177,20 @@ export class Room {
           t: 'error',
           message: 'Both drivers must be signed in to save a Duo record run.',
         });
+        return;
+      }
+    }
+    /**
+     * AN IMPORTED ROBOT IN THE LINE-UP, AND A SEAT OR WATCHER WHO CANNOT PLAY IT (docs/area/netcode.md,
+     * IMPORTED ROBOTS). The doors keep that combination from forming; this is the last gate before
+     * a world exists, so a mirror that was a message behind, or a client that changed under us,
+     * still cannot start a match one side would predict wrongly. A room that does not ALLOW
+     * imports is not refused here — `beginMatch` strips them, so what starts is standard.
+     */
+    {
+      const st = this.importState();
+      if (st.allows && st.hasImport && st.capless) {
+        this.broadcast({ t: 'error', message: IMPORT_START_REFUSED });
         return;
       }
     }
@@ -2245,6 +2319,13 @@ export class Room {
     // ...and a ZENITH auto only survives into a custom room (`playsZenithAutos`). A staged or
     // rematch path that somehow carried one elsewhere loses it here, at the one chokepoint.
     if (!this.playsZenithAutos()) setups = setups.map((s) => (s.zenithAuto ? { ...s, zenithAuto: undefined } : s));
+    // ...and an IMPORTED ROBOT only survives into a room that allows one (`allowsImportedRobots`:
+    // custom and LAN). A staged ranked room, a record room, a rematch or any path that somehow
+    // carried one elsewhere is fielded as the standard robot its parametric fields describe.
+    // The same chokepoint as the two lines above, for the same reason.
+    if (!this.allowsImportedRobots()) {
+      setups = setups.map((s) => (isImportedSpec(s.spec) ? { ...s, spec: stripImported(s.spec) } : s));
+    }
     this.phase = 'match';
     this.matchGen++; // any input stamped with an older generation is now stale
     this.rematchVotes.clear();
@@ -3940,6 +4021,39 @@ export class Room {
    */
   private playsZenithAutos(): boolean {
     return !this.ranked && !this.pendingMatch && this.config.kind !== 'record' && simModuleFor(this.game).zenithAutos === true;
+  }
+
+  /**
+   * MAY AN IMPORTED ROBOT PLAY IN THIS ROOM? (docs/area/netcode.md, IMPORTED ROBOTS.) A custom
+   * room, and a LAN room, which is the same `Room`: never a matchmaker-staged ranked room, never
+   * a record room, whose replay is leaderboard proof. `playsZenithAutos`' shape without the game
+   * flag, because every game can have an imported robot.
+   *
+   * `config.kind === 'versus'` is spelled out rather than "not record" so a third room kind is
+   * refused until somebody decides otherwise: this list errs toward refusing.
+   */
+  allowsImportedRobots(): boolean {
+    return !this.ranked && !this.pendingMatch && this.config.kind === 'versus';
+  }
+
+  /**
+   * WHAT THE ROOM HOLDS, as far as imported robots go (`importAdmission` reads it). `hasImport`
+   * looks at every seat's CURRENT robot and, while a match is being played, at the match's own
+   * setups: a spectator arriving mid-match steps those, not the lobby's. After a match ends the
+   * lobby's robots are what a rejoin will field, so the setups stop counting.
+   *
+   * ⚠️ `capless` is over seats AND spectators — a spectator steps the world like a driver's
+   * client does, so one on a build without imports would draw and predict a standard robot too.
+   */
+  importState(): ImportRoomState {
+    let hasImport = this.phase === 'match' && setupsHaveImported(this.matchSetups);
+    let capless = false;
+    for (const c of this.clients.values()) {
+      if (isImportedSpec(c.player.spec)) hasImport = true;
+      if (!hasImportCap(c.caps)) capless = true;
+    }
+    for (const s of this.spectators.values()) if (!hasImportCap(s.caps)) capless = true;
+    return { allows: this.allowsImportedRobots(), hasImport, capless };
   }
 
   private broadcastRoster(): void {

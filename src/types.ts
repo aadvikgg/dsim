@@ -891,6 +891,9 @@ export interface StartSel {
  * saved robots / start positions stay separate). Archived in `GameSettings.loadouts`. */
 export interface GameLoadout {
   spec: RobotSpec;
+  /** the most recent STANDARD robot this game had active — what ranked and record runs use while
+   *  the active robot is imported (`standardRobotFor`, `src/settings.ts`). Never an import. */
+  lastStandardSpec?: RobotSpec;
   savedRobots: RobotSpec[];
   startIndex: number;
   startPose?: StartPose | null;
@@ -916,6 +919,13 @@ export interface GameSettings {
   mode: GameMode;
   alliance: Alliance;
   spec: RobotSpec;
+  /**
+   * The most recent STANDARD robot this game had active (per game, archived with the loadout).
+   * Ranked, rated challenges and record runs refuse an imported robot, so while `spec` is one they
+   * play this instead, and the swap picker preselects it. Absent until a standard robot has been
+   * active; never an imported spec (`coerceSettings` drops one that is).
+   */
+  lastStandardSpec?: RobotSpec;
   /** the player's saved robot library (up to MAX_SAVED_ROBOTS). `spec` is the
    * ACTIVE robot; loading a slot copies it into `spec`, saving copies `spec` in. */
   savedRobots: RobotSpec[];

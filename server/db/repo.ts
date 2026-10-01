@@ -26,6 +26,7 @@ import {
   type LockdownScope,
 } from '../../src/net/protocol';
 import { scrubSpecNames } from '../moderation';
+import { isImportedSpec } from '../../src/net/imported';
 
 /** every board/period is keyed by game; old callers/rows default to DECODE. */
 type Game = GameId;
@@ -2839,6 +2840,15 @@ export async function submitRecord(r: RecordSubmit): Promise<string> {
     throw new Error(
       `record refused: ${g(r.game)} runs on ${want} physics, this one is ${r.physics ?? '2d'}`,
     );
+  }
+  /**
+   * AND AN IMPORTED ROBOT IS NOT A RECORD. A record room refuses one at the door and strips it at
+   * `beginMatch`, so this fires only for a caller that skipped both — which is exactly the case a
+   * data-layer chokepoint is for, the same way the physics check above is. `config.spec` is the
+   * robot the board DISPLAYS, so it is the field read; a replay is checked at `persistMatch`.
+   */
+  if (isImportedSpec(r.config?.spec) || isImportedSpec(r.config?.partnerSpec)) {
+    throw new Error('record refused: an imported robot cannot set a record');
   }
   const rows = await q<{ id: string }>(
     `insert into records (user_id, partner_id, mode, drivetrain, score, balance_version, replay_id, config, game, physics)

@@ -346,6 +346,7 @@ import {
   recordScore,
   maxMatchTicks,
   REPLAY_FORMAT,
+  REPLAY_FORMAT_BASE,
   replayPlayable,
   replayRefusal,
   ReplayRecorder,
@@ -368,6 +369,26 @@ import { routeTarget } from '../server/routing';
 import { roomPersists } from '../server/channel';
 import { Room, MAX_INPUT_LEAD_TICKS, MAX_PENDING_PER_ROBOT, round3, type Client, type DodgeReport, type MatchOutcome } from '../server/room';
 import type { PendingRosterEntry } from '../server/matchTypes';
+import {
+  IMPORT_MEMBER_NEEDS_UPDATE,
+  IMPORT_REFUSED_HERE,
+  IMPORT_REFUSED_RANKED,
+  IMPORT_ROOM_NEEDS_UPDATE,
+  IMPORT_START_REFUSED,
+  REPLAY_FORMAT_IMPORTED,
+  ROBOT_IMPORT_CAP,
+  hasImportCap,
+  importAdmission,
+  isImportedSpec,
+  replayHasImported,
+  setupsHaveImported,
+  stripImported,
+} from '../src/net/imported';
+import { SERVER_CAPS } from '../src/net/protocol';
+import { rememberStandardRobot, sameBuild, standardRobotChoices, standardRobotFor } from '../src/settings';
+import { pendingPracticeUploads, savePracticeRun } from '../src/net/practiceRuns';
+import { pendingLanUploads, saveLanRunLocal } from '../src/net/lanRuns';
+import { sanitizeReplay } from '../src/net/sanitize';
 import { maintenanceBiting, lockdownPasses } from '../server/db/repo';
 import { isClosed as siteIsClosed, bypassLine as siteBypassLine, visibleBanners } from '../src/net/siteRules';
 import type { SiteAccess, SiteBanner, SiteLockdown } from '../src/net/protocol';
@@ -14709,7 +14730,7 @@ function pinScene(
     };
     const r = runRecordMatch(3, [setup], (tick) =>
       new Map([[0, cmd({ leftDrive: tick < 60 ? 1 : -1, rightDrive: 1 })]]), { stopTick: 120 }).replay;
-    check('replay: the container records at the tank-aware stride', r.format === REPLAY_FORMAT && trackStride(r.format) === 7);
+    check('replay: the container records at the tank-aware stride', r.format === REPLAY_FORMAT_BASE && trackStride(r.format) === 7);
     const track = r.tracks[0] ?? [];
     check(
       'replay: a tank robot records MORE than one entry (its input is only ld/rd)',
@@ -16849,7 +16870,8 @@ const recordDrive: CommandSource = (tick) => {
   const solo = recordSetups(DEFAULT_SPEC, 'solo', DEFAULT_ASSISTS, undefined, true);
   const run = runRecordMatch(0x51ce, solo, recordDrive);
   check('record match runs to phase "post"', run.world.match.phase === 'post');
-  check('replay stamped with format + balance version', run.replay.format === REPLAY_FORMAT && run.replay.balanceVersion === BALANCE_VERSION);
+  // format 2: a replay with no imported robot is the container it was before imports (format 3)
+  check('replay stamped with format + balance version', run.replay.format === REPLAY_FORMAT_BASE && run.replay.balanceVersion === BALANCE_VERSION);
   // the SIM-BEHAVIOUR stamp: what decides whether THIS build can re-simulate the
   // log at all. Separate from balanceVersion so a determinism fix can invalidate
   // stale replays without resetting the competitive season (config.ts SIM_VERSION).
@@ -29129,6 +29151,337 @@ const dumperSetup = (): RobotSetup => {
     'watch live: an unattended page does not poll /api/live, and catches up when someone is back',
     /const load = \(\): void => \{[\s\S]{0,600}?if \(userIdle\(\)\) return;/.test(wl) && /onUserActive\(load\)/.test(wl),
   );
+}
+
+/**
+ * IMPORTED ROBOTS ON THE WIRE (docs/area/netcode.md, IMPORTED ROBOTS) — THE RULES, PURE.
+ *
+ * The capability, the predicates, the one admission rule every door asks, the replay stamp and
+ * the device-only rule for practice and LAN runs. The rooms are next.
+ *
+ * ⚠️ LANE NOTE: `coerceSpec` carries `imported` across only once the sim lane lands. Nothing in
+ * THIS block needs it — specs are built with `imported` directly — and the two checks that do are
+ * marked `[needs coerceSpec carry]` and say so when they are skipped.
+ */
+{
+  const IMP = {
+    v: 1, id: '0123456789abcdef', heightIn: 12,
+    hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }],
+  };
+  const impSpec = { ...DEFAULT_SPEC, imported: IMP } as typeof DEFAULT_SPEC;
+
+  check('imports: this client advertises the capability', CLIENT_CAPS.includes(ROBOT_IMPORT_CAP) && ROBOT_IMPORT_CAP === 'robotImport');
+  check('imports: the server advertises it too (the client offers imports only on that word)', SERVER_CAPS.includes(ROBOT_IMPORT_CAP));
+  check('imports: hasImportCap reads the list', hasImportCap(CLIENT_CAPS) && !hasImportCap([]) && !hasImportCap(undefined));
+
+  check(
+    'imports: isImportedSpec reads an import, and only an object',
+    isImportedSpec(impSpec) && !isImportedSpec(DEFAULT_SPEC) && !isImportedSpec(null) && !isImportedSpec('x') &&
+      !isImportedSpec({ imported: null }) && !isImportedSpec({ imported: 'yes' }) && !isImportedSpec({ imported: [] }),
+  );
+  const stripped = stripImported(impSpec);
+  check(
+    'imports: stripImported is a standard COPY (the original keeps its import), a standard spec is returned as is',
+    !isImportedSpec(stripped) && isImportedSpec(impSpec) && stripped.length === impSpec.length && stripImported(DEFAULT_SPEC) === DEFAULT_SPEC,
+  );
+  check('imports: setupsHaveImported', setupsHaveImported([{ spec: DEFAULT_SPEC }, { spec: impSpec }]) && !setupsHaveImported([{ spec: DEFAULT_SPEC }]) && !setupsHaveImported(undefined));
+
+  // ---- the ONE admission rule --------------------------------------------------------------
+  const custom = { allows: true, hasImport: false, capless: false };
+  const staged = { allows: false, hasImport: false, capless: false };
+  const none: string[] = [];
+  check('imports/admit: a custom room takes an imported robot from a client with the cap', importAdmission(custom, { imported: true, caps: CLIENT_CAPS }) === null);
+  check('imports/admit: a room that does not allow imports (staged ranked, record) refuses one', importAdmission(staged, { imported: true, caps: CLIENT_CAPS }) === IMPORT_REFUSED_HERE);
+  check('imports/admit: a client WITHOUT the cap cannot bring one', importAdmission(custom, { imported: true, caps: none }) === IMPORT_ROOM_NEEDS_UPDATE);
+  check('imports/admit: an import is not added beside a seat or watcher without the cap', importAdmission({ ...custom, capless: true }, { imported: true, caps: CLIENT_CAPS }) === IMPORT_MEMBER_NEEDS_UPDATE);
+  check('imports/admit: a standard robot from a client without the cap is admitted to an ordinary room', importAdmission(custom, { imported: false, caps: none }) === null);
+  check('imports/admit: ...but not to a room that holds an imported robot', importAdmission({ ...custom, hasImport: true }, { imported: false, caps: none }) === IMPORT_ROOM_NEEDS_UPDATE);
+  check('imports/admit: ...while a client with the cap is', importAdmission({ ...custom, hasImport: true }, { imported: false, caps: CLIENT_CAPS }) === null);
+  check('imports/admit: a ranked room is untouched for a client without the cap (ranked never holds an import)', importAdmission(staged, { imported: false, caps: none }) === null);
+  check(
+    'imports/copy: every refusal is a plain sentence — Couldn’t, a next step, typographic apostrophe, no ASCII one',
+    [IMPORT_REFUSED_RANKED, IMPORT_REFUSED_HERE, IMPORT_ROOM_NEEDS_UPDATE, IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_START_REFUSED]
+      .every((s) => s.startsWith('Couldn’t') && !s.includes("'") && s.endsWith('.') && s.split('. ').length >= 2),
+  );
+
+  // ---- the replay container ----------------------------------------------------------------
+  const runOf = (spec: typeof DEFAULT_SPEC) =>
+    runRecordMatch(11, recordSetups(spec, 'solo'), () => new Map([[0, cmd({ driveY: 1 })]]), { stopTick: 90 });
+  const runStd = runOf(DEFAULT_SPEC);
+  const runImp = runOf(impSpec);
+  check('imports/replay: a replay with NO imported robot is still format 2', runStd.replay.format === REPLAY_FORMAT_BASE && REPLAY_FORMAT_BASE === 2);
+  check('imports/replay: ...and one WITH an imported robot is format 3', runImp.replay.format === REPLAY_FORMAT_IMPORTED && REPLAY_FORMAT_IMPORTED === 3);
+  check('imports/replay: REPLAY_FORMAT (what this build reads) is the imported format, so an older build calls it `future`', REPLAY_FORMAT === REPLAY_FORMAT_IMPORTED);
+  {
+    const r = runStd.replay;
+    // the container as the build BEFORE imports wrote it: same keys, same order, format 2
+    const before = { format: 2, balanceVersion: r.balanceVersion, sim: r.sim, patch: r.patch, game: r.game, mode: r.mode, seed: r.seed, setups: r.setups, ticks: r.ticks, tracks: r.tracks };
+    check('imports/replay: a standard replay is BYTE-IDENTICAL to the one written before imports', JSON.stringify(r) === JSON.stringify(before));
+    check('imports/replay: ...and plays on this build', replayRefusal(JSON.parse(JSON.stringify(r)) as Replay, r.balanceVersion, r.sim ?? 0) === null);
+  }
+  {
+    const back = JSON.parse(JSON.stringify(runImp.replay)) as Replay;
+    check('imports/replay: a format-3 container survives JSON and still carries the import in its setups', isImportedSpec(back.setups[0].spec) && back.format === 3);
+    check('imports/replay: ...is playable on this build (it reads format 3)', replayRefusal(back, back.balanceVersion, back.sim ?? 0) === null);
+    // a build that predates imports reads up to format 2 (REPLAY_FORMAT_BASE), and the rule it
+    // applies to anything above that is the `future` refusal this pins
+    check('imports/replay: ...and is newer than the format-2 builds that predate imports, who refuse a newer container as `future`', REPLAY_FORMAT_IMPORTED > REPLAY_FORMAT_BASE && replayRefusal({ ...back, format: REPLAY_FORMAT + 1 }, back.balanceVersion, back.sim ?? 0) === 'future');
+    check('imports/replay: a recorded format-3 run re-simulates to the hash it recorded', verifyReplay(back).hash === runImp.result.hash, `${verifyReplay(back).hash} vs ${runImp.result.hash}`);
+    const san = sanitizeReplay(back, 'decode');
+    check('imports/replay: sanitizeReplay accepts the format-3 container (it reads what it writes)', san !== null && san.format === 3);
+    check('imports/replay: replayHasImported sees it by setups and by stamp, and never on a standard one',
+      replayHasImported(back) && replayHasImported({ format: 3, setups: [] }) && !replayHasImported(runStd.replay) && !replayHasImported(null));
+  }
+
+  // ---- practice and LAN runs: an imported robot stays on the device -------------------------
+  {
+    const store = new Map<string, string>();
+    const g = globalThis as { localStorage?: unknown };
+    const had = 'localStorage' in g;
+    const prev = g.localStorage;
+    g.localStorage = {
+      getItem: (k: string): string | null => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string): void => void store.set(k, v),
+      removeItem: (k: string): void => void store.delete(k),
+    };
+    try {
+      const mStd = savePracticeRun(runStd.replay, runStd.result);
+      const mImp = savePracticeRun(runImp.replay, runImp.result);
+      const ids = pendingPracticeUploads().map((m) => m.id);
+      check('imports/practice: a practice run with an imported robot is marked as one', mImp?.imported === true && mStd?.imported === undefined);
+      check('imports/practice: ...is NEVER in the upload backlog (it stays on the device)', !!mStd && !!mImp && ids.includes(mStd.id) && !ids.includes(mImp.id), ids.join(','));
+      const gid = (n: string): string => `${n.repeat(8)}-${n.repeat(4)}-${n.repeat(4)}-${n.repeat(4)}-${n.repeat(12)}`;
+      const lStd = saveLanRunLocal(gid('a'), runStd.replay, runStd.result.score, []);
+      const lImp = saveLanRunLocal(gid('b'), runImp.replay, runImp.result.score, []);
+      const lids = pendingLanUploads().map((m) => m.id);
+      check('imports/lan: a LAN match with an imported robot is marked and never offered to /api/lan', lImp?.imported === true && !!lStd && !!lImp && lids.includes(lStd.id) && !lids.includes(lImp.id), lids.join(','));
+    } finally {
+      if (had) g.localStorage = prev;
+      else delete g.localStorage;
+    }
+  }
+
+  // ---- the standard robot ranked and record fall back to ---------------------------------------
+  {
+    const base = defaultSettings();
+    const std = { ...DEFAULT_SPEC, name: 'Std' };
+    const saved = { ...DEFAULT_SPEC, name: 'Saved', length: 14 };
+    const imported = { ...base, spec: impSpec };
+    check('imports/settings: lastStandardSpec survives a settings round-trip', coerceSettings({ ...base, lastStandardSpec: std }).lastStandardSpec?.name === 'Std');
+    check('imports/settings: ...and an IMPORTED one is dropped, not repaired (it must be a standard spec)', coerceSettings({ ...base, lastStandardSpec: impSpec }).lastStandardSpec === undefined);
+    check('imports/settings: ...junk is dropped too', coerceSettings({ ...base, lastStandardSpec: 'x' }).lastStandardSpec === undefined && coerceSettings({ ...base, lastStandardSpec: 7 }).lastStandardSpec === undefined);
+    check('imports/settings: absent stays absent (no key written for a player with no import)', !('lastStandardSpec' in coerceSettings(base)));
+    // per game: each game archives and restores its own
+    const withD = { ...base, lastStandardSpec: std };
+    const toChain = switchGame(withD, 'chain');
+    check('imports/settings: switching game does not carry the last standard robot across', toChain.lastStandardSpec === undefined, String(toChain.lastStandardSpec?.name));
+    check('imports/settings: ...and switching back restores it', switchGame(toChain, 'decode').lastStandardSpec?.name === 'Std');
+    const viaJson = coerceSettings(JSON.parse(JSON.stringify(toChain)));
+    check('imports/settings: ...even through storage (the archived loadout is coerced)', switchGame(viaJson, 'decode').lastStandardSpec?.name === 'Std');
+
+    // rememberStandardRobot
+    const s1 = rememberStandardRobot(base, { ...base, spec: std });
+    check('imports/settings: an active standard robot IS the last standard robot', s1.lastStandardSpec === s1.spec);
+    check('imports/settings: ...and an unchanged settings object is returned as is', rememberStandardRobot(s1, s1) === s1);
+    const s2 = rememberStandardRobot(s1, { ...s1, spec: impSpec });
+    check('imports/settings: activating an import keeps the standard robot it replaced', s2.lastStandardSpec?.name === 'Std' && isImportedSpec(s2.spec));
+    const s3 = rememberStandardRobot({ ...base, spec: std }, { ...base, spec: impSpec });
+    check('imports/settings: ...even when nothing was remembered yet', s3.lastStandardSpec?.name === 'Std');
+    check('imports/settings: an import never becomes the last standard robot', !isImportedSpec(s3.lastStandardSpec));
+    const s4 = rememberStandardRobot({ ...base, game: 'chain', spec: std }, { ...base, game: 'decode', spec: impSpec });
+    check('imports/settings: nothing is carried across a game switch', s4.lastStandardSpec === undefined);
+
+    // standardRobotFor / choices
+    check('imports/settings: a standard active robot is its own standard robot', standardRobotFor({ ...base, spec: std }) === std);
+    check('imports/settings: an import falls back to the last standard robot, preselected first', standardRobotFor({ ...imported, lastStandardSpec: std, savedRobots: [saved] }).name === 'Std'
+      && standardRobotChoices({ ...imported, lastStandardSpec: std, savedRobots: [saved] })[0].name === 'Std');
+    check('imports/settings: ...else a saved robot', standardRobotFor({ ...imported, savedRobots: [saved] }).name === 'Saved');
+    check('imports/settings: ...else the game default, which is standard', !isImportedSpec(standardRobotFor(imported)));
+    check('imports/settings: the picker offers standard robots only (an import in the saved list is skipped)',
+      standardRobotChoices({ ...imported, lastStandardSpec: std, savedRobots: [impSpec, saved] }).every((r) => !isImportedSpec(r)));
+    check('imports/settings: ...without listing the same build twice', standardRobotChoices({ ...imported, lastStandardSpec: std, savedRobots: [{ ...std }, saved] }).length === 2 && sameBuild(std, { ...std }));
+  }
+}
+
+/**
+ * IMPORTED ROBOTS IN A REAL `Room` — who may be seated, who may watch, what the match is built from.
+ *
+ * A custom room (and a LAN room, the same class) takes an imported robot; a staged ranked room and
+ * a record room refuse it; a seat or watcher whose build lacks `'robotImport'` is kept out of a room
+ * that has one, and an import is never added beside such a seat. Every refusal is paired with the
+ * acceptance one message later, since a room that refuses everything would pass "it refused".
+ */
+{
+  const IMP = {
+    v: 1, id: '0123456789abcdef', heightIn: 12,
+    hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }],
+  };
+  const impSpec = { ...DEFAULT_SPEC, imported: IMP } as typeof DEFAULT_SPEC;
+  type Sink = Record<string, ServerMsg[]>;
+  const mk = (sink: Sink, id: string, caps: string[] | undefined, spec: typeof DEFAULT_SPEC, alliance: Alliance = 'red', userId?: string): Client => {
+    sink[id] ??= [];
+    return {
+      id,
+      send: (m) => sink[id].push(m),
+      player: { clientId: id, name: id, teamName: 'T', teamNumber: 1, alliance, startIndex: 0, ready: true, spec: { ...spec }, assists: { ...DEFAULT_ASSISTS } },
+      connected: true, disconnectAt: 0, caps, userId: userId ?? 'u-' + id,
+    };
+  };
+  const welcomed = (s: Sink, id: string): boolean => s[id].some((m) => m.t === 'welcome');
+  const errs = (s: Sink, id: string): string[] => s[id].filter((m) => m.t === 'error').map((m) => (m as Extract<ServerMsg, { t: 'error' }>).message);
+  const rosterSpec = (s: Sink, id: string, of: string) =>
+    ([...s[id]].reverse().find((m) => m.t === 'roster') as Extract<ServerMsg, { t: 'roster' }> | undefined)?.players.find((p) => p.clientId === of)?.spec;
+  const started = (s: Sink, id: string) => s[id].find((m) => m.t === 'matchStart') as Extract<ServerMsg, { t: 'matchStart' }> | undefined;
+  const result = (s: Sink, id: string) => s[id].find((m) => m.t === 'matchResult') as Extract<ServerMsg, { t: 'matchResult' }> | undefined;
+  const anyImport = (m: Extract<ServerMsg, { t: 'matchStart' }> | undefined): boolean => !!m && m.setups.some((x) => isImportedSpec(x.spec));
+  const carried = isImportedSpec(coerceSpec(impSpec, DEFAULT_SPEC, 'decode'));
+
+  // ---- a CUSTOM room (and a LAN room is this same class) ----------------------------------
+  {
+    const s: Sink = {};
+    const room = new Room('smoke-imp-custom', () => {}, { kind: 'versus' });
+    check('imports/room: a custom room ALLOWS imported robots', room.allowsImportedRobots());
+    room.add(mk(s, 'a', CLIENT_CAPS, impSpec, 'red'));
+    check('imports/room: ...and seats one (client with the cap)', welcomed(s, 'a') && room.importState().hasImport && !room.importState().capless);
+    room.add(mk(s, 'old', [], DEFAULT_SPEC, 'blue'));
+    check(
+      'imports/room: a build WITHOUT the cap is not seated in a room that has an imported robot',
+      !welcomed(s, 'old') && errs(s, 'old')[0] === IMPORT_ROOM_NEEDS_UPDATE && !room.importState().capless,
+      String(errs(s, 'old')[0]),
+    );
+    room.add(mk(s, 'b', CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    check('imports/room: ...a build WITH it is', welcomed(s, 'b'));
+    room.onMessage('a', { t: 'start' });
+    const ms = started(s, 'b');
+    check('imports/room: START keeps the imported robot in the setups (the room allows it)', !!ms && anyImport(ms));
+    room.addSpectator(mk(s, 'oldspec', []));
+    check('imports/room: a watcher without the cap cannot watch a match that holds one', !s.oldspec.some((m) => m.t === 'welcome') && errs(s, 'oldspec')[0] === IMPORT_ROOM_NEEDS_UPDATE);
+    room.addSpectator(mk(s, 'spec', CLIENT_CAPS));
+    check('imports/room: ...a watcher with it can', s.spec.some((m) => m.t === 'welcome') && s.spec.some((m) => m.t === 'matchStart'));
+    forceRoomToPost(room);
+    const res = result(s, 'a');
+    check('imports/room: the custom match’s replay is stamped format 3', res?.replay.format === REPLAY_FORMAT_IMPORTED, String(res?.replay.format));
+    room.stop();
+  }
+
+  // ---- a seat without the cap is in the room FIRST ---------------------------------------------
+  {
+    const s: Sink = {};
+    const room = new Room('smoke-imp-old', () => {}, { kind: 'versus' });
+    room.add(mk(s, 'old', [], DEFAULT_SPEC, 'blue'));
+    check('imports/room: a build without the cap is seated in an ordinary room', welcomed(s, 'old'));
+    room.add(mk(s, 'a', CLIENT_CAPS, impSpec, 'red'));
+    check('imports/room: an imported robot is NOT added beside it', !welcomed(s, 'a') && errs(s, 'a')[0] === IMPORT_MEMBER_NEEDS_UPDATE, String(errs(s, 'a')[0]));
+    room.add(mk(s, 'c', CLIENT_CAPS, DEFAULT_SPEC, 'red'));
+    check('imports/room: ...but a standard robot with the cap is', welcomed(s, 'c'));
+    room.onMessage('c', { t: 'update', patch: { spec: impSpec } });
+    check(
+      'imports/room: an update that ADDS an import beside it is refused with the sentence, and the seat keeps its robot',
+      errs(s, 'c').includes(IMPORT_MEMBER_NEEDS_UPDATE) && !isImportedSpec(rosterSpec(s, 'c', 'c')),
+      JSON.stringify(errs(s, 'c')),
+    );
+    // the start backstop: a seat that lost the capability under a room that holds an import (a
+    // mirror that was behind). Simulated by taking the cap away from a seat directly.
+    const room2 = new Room('smoke-imp-start', () => {}, { kind: 'versus' });
+    const s2: Sink = {};
+    room2.add(mk(s2, 'a', CLIENT_CAPS, impSpec, 'red'));
+    room2.add(mk(s2, 'b', CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    (room2 as unknown as { clients: Map<string, Client> }).clients.get('b')!.caps = [];
+    room2.onMessage('a', { t: 'start' });
+    check('imports/room: START is refused, with the sentence, when a seat cannot play the imported robot', errs(s2, 'a').includes(IMPORT_START_REFUSED) && room2.worldForTest() === null, JSON.stringify(errs(s2, 'a')));
+    (room2 as unknown as { clients: Map<string, Client> }).clients.get('b')!.caps = CLIENT_CAPS;
+    room2.onMessage('a', { t: 'start' });
+    check('imports/room: ...and goes through once everyone can (the refusal was the cap)', room2.worldForTest() !== null);
+    room.stop();
+    room2.stop();
+  }
+
+  // ---- an update patch that ADDS an import in an allowing room ---------------------------------
+  {
+    const s: Sink = {};
+    const room = new Room('smoke-imp-update', () => {}, { kind: 'versus' });
+    room.add(mk(s, 'a', CLIENT_CAPS, DEFAULT_SPEC, 'red'));
+    room.add(mk(s, 'b', CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    room.onMessage('a', { t: 'update', patch: { spec: impSpec } });
+    check('imports/room: a custom room takes an update that brings an import (no refusal)', errs(s, 'a').length === 0, JSON.stringify(errs(s, 'a')));
+    if (carried) {
+      check('imports/room: [needs coerceSpec carry] ...and the roster now carries it', isImportedSpec(rosterSpec(s, 'b', 'a')));
+      room.onMessage('a', { t: 'update', patch: { spec: { ...DEFAULT_SPEC } } });
+      check('imports/room: [needs coerceSpec carry] a re-pick of a STANDARD robot drops the import (the base spec must not keep it)', !isImportedSpec(rosterSpec(s, 'b', 'a')));
+    } else {
+      console.log('SKIP imports/room: [needs coerceSpec carry] roster carries the import / a standard re-pick drops it — coerceSpec does not carry `imported` yet');
+    }
+    room.stop();
+  }
+
+  // ---- a RECORD room -----------------------------------------------------------------------------
+  {
+    const s: Sink = {};
+    const room = new Room('smoke-imp-rec', () => {}, { kind: 'record', record: 'solo' });
+    check('imports/room: a record room does NOT allow imported robots', !room.allowsImportedRobots());
+    room.add(mk(s, 'x', CLIENT_CAPS, impSpec, 'blue'));
+    check('imports/room: a record room refuses an imported joiner, with the sentence, and does not seat it', !welcomed(s, 'x') && errs(s, 'x')[0] === IMPORT_REFUSED_HERE && !room.importState().hasImport, String(errs(s, 'x')[0]));
+    room.add(mk(s, 'b', CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    check('imports/room: ...and takes the same driver with a standard robot', welcomed(s, 'b'));
+    room.onMessage('b', { t: 'update', patch: { spec: impSpec } });
+    check('imports/room: an update to an imported robot in a record room is refused', errs(s, 'b').includes(IMPORT_REFUSED_HERE) && !isImportedSpec(rosterSpec(s, 'b', 'b')), JSON.stringify(errs(s, 'b')));
+    // the backstop: an import that got onto the roster some other way is fielded as a standard robot
+    (room as unknown as { clients: Map<string, Client> }).clients.get('b')!.player.spec = { ...impSpec };
+    room.onMessage('b', { t: 'start' });
+    const ms = started(s, 'b');
+    check('imports/room: beginMatch STRIPS an import in a record room (the backstop behind the door)', !!ms && !anyImport(ms));
+    forceRoomToPost(room);
+    check('imports/room: ...so the record’s replay is the format-2 container', result(s, 'b')?.replay.format === REPLAY_FORMAT_BASE, String(result(s, 'b')?.replay.format));
+    room.stop();
+  }
+
+  // ---- a STAGED ranked room ----------------------------------------------------------------------
+  {
+    const s: Sink = {};
+    const room = new Room('smoke-imp-ranked', () => {}, { kind: 'versus' });
+    room.applyPending({
+      code: 'iad-imp', hostRegion: 'iad', mode: '1v1', seed: 9, ranked: true,
+      roster: [
+        // the staged spec carries an import: however it got there, it must not be fielded
+        { userId: 'u-a', name: 'a', teamName: 'T', teamNumber: 1, spec: { ...impSpec }, assists: { ...DEFAULT_ASSISTS }, startIndex: 0, alliance: 'red', introElo: 1200 },
+      ],
+    });
+    check('imports/room: a staged ranked room does NOT allow imported robots', !room.allowsImportedRobots());
+    room.add(mk(s, 'x', CLIENT_CAPS, impSpec, 'red', 'u-x'));
+    check('imports/room: ...and refuses an imported joiner', !welcomed(s, 'x') && errs(s, 'x')[0] === IMPORT_REFUSED_HERE);
+    // no 'strategy' cap ⇒ the immediate start, which builds from the STAGED spec
+    room.add(mk(s, 'a', [], DEFAULT_SPEC, 'red', 'u-a'));
+    room.maybeStartRanked();
+    const ms = started(s, 'a');
+    check('imports/room: ...and beginMatch STRIPS the staged import, so a ranked match is standard robots only', !!ms && ms.ranked === true && !anyImport(ms));
+    room.stop();
+  }
+
+  // ---- the source: the doors that need a socket, and the writers ----------------------------------
+  {
+    const rd = (f: string): string => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+    const idx = rd('server/index.ts');
+    check('imports/doors: join, spectate and rejoin each ask importAdmission of the room', (idx.match(/importAdmission\(r\.importState\(\)/g) ?? []).length === 3);
+    check(
+      'imports/doors: the ranked queue refuses an import BEFORE a queue attempt exists (a late refusal would charge the other players)',
+      /isImportedSpec\(msg\.player\?\.spec\)\) \{\s*send\(\{ t: 'error', message: IMPORT_REFUSED_RANKED \}\);\s*return;\s*\}\s*const gen = \+\+queueGen;/.test(idx),
+    );
+    check('imports/doors: ...and what is queued is stripped as the backstop', /queuedPlayer\.spec = stripImported\(/.test(idx));
+    check('imports/doors: a join reads what the client SENT (msg.player.spec), not what coerceSpec kept', /imported: isImportedSpec\(msg\.player\?\.spec\)/.test(idx));
+    const api = rd('server/api.ts');
+    check('imports/doors: /api/practice and /api/lan both refuse an imported replay', (api.match(/replayHasImported\(body\.replay\)/g) ?? []).length === 2);
+    check('imports/doors: submitRecord refuses an imported record, and persistMatch skips one', /isImportedSpec\(r\.config\?\.spec\)/.test(rd('server/db/repo.ts')) && /SKIP record — an imported robot cannot set a record/.test(rd('server/persist.ts')));
+    const hw = rd('src/lan/hostWorker.ts');
+    check('imports/doors: the LAN tab host sanitises a guest’s player like the cloud join does', /player: \{ \.\.\.sanitizePlayer\(player\.player, game\), clientId: id \}/.test(hw) && /caps: coerceCaps\(player\.caps\)/.test(hw));
+    check('imports/doors: ...and asks the same admission rule before it seats one', /importAdmission\(room\.importState\(\)/.test(hw));
+    const rh = rd('server/roomHost.ts');
+    check('imports/doors: a worker room mirrors what it holds (RoomFacts.imports) and counts seats still in flight', /imports: \{ hasImport: imp\.hasImport/.test(rd('server/roomWorker.ts')) && /this\.unacked\.some\(\(u\) => u\.imp\)/.test(rh));
+    check('imports/ui: ranked, record and the custom lobby play a standard robot while the active one is an import',
+      /const spec = standardRobotFor\(settings\);/.test(rd('src/ui/Matchmaking.tsx')) &&
+      /Record runs use a standard robot\./.test(rd('src/ui/RecordRun.tsx')) &&
+      /Ranked uses a standard robot\./.test(rd('src/ui/MatchStrategy.tsx')) &&
+      /roomTakesImportedRobots/.test(rd('src/ui/Lobby.tsx')));
+  }
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

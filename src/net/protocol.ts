@@ -18,6 +18,7 @@ import type { RobotSetup } from '../sim/spawn';
 import type { Replay, ReplayResult } from '../sim/replay';
 import { clamp } from '../math';
 import { flywheelSpinTarget } from '../sim/field';
+import { ROBOT_IMPORT_CAP } from './imported';
 
 /**
  * Wire protocol for the SERVER-AUTHORITATIVE netcode (Phase 0). All messages are
@@ -423,7 +424,7 @@ export type PlayerPatch = Partial<
  * client is never stranded waiting for a `strategyStart` it can't render. Absent/old
  * clients send nothing ⇒ treated as no caps. Add new capability strings here as the
  * protocol grows. */
-export const CLIENT_CAPS: string[] = ['strategy', 'startpose', 'game', 'standing', 'recycle', 'bb3d', 'ready3d', 'viewready', 'seat'];
+export const CLIENT_CAPS: string[] = ['strategy', 'startpose', 'game', 'standing', 'recycle', 'bb3d', 'ready3d', 'viewready', 'seat', ROBOT_IMPORT_CAP];
 
 /**
  * THE ONE CAPABILITY THAT IS A HARD GATE RATHER THAN A FEATURE FLAG.
@@ -605,6 +606,16 @@ export const SERVER_CAPS: string[] = [
    * would silently drop the file and the driver would stand still through AUTO wondering why.
    */
   'zenithAuto',
+  /**
+   * `'robotImport'` — THIS DEPLOY ADMITS AN IMPORTED ROBOT TO A CUSTOM ROOM, and refuses it
+   * everywhere else (`src/net/imported.ts`).
+   *
+   * An older server's `coerceSpec` drops `spec.imported` without a word, so the client would
+   * predict one robot while the room stepped another. The client sends an imported spec to a
+   * room only when the server says this, and plays a standard robot otherwise. The mirror of the
+   * client capability of the same name, which is the one that is a HARD gate.
+   */
+  ROBOT_IMPORT_CAP,
 ];
 
 /** the formats a "play a friend" challenge can be issued in. Shared so the API's
