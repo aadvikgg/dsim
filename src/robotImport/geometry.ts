@@ -984,15 +984,78 @@ const UNIT_WORD: Record<LengthUnit, string> = { mm: 'millimetres', cm: 'centimet
 const fmtIn = (v: number): string => (Math.round(v * 10) / 10).toFixed(1);
 
 /**
+ * THE HEAVY HALF OF A MEASUREMENT: everything that depends on the parts and on the setup's units,
+ * up axis, yaw and band switch, and on nothing else in it. A wheel dragged, a drivetrain picked or
+ * a hull cap changed leaves all of this as it was, so the engine keeps one per orientation and
+ * re-runs only `finishMeasure`. Plain JSON, so a worker can compute it and post it back.
+ */
+export interface OrientedMeasure {
+  units: LengthUnit;
+  unitsDetected: boolean;
+  up: UpAxis;
+  upDetected: boolean;
+  upMargin: number;
+  yaw: QuarterTurns;
+  /** source → MODEL frame, column-major 4×4 */
+  sourceToModel: number[];
+  empty: boolean;
+  trisIn: number;
+  size: { length: number; width: number; height: number };
+  /** the footprint's convex hull before reduction, MODEL frame */
+  rawHull: Vec2[];
+  /** what wheel detection found (a manual override is applied in `finishMeasure`) */
+  wheels: WheelDetection;
+  /** bands in the MODEL frame, before the shift to the wheelbase centre; null = none or not asked */
+  bandsModel: ImportedBand[] | null;
+}
+
+/** what `orientParts` depends on in a setup: equal keys, equal `OrientedMeasure` */
+export function orientKey(setup: ImportSetup): string {
+  return `${setup.units}|${setup.up}|${setup.yaw}|${setup.bands ? 1 : 0}`;
+}
+
+/**
+ * SOURCE → MODEL frame exactly as `orientParts` does it: the linear part first (stored to float32),
+ * then the translation added in place. Doing it as one affine step would round once instead of
+ * twice and give positions a float32 ulp away, so the engine rebuilds the model frame on the main
+ * thread from a worker's `sourceToModel` with THIS, and gets the same arrays bit for bit.
+ */
+export function toModelFrame(parts: readonly MeshPart[], sourceToModel: readonly number[]): MeshPart[] {
+  const m = sourceToModel;
+  const linear = [m[0], m[1], m[2], 0, m[4], m[5], m[6], 0, m[8], m[9], m[10], 0, 0, 0, 0, 1];
+  const t = [m[12], m[13], m[14]];
+  return transformParts(parts, linear).map((p) => {
+    const a = p.positions;
+    for (let i = 0; i < a.length; i += 3) {
+      a[i] += t[0];
+      a[i + 1] += t[1];
+      a[i + 2] += t[2];
+    }
+    return p;
+  });
+}
+
+/**
  * Measure a model: detect (or apply) units, up axis and yaw, put it in the MODEL frame, and
  * measure the footprint hull, height, floor contacts, wheels, wheelbase centre and height bands.
  * Returns the measurement and the parts in the MODEL frame (for the engine to simplify and bake).
+ * `orientParts` then `finishMeasure`, so a caller that keeps the first can re-run only the second.
  */
 export function measureParts(
   parts: readonly MeshPart[],
   setup: ImportSetup,
   opts: MeasureOptions,
 ): { measurement: ImportMeasurement; modelParts: MeshPart[] } {
+  const { oriented, modelParts } = orientParts(parts, setup, opts);
+  return { measurement: finishMeasure(oriented, setup), modelParts };
+}
+
+/** the heavy half (`OrientedMeasure`), and the parts in the MODEL frame it was measured on */
+export function orientParts(
+  parts: readonly MeshPart[],
+  setup: ImportSetup,
+  opts: MeasureOptions,
+): { oriented: OrientedMeasure; modelParts: MeshPart[] } {
   const trisIn = triangleCount(parts);
   // source AABB
   let maxExtent = 0;
@@ -1012,7 +1075,6 @@ export function measureParts(
     }
     for (let k = 0; k < 3; k++) if (mx[k] > mn[k]) maxExtent = Math.max(maxExtent, mx[k] - mn[k]);
   }
-  const checks: ImportCheck[] = [];
   const unitPrior = opts.fileUnit ?? formatDefaultUnit(opts.format);
   const unitsDetected = setup.units === 'auto' && !opts.fileUnit;
   const units: LengthUnit =
@@ -1075,8 +1137,6 @@ export function measureParts(
     hullPts.push(...hullOfXY(xy));
   }
   const rawHull = convexHull(hullPts);
-  const maxVerts = Math.max(3, Math.min(MAX_HULL_VERTS, Math.floor(setup.hullMaxVerts) || MAX_HULL_VERTS));
-  const { hull, deviation } = rawHull.length >= 3 ? finishHull(rawHull, maxVerts) : { hull: [] as Vec2[], deviation: 0 };
 
   // floor contacts → wheels
   let wheels: WheelDetection = { wheels: null, contacts: [], note: 'Couldn’t find any wheels touching the floor. Drag the wheel markers onto the wheels.' };
@@ -1088,6 +1148,38 @@ export function measureParts(
       if (d.wheels) break;
     }
   }
+  const bandsModel = setup.bands && !empty ? computeBands(modelParts, size.height) : null;
+  return {
+    oriented: {
+      units,
+      unitsDetected,
+      up,
+      upDetected: setup.up === 'auto',
+      upMargin,
+      yaw,
+      sourceToModel,
+      empty,
+      trisIn,
+      size,
+      rawHull,
+      wheels,
+      bandsModel,
+    },
+    modelParts,
+  };
+}
+
+/**
+ * THE LIGHT HALF: the hull cut to the setup's cap, the wheels in force (a manual override, else the
+ * detected ones), the wheelbase centre, the bands shifted onto it, and the checks. Tens of
+ * microseconds to a few milliseconds, whatever the model's size: this is what a wheel drag re-runs.
+ * Reads `o` and never writes it, so one `OrientedMeasure` serves every later edit.
+ */
+export function finishMeasure(o: OrientedMeasure, setup: ImportSetup): ImportMeasurement {
+  const { units, size, empty, rawHull, wheels, upMargin } = o;
+  const checks: ImportCheck[] = [];
+  const maxVerts = Math.max(3, Math.min(MAX_HULL_VERTS, Math.floor(setup.hullMaxVerts) || MAX_HULL_VERTS));
+  const { hull, deviation } = rawHull.length >= 3 ? finishHull(rawHull, maxVerts) : { hull: [] as Vec2[], deviation: 0 };
   const manual = Array.isArray(setup.wheels) && setup.wheels.length === 4 && setup.wheels.every((w) => Number.isFinite(w?.x) && Number.isFinite(w?.y));
   const wheelsUsed = manual ? setup.wheels!.map((w) => ({ x: w.x, y: w.y })) : wheels.wheels;
   const wheelSource: ImportMeasurement['wheelSource'] = manual ? 'manual' : wheels.wheels ? 'detected' : 'none';
@@ -1100,7 +1192,7 @@ export function measureParts(
   const heightIn = size.height;
   let bands: ImportedBand[] | undefined;
   if (setup.bands && !empty) {
-    const b = computeBands(modelParts, heightIn);
+    const b = o.bandsModel;
     if (b) bands = b.map((band) => ({ z0: band.z0, z1: band.z1, hull: quantiseHull(band.hull.map((p) => ({ x: p.x - origin.x, y: p.y - origin.y }))) }));
   }
 
@@ -1167,28 +1259,25 @@ export function measureParts(
   }
 
   return {
-    measurement: {
-      units,
-      unitsDetected,
-      up,
-      upDetected: setup.up === 'auto',
-      upMargin,
-      yaw,
-      sourceToModel,
-      size,
-      hull,
-      hullRawVerts: rawHull.length,
-      hullDeviation: deviation,
-      wheels,
-      wheelsUsed,
-      wheelSource,
-      origin,
-      heightIn,
-      bands,
-      trisIn,
-      checks,
-    },
-    modelParts,
+    units,
+    unitsDetected: o.unitsDetected,
+    up: o.up,
+    upDetected: o.upDetected,
+    upMargin,
+    yaw: o.yaw,
+    sourceToModel: o.sourceToModel,
+    size,
+    hull,
+    hullRawVerts: rawHull.length,
+    hullDeviation: deviation,
+    wheels,
+    wheelsUsed,
+    wheelSource,
+    origin,
+    heightIn,
+    bands,
+    trisIn: o.trisIn,
+    checks,
   };
 }
 

@@ -3,12 +3,13 @@
  * `topImageFrame`) and the 192-px card thumbnail, from the normalised, simplified parts.
  */
 import * as THREE from 'three';
-import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import type { ImportedRobot, Vec2 } from '../../types';
 import { topImageFrame, transformParts, triangleCount, type MeshPart } from '../geometry';
-import { MAX_MESH_BYTES, ROBOT_TO_STORED_MESH, THUMB_PX, TOP_IMAGE_PX } from '../types';
+import { THUMB_PX, TOP_IMAGE_PX } from '../types';
+import { bakeMeshOff } from './importSession';
 import { buildMeshGroup, creaseParts, disposeTree } from './meshGroup';
-import { simplifyParts } from './simplify';
+
+export { exportGlb, exportGlbStored } from './bakeMesh';
 
 export interface BakeInput {
   /** MODEL frame (the engine's `normalise` output) */
@@ -35,24 +36,6 @@ const translate = (x: number, y: number, z: number): number[] => [1, 0, 0, 0, 0,
 /** MODEL frame → robot-local (the origin moves to the wheelbase centre) */
 export function toRobotLocal(modelParts: readonly MeshPart[], origin: Vec2): MeshPart[] {
   return transformParts(modelParts, translate(-origin.x, -origin.y, 0));
-}
-
-/** robot-local parts → a GLB in the stored mesh frame */
-export async function exportGlb(robotParts: readonly MeshPart[]): Promise<ArrayBuffer> {
-  return exportGlbStored(transformParts(robotParts, ROBOT_TO_STORED_MESH));
-}
-
-/** parts ALREADY in the stored mesh frame → a GLB (`liteMesh` re-cuts a stored mesh without leaving it) */
-export async function exportGlbStored(stored: readonly MeshPart[]): Promise<ArrayBuffer> {
-  const scene = new THREE.Scene();
-  const group = buildMeshGroup(stored, 'dsim_robot');
-  scene.add(group);
-  try {
-    const out = await new GLTFExporter().parseAsync(scene, { binary: true, onlyVisible: true });
-    return out as ArrayBuffer;
-  } finally {
-    disposeTree(group);
-  }
 }
 
 function canvasBlob(canvas: HTMLCanvasElement): Promise<Blob> {
@@ -101,6 +84,9 @@ export async function renderTop(robotParts: readonly MeshPart[], hull: readonly 
   cam.up.set(1, 0, 0);
   cam.lookAt(f.cx, f.cy, 0);
   try {
+    // link the programs with `KHR_parallel_shader_compile` before drawing, so the link does not
+    // block this thread (the same pixels either way)
+    await renderer.compileAsync(scene, cam);
     renderer.render(scene, cam);
     return await canvasBlob(canvas);
   } finally {
@@ -124,6 +110,7 @@ export async function renderThumb(robotParts: readonly MeshPart[], px = THUMB_PX
   cam.up.set(0, 0, 1);
   cam.lookAt(sphere.center);
   try {
+    await renderer.compileAsync(scene, cam);
     renderer.render(scene, cam);
     return await canvasBlob(canvas);
   } finally {
@@ -134,21 +121,15 @@ export async function renderThumb(robotParts: readonly MeshPart[], px = THUMB_PX
 
 /**
  * Bake all three. The GLB is held to `MAX_MESH_BYTES`: when an export comes out larger, the
- * triangle budget drops in proportion (with 10 % to spare) and the parts are simplified again.
+ * triangle budget drops in proportion (with 10 % to spare) and the parts are simplified again
+ * (`bakeMeshHere`). That half runs in the import worker when one can start: an export is ~30 ms of
+ * synchronous work on 100k triangles and a refit (a weld, a meshopt pass, the creases, a second
+ * export) about 100 ms more, which made a Save's longest task 103–144 ms. The pictures need WebGL
+ * and stay here.
  */
 export async function bake(input: BakeInput): Promise<BakeResult> {
-  let robotParts = creaseParts(toRobotLocal(input.modelParts, input.origin));
   input.onProgress?.('mesh');
-  let glb = await exportGlb(robotParts);
-  let refits = 0;
-  while (glb.byteLength > MAX_MESH_BYTES && refits < 4) {
-    const tris = triangleCount(robotParts);
-    const budget = Math.max(2000, Math.floor((tris * MAX_MESH_BYTES * 0.9) / glb.byteLength));
-    const s = await simplifyParts(robotParts.map((p) => ({ ...p, normals: null })), budget);
-    robotParts = creaseParts(s.parts);
-    glb = await exportGlb(robotParts);
-    refits++;
-  }
+  const { glb, parts: robotParts, refits } = await bakeMeshOff(creaseParts(toRobotLocal(input.modelParts, input.origin)));
   input.onProgress?.('top');
   const top = await renderTop(robotParts, input.descriptor.hull);
   input.onProgress?.('thumb');

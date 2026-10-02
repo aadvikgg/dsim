@@ -17,9 +17,6 @@ export function weld(part: MeshPart, eps: number): { positions: Float32Array; in
   let cap = 1;
   while (cap < nVert * 2) cap <<= 1;
   const table = new Int32Array(cap).fill(-1);
-  const qx = new Int32Array(nVert);
-  const qy = new Int32Array(nVert);
-  const qz = new Int32Array(nVert);
   const remap = new Uint32Array(nVert);
   const out = new Float32Array(src.length);
   let count = 0;
@@ -32,16 +29,16 @@ export function weld(part: MeshPart, eps: number): { positions: Float32Array; in
       const slot = table[h];
       if (slot < 0) {
         table[h] = count;
-        qx[count] = x;
-        qy[count] = y;
-        qz[count] = z;
         out[3 * count] = src[3 * i];
         out[3 * count + 1] = src[3 * i + 1];
         out[3 * count + 2] = src[3 * i + 2];
         remap[i] = count++;
         break;
       }
-      if (qx[slot] === x && qy[slot] === y && qz[slot] === z) {
+      // the slot's quantised position is recomputed from the vertex it holds (the same float32, so
+      // the same integers; `| 0` is the Int32Array store the old arrays did) instead of being kept
+      // in three more arrays: 12 bytes a vertex, 140 MB on an un-indexed 4M-triangle STL
+      if ((Math.round(out[3 * slot] * inv) | 0) === x && (Math.round(out[3 * slot + 1] * inv) | 0) === y && (Math.round(out[3 * slot + 2] * inv) | 0) === z) {
         remap[i] = slot;
         break;
       }
@@ -174,6 +171,18 @@ export function creasedNormals(
     }
   }
   return { positions: new Float32Array(outPos), normals: new Float32Array(outNrm), indices: outIdx };
+}
+
+/** the crease angle every importer normal is computed at, degrees */
+export const CREASE_DEG = 40;
+
+/** give every indexed part creased normals (new arrays; parts that have them are kept) */
+export function creaseParts(parts: readonly MeshPart[]): MeshPart[] {
+  return parts.map((p) => {
+    if (p.normals || !p.indices) return p;
+    const c = creasedNormals(p.positions, p.indices, CREASE_DEG);
+    return { positions: c.positions, indices: c.indices, normals: c.normals, color: p.color, name: p.name };
+  });
 }
 
 /** colour key at `bits` bits per channel */

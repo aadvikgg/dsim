@@ -79,6 +79,10 @@
  *   step       — STEP support: `stepWorker-*.js` (the worker, with occt-import-js's 97 KB glue
  *                inlined) and `occt-import-js-*.wasm` (OpenCascade, ~7.6 MB raw). Fetched only when
  *                a STEP file is dropped. Matched by FILENAME.
+ *   importworker — the importer's two WORKERS (lane 9): `importWorker-*.js` (parse, weld, simplify
+ *                off the main thread), `measureWorker-*.js` (a measurement's orientation half) and
+ *                the import worker's lazy `meshoptDecoder-*.js`. Fetched when a file is dropped on the
+ *                importer. Matched by FILENAME.
  *   library    — the device ROBOT LIBRARY (`library-*.js`, `src/robotImport/library.ts`), reached
  *                by a dynamic import from the renderers' asset seam the first time an imported
  *                robot is drawn, and from the visuals relay's client the first time it reads an
@@ -200,6 +204,11 @@ function routeFor(file, buf) {
   // THE RELAY'S VALIDATORS, by FILENAME: `importVisualsClient.ts` reaches them by `import()`, so a
   // client that never uploads or receives an imported robot's look never fetches them
   if (/^visualCheck-[^/]*\.js$/.test(base)) return 'relay';
+  // THE IMPORTER'S WORKERS (lane 9), by FILENAME: Vite builds each `new Worker(new URL(…))` entry
+  // as its own bundle, named after it. `meshoptDecoder-*.js` is the import worker's lazy chunk for a
+  // meshopt-compressed glTF, behind a facade so it is not named like the main build's shared three
+  // chunk (`meshopt_decoder.module-*.js`, routed `scene` by its marker).
+  if (/^(importWorker|measureWorker|meshoptDecoder)-[^/]*\.js$/.test(base)) return 'importworker';
   // THE ROBOT LIBRARY (`src/robotImport/library.ts`, IndexedDB), by FILENAME: the renderers' asset
   // seam (`src/render/importedAssets.ts`) reaches it with a dynamic `import()` the first time an
   // imported robot is drawn, so it is its own small chunk rather than a cost in `main`.
@@ -602,7 +611,18 @@ const BASELINE = {
   // shared `geometry-*.js` 8.24 (the measurement code, which the editor imports too). The feature
   // branch alone measured 61.75 with geometry inside the engine chunk; the +1.06 is the preview's
   // camera presets and collision layer.
-  importer: { gzip: 62.81 * 1000 },
+  // 2026-10-01 (lane 9, importer performance): 62.82 -> 67.06, raised on purpose. The engine now
+  // drives two workers (`importSession.ts`, `measureSession.ts` and their protocols, +2.6) and keeps
+  // the main-thread fallback they replace (`parse.ts`, with the streamed STL reader, +1.2); the
+  // measurement's split into an orientation half and a finish half is +0.2 in `geometry-*.js`.
+  importer: { gzip: 67.06 * 1000 },
+  // 2026-10-01: NEW (lane 9). `importWorker-*.js` 104.06 (three.js core, the GLB/glTF, STL, OBJ+MTL
+  // and PLY loaders, meshopt's simplifier, the weld and the crease: the parse-to-prepared pipeline
+  // that used to block the main thread for seconds; and GLTFExporter for the bake's mesh half),
+  // `measureWorker-*.js` 6.50 (`geometry.ts`: the orientation half of a measurement) and
+  // `meshoptDecoder-*.js` 7.26 (fetched only for a meshopt-compressed glTF). Fetched when a file is
+  // dropped on the importer or a robot is saved, never otherwise.
+  importworker: { gzip: 117.82 * 1000 },
   // 2026-10-01: NEW. `occt-import-js-*.wasm` 3110.91 (OpenCascade, 7.6 MB raw), `stepWorker-*.js`
   // 21.95 (the worker with occt's glue) and `stepReader-*.js` 0.42. Fetched only when a STEP file is
   // dropped; every other import, and every player who never imports a robot, pays nothing.
@@ -624,10 +644,12 @@ const BASELINE = {
   // when a player opens the importer or acts on an imported robot. What the robot page itself
   // carries for imports (the row, the panel, the notice, the test-drive and lobby wiring) is in
   // `main`: +4.53 KB against the feature branch at 5d0e6aa5 (1017.05 -> 1021.58).
-  // 2026-10-01: 21.55 -> 24.18 (+2.63): `ImportEditor-*.js` 21.38 now carries the placement checks
+  // 2026-10-01: 21.55 -> 24.18 (+2.63): `ImportEditor-*.js` now carries the placement checks
   // (`games/importMechChecks.ts`, the three games' `importChecks.ts` and the shared helpers), which were in
-  // `main` as a `GameSimModule` slot and are reached only by the editor.
-  importerui: { gzip: 24.18 * 1000 },
+  // `main` as a `GameSimModule` slot and are reached only by the editor. Then +0.53 (lane 9): the
+  // editor's two-half measuring (the pending state, the Measuring… notice) and Cancel stopping the
+  // import's workers.
+  importerui: { gzip: 24.71 * 1000 },
   other: { gzip: 1 * 1000 },
 };
 
