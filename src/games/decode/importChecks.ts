@@ -19,9 +19,12 @@ import type { ImportMechHandle, ImportMechIssue, ImportMechSlot } from '../types
  */
 
 function handles(spec: RobotSpec): ImportMechHandle[] {
+  // a FIXED launcher (`spec.launcher`) fires along its facing, which the editor sets beside the
+  // point; a turret aims itself and has none
+  const facing = spec.launcher === 'fixed' ? { facingDeg: spec.imported?.mech?.shooterYawDeg ?? 0 } : {};
   return [
     ...spanHandles(['front']),
-    { key: 'shooter', kind: 'point', label: 'Launcher', z: decodeImportLaunchZ(spec), zMin: DECODE_IMPORT_LAUNCH_MIN, zMax: 18 },
+    { key: 'shooter', kind: 'point', label: spec.launcher === 'fixed' ? 'Fixed launcher' : 'Launcher', z: decodeImportLaunchZ(spec), zMin: DECODE_IMPORT_LAUNCH_MIN, zMax: 18, ...facing },
   ];
 }
 
@@ -32,6 +35,8 @@ function defaults(spec: RobotSpec): ImportedMech {
   return coercedMech(imp, {
     intakes: defaultSpans([decodeImportMouth(bare).m]),
     shooter: { x: t.x, y: t.y, z: Math.min(C.LAUNCH_HEIGHT, imp.heightIn) },
+    // a FIXED launcher starts facing forward, the way the standard one fires
+    ...(spec.launcher === 'fixed' ? { shooterYawDeg: 0 } : {}),
   });
 }
 

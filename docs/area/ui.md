@@ -405,6 +405,14 @@ the moment somebody opens Controls. A blurb survives only where it names a trade
 is choosing between (`docs/ui-standard.md` §8): the archetype and drivetrain descriptions, the
 four `PERF_DISPLAY_BLURB` lines, an option's download size, and the R102 stow note.
 
+**The fixed-shooter controls** (`src/ui/LauncherRows.tsx`): DECODE's Scoring block gains
+Launcher (Turret / Fixed), Hood (Adjustable / Fixed + angle) and Flywheel (Auto / One speed /
+Presets + speed, wheel and feed sliders, each with the exit speed it throws); BIOBUZZ's fixed
+launcher shows its firing edge, hood and one speed. Every envelope is the coercer's constant.
+The preset step (`flyPreset`) is a DECODE action on Z / R3 — the MODE TOGGLE role, shared with
+BIOBUZZ's Deploy ramp — with a touch SPEED button only on a presets wheel. The HUD's sub-card
+names a setpoint wheel's speed (and preset) and READY / SPIN UP.
+
 ## HUD / UX product rules
 
 - **THE BANNER STRIP** (`BannerStack.tsx`, beside `<App/>` in `main.tsx`) is where the restart

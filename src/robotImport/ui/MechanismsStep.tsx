@@ -13,6 +13,17 @@ import { TopDownMap, type MapHandle, type MapSpan } from './TopDownMap';
 /** the pieces of one intake span the map can drag */
 type SpanPart = 'from' | 'to' | 'mid';
 
+/** how far out from its point a launcher's FACING handle sits (in) — far enough to grab apart */
+const AIM_REACH = 4;
+/** a key's FACING handle: `shooter:aim` */
+const AIM = ':aim';
+
+/** whole degrees wrapped to (−180, 180], the coercer's own spelling (`src/sim/imported.ts`) */
+function wrapDeg(d: number): number {
+  const a = ((Math.round(d) % 360) + 360) % 360;
+  return a > 180 ? a - 360 : a;
+}
+
 function spanEnds(edge: ImportedEdge, from: number, to: number, hull: readonly Vec2[]): { a: Vec2; b: Vec2; mid: Vec2; axis: 'x' | 'y' } {
   const r = edgeRange(edge, hull);
   if (edge === 'front' || edge === 'back') {
@@ -71,11 +82,25 @@ export function MechanismsStep({
     } else if (d.field !== 'intake') {
       const p = mech[d.field];
       if (p) handles.push({ key: d.key, label: d.label, x: p.x, y: p.y, z: p.z, shape: 'point', bad: bad.has(d.key) });
+      // a FIXED launcher's facing: a second handle out along it, and the ray between the two
+      if (p && d.field === 'shooter' && d.facingDeg !== undefined) {
+        const a = ((mech.shooterYawDeg ?? d.facingDeg) * Math.PI) / 180;
+        const tip = { x: p.x + Math.cos(a) * AIM_REACH, y: p.y + Math.sin(a) * AIM_REACH };
+        spans.push({ key: `${d.key}${AIM}`, a: { x: p.x, y: p.y }, b: tip });
+        handles.push({ key: `${d.key}${AIM}`, label: COPY.facingHandle(d.label), ...tip, shape: 'aim' });
+      }
     }
   }
 
   /** a handle moved: write it back into the placement */
   const move = (key: string, p: Vec2): void => {
+    if (key.endsWith(AIM)) {
+      // the FACING handle: the direction from the launcher's point to where it was dragged
+      const at = mech.shooter;
+      if (!at || Math.hypot(p.x - at.x, p.y - at.y) < 0.5) return;
+      onMech({ ...mech, shooterYawDeg: wrapDeg((Math.atan2(p.y - at.y, p.x - at.x) * 180) / Math.PI) });
+      return;
+    }
     const [base, part] = key.split(':').length === 3 ? [key.slice(0, key.lastIndexOf(':')), key.slice(key.lastIndexOf(':') + 1) as SpanPart] : [key, null];
     const def = defs.find((d) => d.key === base);
     if (!def) return;
@@ -106,6 +131,10 @@ export function MechanismsStep({
 
   /** Home on a handle: that placement (a span: the whole span) back to the game's pre-fill */
   const goHome = (key: string): void => {
+    if (key.endsWith(AIM)) {
+      onMech({ ...mech, shooterYawDeg: home.shooterYawDeg ?? 0 });
+      return;
+    }
     const base = key.split(':').length === 3 ? key.slice(0, key.lastIndexOf(':')) : key;
     const def = defs.find((d) => d.key === base);
     if (!def) return;
@@ -118,8 +147,9 @@ export function MechanismsStep({
     if (h) onMech({ ...mech, [def.field]: { ...h } });
   };
 
-  // the selected handle's own controls
-  const selBase = selected && selected.split(':').length === 3 ? selected.slice(0, selected.lastIndexOf(':')) : selected;
+  // the selected handle's own controls (a FACING handle's are its launcher's)
+  const selKey = selected?.endsWith(AIM) ? selected.slice(0, -AIM.length) : selected;
+  const selBase = selKey && selKey.split(':').length === 3 ? selKey.slice(0, selKey.lastIndexOf(':')) : selKey;
   const selDef = defs.find((d) => d.key === selBase) ?? null;
   const selCheck = checks.find((c) => c.key === selBase);
   let status = defs.length ? '' : COPY.noHandles;
@@ -168,10 +198,23 @@ export function MechanismsStep({
       // the release heights the game accepts (lane 2), else the floor to the top of the robot
       const zLo = Math.max(0, selDef.zMin ?? 0);
       const top = Math.max(zLo + 0.25, Math.round(Math.min(heightIn, selDef.zMax ?? heightIn) * 4) / 4);
+      const facing = field === 'shooter' && selDef.facingDeg !== undefined ? (mech.shooterYawDeg ?? selDef.facingDeg) : null;
+      if (facing !== null && selected?.endsWith(AIM)) status = COPY.facingPlaced(selDef.label, facing);
       controls = (
         <div className="ds-fields">
           <NumberField label={COPY.forward} unit="in" value={p.x} min={-12} max={12} step={0.25} onCommit={(x) => set({ x })} />
           <NumberField label={COPY.left} unit="in" value={p.y} min={-12} max={12} step={0.25} onCommit={(y) => set({ y })} />
+          {facing !== null && (
+            <NumberField
+              label={COPY.facing}
+              unit="°"
+              value={facing}
+              min={-180}
+              max={180}
+              step={15}
+              onCommit={(deg) => onMech({ ...mech, shooterYawDeg: wrapDeg(deg) })}
+            />
+          )}
           <label className="ds-field">
             <span className="cap">
               {COPY.height} <span className="val">{p.z.toFixed(2)} in</span>

@@ -421,6 +421,10 @@ import {
 import type { ServerMsg, QueueMode } from '../src/net/protocol';
 import { dsin, dcos, dtan, datan2, hyp, rot, wrapAngle, clamp } from '../src/math';
 import { initPhysics } from '../src/sim/physicsEngine';
+import { DECODE_FIXED_AIM_TOL, DECODE_KIT_HOOD_DEG, FLY_EXIT_EFFICIENCY, FLY_FEED_MIN_FRAC, TURRET_OFFSET_FRAC } from '../src/config';
+import { decodeFixedAim, decodeFixedRelease } from '../src/sim/fixedShot';
+import { coerceFlywheel, flyExitSpeedAt } from '../src/sim/flywheelSpec';
+import { flyReady, flySetpoint } from '../src/sim/flywheel';
 import { initPhysics3d } from '../src/games/biobuzz/sim3d/engine';
 import { simModuleFor } from '../src/games/sim';
 import { LeadController, LEAD_GAP_MS, LEAD_MAX_FAST, LEAD_MAX_SLOW, LEAD_TARGET_MAX } from '../src/net/leadControl';
@@ -6360,9 +6364,9 @@ function queueTenth(w: World): void {
      CAN insist the two actions are the ones the design says. A future edit that parks an
      unrelated pair on one key passes every rule above and is still a surprise under the hand. */
   check(
-    'bindings: ...and the shared pairs are the intended ROLE pairs (place / send-away), not incidental collisions',
-    JSON.stringify([...sharedKeys].sort()) === JSON.stringify(['catalyst+bbPlace', 'fling+bbPass'].sort()) &&
-      JSON.stringify([...sharedPad].sort()) === JSON.stringify(['catalyst+bbPlace', 'fling+bbPass'].sort()),
+    'bindings: ...and the shared pairs are the intended ROLE pairs (place / send-away / mode toggle), not incidental collisions',
+    JSON.stringify([...sharedKeys].sort()) === JSON.stringify(['catalyst+bbPlace', 'fling+bbPass', 'flyPreset+bbRamp'].sort()) &&
+      JSON.stringify([...sharedPad].sort()) === JSON.stringify(['catalyst+bbPlace', 'fling+bbPass', 'flyPreset+bbRamp'].sort()),
     `keys ${sharedKeys.join(' ')} · pad ${sharedPad.join(' ')}`,
   );
   // Escape is reserved for menu / cancel and is never bindable.
@@ -25887,8 +25891,8 @@ const dumperSetup = (): RobotSetup => {
     GAME_IDS.every((g) => seasonKeyActions(g).every((a) => !actionIsShared(a)) && seasonPadActions(g).every((a) => !actionIsShared(a))),
   );
   check(
-    'kinds: DECODE, with no mechanism of its own, lists Intake and Shoot and nothing else',
-    J(seasonKeyActions('decode')) === J(['intake', 'fire']),
+    'kinds: DECODE lists Intake, Shoot and its one mechanism of its own, the flywheel preset, and nothing else',
+    J(seasonKeyActions('decode')) === J(['intake', 'fire', 'flyPreset']),
     J(seasonKeyActions('decode')),
   );
 
@@ -26783,8 +26787,8 @@ const dumperSetup = (): RobotSetup => {
   // the per-game SETS, spelled out — the coverage check above says nothing is missing, and
   // these say what each season's driver actually gets
   check(
-    'touch: DECODE is shoot, intake and the three utilities',
-    touchButtonsFor('decode').map((b) => b.action).join(',') === 'fire,intake,flipFront,driveMode,park',
+    'touch: DECODE is shoot, intake, the flywheel preset and the three utilities',
+    touchButtonsFor('decode').map((b) => b.action).join(',') === 'fire,intake,flyPreset,flipFront,driveMode,park',
     touchButtonsFor('decode').map((b) => b.action).join(','),
   );
   check(
@@ -34280,6 +34284,422 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
     ['await finish(withId(newRobotId()));', 'sharedFrom: fileId,', 'planShareAdd(spec.imported, settings.spec.imported', 'replace: () => void finish(withId(have.id))'].every((t) => edN.includes(t)) &&
       readFileSync('src/robotImport/libraryIds.ts', 'utf8').includes('entries.find((e) => e.sharedFrom === file.id || e.id === file.id)') &&
       readFileSync('src/robotImport/library.ts', 'utf8').includes('...(r.sharedFrom ? { sharedFrom: r.sharedFrom } : {}),'),
+  );
+}
+
+// ====================================================================================================
+// FIXED SHOOTERS — DECODE (`RobotSpec.launcher` / `hoodDeg` / `flywheel`, `src/sim/fixedShot.ts`,
+// `src/sim/flywheel.ts`). The BIOBUZZ half is the FIXED lane (`scripts/smoke-biobuzz/fixed.ts`).
+// ====================================================================================================
+
+/**
+ * THE BYTE-IDENTITY PINS, recorded on feat/robot-import 3d9a4120 BEFORE any fixed-shooter code
+ * existed: four DECODE turret builds (TW, Dugtrio, Rohan, Ditto — no swerve, which another branch is
+ * re-gearing), ALL assists on, auto fire included, the fire button on a cadence. Every robot without
+ * a fixed launcher, a fixed hood or a setpoint wheel runs exactly the code it always did; these are
+ * the proof. Never re-record one to make a fixed-shooter change pass.
+ */
+const FX_PINS: Record<'teleop' | 'auto', string> = {
+  teleop: 'fired=10 1820613857:1520241632 1451436679:3703651367 1378729317:382838410',
+  auto: 'fired=8 431843382:2627330122 1945519580:4026393436 861924408:426344017',
+};
+function fxPinCmd(w: World, i: number, tick: number): RobotCommand {
+  const r = w.robots[i];
+  let best: { x: number; y: number } | null = null;
+  let bd = Infinity;
+  for (const b of w.balls) {
+    if (b.state.kind !== 'ground') continue;
+    const d = hyp(b.pos.x - r.pos.x, b.pos.y - r.pos.y);
+    if (d < bd) {
+      bd = d;
+      best = b.pos;
+    }
+  }
+  const full = r.hopper.length >= 3;
+  const target = !best || (full && tick % 240 < 120) ? { x: (i % 2 === 0 ? 1 : -1) * 36, y: (i < 2 ? 1 : -1) * 36 } : best;
+  const local = rot({ x: target.x - r.pos.x, y: target.y - r.pos.y }, -r.heading);
+  const ang = datan2(local.y, local.x);
+  const driveY = clamp(local.x / 10, -1, 1);
+  const rotate = clamp(-wrapAngle(ang) * 0.9, -1, 1);
+  return {
+    driveY,
+    driveX: clamp(-local.y / 14, -1, 1),
+    rotate,
+    leftDrive: clamp(driveY - rotate, -1, 1),
+    rightDrive: clamp(driveY + rotate, -1, 1),
+    intake: tick % 200 < 170,
+    fire: r.hopper.length > 0 && tick % 40 < 25,
+  };
+}
+function fxPinRun(phase: 'auto' | 'teleop'): string {
+  const specs = [ROBOT_PRESETS[0], ROBOT_PRESETS[1], ROBOT_PRESETS[3], ROBOT_PRESETS[4]];
+  const w = createWorld(
+    'match',
+    9191,
+    specs.map((s, i) => ({
+      id: i,
+      alliance: (i % 2 === 0 ? 'blue' : 'red') as Alliance,
+      spec: { ...DEFAULT_SPEC, ...s } as RobotSpec,
+      assists: { fieldCentric: false, aimAssist: true, autoIntake: true, autoFire: true },
+      startIndex: Math.floor(i / 2),
+    })),
+  );
+  w.match.phase = phase;
+  w.match.phaseTimeLeft = phase === 'auto' ? 30 : 90;
+  const out: string[] = [];
+  let fired = 0;
+  for (let t = 0; t < 900; t++) {
+    const cmds = new Map<number, RobotCommand>();
+    for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, fxPinCmd(w, i, t));
+    step(w, 1 / 60, cmds);
+    for (const r of w.robots) if (r.lastFireAt === w.time) fired++;
+    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(w))}`);
+  }
+  return `fired=${fired} ${out.join(' ')}`;
+}
+{
+  const got = fxPinRun('teleop');
+  check('fixed shooter: DECODE turret builds step byte-identically through intake / auto fire / fire — teleop (worldHash + whole-world JSON, 900 ticks)', got === FX_PINS.teleop, got);
+}
+{
+  const got = fxPinRun('auto');
+  check('fixed shooter: …and through AUTO', got === FX_PINS.auto, got);
+}
+
+/** the DECODE kit card */
+function fxKit(): RobotSpec {
+  return ROBOT_PRESETS.find((p) => p.name === 'StarterBot')!;
+}
+/** a one-robot DECODE world, teleop, robot 0 placed so its MUZZLE is `d` in from the blue goal's
+ * centroid along the face normal, facing the goal `yawErr` off; fire held (or not) for `ticks`.
+ * Counts artifacts that ENTER the blue goal from flight. */
+function fxShoot(
+  spec: Partial<RobotSpec>,
+  d: number,
+  o: { assist?: boolean; autoFire?: boolean; fire?: boolean; yawErr?: number; ticks?: number; setup?: (w: World) => void; cmd?: Partial<RobotCommand> } = {},
+): { scored: number; fired: number; heading: number; w: World } {
+  const w = createWorld('match', 5, [
+    {
+      id: 0,
+      alliance: 'blue',
+      spec: { ...DEFAULT_SPEC, ...spec } as RobotSpec,
+      assists: { fieldCentric: false, aimAssist: true, autoIntake: false, autoFire: o.autoFire ?? false },
+      startIndex: 0,
+    },
+  ]);
+  w.match.phase = 'teleop';
+  w.match.phaseTimeLeft = 100;
+  const r = w.robots[0];
+  r.aimAssist = o.assist ?? false;
+  const g = goalCenter('blue');
+  const n = goalFaceNormal('blue');
+  const head = Math.atan2(-n.y, -n.x);
+  const back = r.spec.length * TURRET_OFFSET_FRAC; // the launcher's mount, behind the centre
+  r.pos = { x: g.x + n.x * d - Math.cos(head) * back, y: g.y + n.y * d - Math.sin(head) * back };
+  r.heading = head + (o.yawErr ?? 0);
+  r.turretHeading = r.heading;
+  o.setup?.(w);
+  const start = r.hopper.length;
+  let scored = 0;
+  const c: RobotCommand = { driveX: 0, driveY: 0, rotate: 0, leftDrive: 0, rightDrive: 0, intake: false, fire: o.fire ?? true, ...o.cmd };
+  for (let k = 0; k < (o.ticks ?? 150); k++) {
+    const flying = new Set(w.balls.filter((b) => b.state.kind === 'flight').map((b) => b.id));
+    step(w, 1 / 60, new Map([[0, c]]));
+    for (const b of w.balls) {
+      if (flying.has(b.id) && (b.state.kind === 'basin' || b.state.kind === 'rail') && (b.state as { goal: Alliance }).goal === 'blue') scored++;
+    }
+  }
+  return { scored, fired: start - r.hopper.length, heading: r.heading, w };
+}
+
+// ---- the coercer ------------------------------------------------------------------------------
+{
+  const J = (v: unknown): string => JSON.stringify(v);
+  const kit = coerceSpec(fxKit());
+  check(
+    'fixed shooter: the kit card coerces to itself (launcher, hood and wheel kept, a fixed point)',
+    kit.launcher === 'fixed' && kit.hoodDeg === DECODE_KIT_HOOD_DEG && J(kit.flywheel) === J(fxKit().flywheel) && J(coerceSpec(kit)) === J(kit),
+    J({ l: kit.launcher, h: kit.hoodDeg, f: kit.flywheel }),
+  );
+  const fromBase = coerceSpec({ ...DEFAULT_SPEC }, kit);
+  check(
+    'fixed shooter: read off the RAW input only — a spec without them, coerced over a fixed-launcher base, is a turret again',
+    fromBase.launcher === undefined && fromBase.hoodDeg === undefined && fromBase.flywheel === undefined,
+    J({ l: fromBase.launcher, h: fromBase.hoodDeg, f: fromBase.flywheel }),
+  );
+  const t = (raw: Record<string, unknown>): RobotSpec => coerceSpec({ ...DEFAULT_SPEC, ...raw });
+  check(
+    'fixed shooter: only "fixed" is a launcher worth storing — a turret, a typo or a number is absent',
+    t({ launcher: 'turret' }).launcher === undefined && t({ launcher: 'gun' }).launcher === undefined && t({ launcher: 1 }).launcher === undefined && t({ launcher: 'fixed' }).launcher === 'fixed',
+  );
+  check(
+    'fixed shooter: a fixed hood is clamped to 20–80 in whole degrees, and a non-number is the adjustable hood',
+    t({ hoodDeg: 5 }).hoodDeg === 20 && t({ hoodDeg: 95.6 }).hoodDeg === 80 && t({ hoodDeg: 61.4 }).hoodDeg === 61 && t({ hoodDeg: NaN }).hoodDeg === undefined && t({ hoodDeg: '70' }).hoodDeg === undefined,
+    J([5, 95.6, 61.4].map((h) => t({ hoodDeg: h }).hoodDeg)),
+  );
+  check(
+    'fixed shooter: an unusable flywheel is no flywheel (unknown mode, no finite setpoint, not an object)',
+    coerceFlywheel({ mode: 'turbo', rpm: [2000] }) === undefined && coerceFlywheel({ mode: 'fixed', rpm: [] }) === undefined && coerceFlywheel({ mode: 'fixed', rpm: ['x', NaN] }) === undefined && coerceFlywheel('fixed') === undefined && coerceFlywheel(null) === undefined,
+  );
+  const one = coerceFlywheel({ mode: 'fixed', rpm: [3000.4, 4000, 5000], wheelMm: 2, feedS: 0.333 });
+  check(
+    'fixed shooter: a one-speed wheel keeps ONE setpoint, whole rpm, and its wheel and feed are clamped',
+    J(one) === J({ mode: 'fixed', rpm: [3000], wheelMm: 48, feedS: 0.33 }) && J(coerceFlywheel(one)) === J(one),
+    J(one),
+  );
+  const pre = coerceFlywheel({ mode: 'presets', rpm: [1300, 1900, 2200, 2500], wheelMm: 90 });
+  check(
+    'fixed shooter: presets keep up to three, and default the feed to the kit’s 0.20 s',
+    J(pre) === J({ mode: 'presets', rpm: [1300, 1900, 2200], wheelMm: 90, feedS: 0.2 }) && J(coerceFlywheel(pre)) === J(pre),
+    J(pre),
+  );
+  const cr = coerceSpec(fxKit(), undefined, 'chain');
+  check('fixed shooter: Chain Reaction carries none of the three', cr.launcher === undefined && cr.hoodDeg === undefined && cr.flywheel === undefined);
+  check(
+    'fixed shooter: every DECODE team card is still the turret it was (no field written)',
+    ROBOT_PRESETS.filter((p) => p.name !== 'StarterBot').every((p) => {
+      const c = coerceSpec(p);
+      return !('launcher' in c) && !('hoodDeg' in c) && !('flywheel' in c);
+    }),
+  );
+}
+
+// ---- the kit card is the kit ------------------------------------------------------------------
+{
+  const k = fxKit();
+  check(
+    'StarterBot (DECODE): the kit OpMode’s 1125 ticks/s on a 28-PPR 1:1 motor is 2411 rpm, on 96-mm wheels, a 0.20-s feed',
+    k.flywheel?.mode === 'fixed' && k.flywheel.rpm[0] === Math.round((1125 / 28) * 60) && k.flywheel.wheelMm === 96 && k.flywheel.feedS === 0.2,
+    JSON.stringify(k.flywheel),
+  );
+  check(
+    'StarterBot (DECODE): its feed minimum is the OpMode’s 1075 / 1125',
+    Math.abs(FLY_FEED_MIN_FRAC - 1075 / 1125) < 1e-12,
+  );
+  check(
+    'StarterBot (DECODE): tank at 286 (312 rpm on 96 mm), no turret, robot-centric — and ON the 22-lb tank floor (the kit is 13.5 lb)',
+    k.drivetrain === 'tank' && k.driveRpm === 286 && k.launcher === 'fixed' && k.assists?.fieldCentric === false && k.massLb === massLimits('tank', k.flywheelInertia).min,
+    JSON.stringify({ dt: k.drivetrain, rpm: k.driveRpm, m: k.massLb }),
+  );
+  check('StarterBot (DECODE): it is the LAST card, so the default build is still the first', ROBOT_PRESETS[ROBOT_PRESETS.length - 1].name === 'StarterBot' && ROBOT_PRESETS[0].name === 'TW');
+}
+
+// ---- where it scores from ---------------------------------------------------------------------
+{
+  // the band, measured: every 2 in from the goal, muzzle on the face normal, facing it, aim assist
+  // off so nothing turns. Printed so a change to the efficiency or the hood shows its effect.
+  const hits: number[] = [];
+  for (let d = 10; d <= 64; d += 2) if (fxShoot(fxKit(), d).scored === 3) hits.push(d);
+  const near = hits.filter((d) => d < 30);
+  const far = hits.filter((d) => d >= 30);
+  check(
+    'fixed shooter: the kit robot scores from TWO bands — rising through the opening right at the goal, and falling into it a few feet out',
+    near.length >= 3 && far.length >= 5 && !hits.includes(30) && !hits.includes(64),
+    `muzzle-to-goal-centre, in: ${JSON.stringify(hits)}`,
+  );
+  const inNear = fxShoot(fxKit(), 18);
+  const inFar = fxShoot(fxKit(), 50);
+  check('fixed shooter: in the near band, all three score', inNear.scored === 3, JSON.stringify({ s: inNear.scored, f: inNear.fired }));
+  check('fixed shooter: in the far band, all three score', inFar.scored === 3, JSON.stringify({ s: inFar.scored, f: inFar.fired }));
+  const between = fxShoot(fxKit(), 30);
+  const long = fxShoot(fxKit(), 64);
+  check(
+    'fixed shooter: SHORT of the far band (30 in) and LONG of it (64 in), the shots leave and miss — nothing corrects them',
+    between.fired === 3 && between.scored === 0 && long.fired === 3 && long.scored === 0,
+    JSON.stringify({ between: [between.fired, between.scored], long: [long.fired, long.scored] }),
+  );
+  const off = fxShoot(fxKit(), 50, { yawErr: 0.35 });
+  check('fixed shooter: in band but facing 20° off, every shot misses — the launcher does not aim, the robot does', off.fired === 3 && off.scored === 0, JSON.stringify({ f: off.fired, s: off.scored }));
+}
+
+// ---- the robot aims: aim assist turns the chassis --------------------------------------------
+{
+  const turned = fxShoot(fxKit(), 50, { assist: true, yawErr: 0.5, ticks: 240 });
+  const g = goalCenter('blue');
+  const r = turned.w.robots[0];
+  const want = decodeFixedAim(r).heading;
+  check(
+    'fixed shooter: with aim assist, holding fire turns the CHASSIS (a tank, through its side drives) onto the goal, then it scores',
+    turned.scored === 3 && Math.abs(wrapAngle(want - turned.heading)) < DECODE_FIXED_AIM_TOL,
+    JSON.stringify({ s: turned.scored, err: wrapAngle(want - turned.heading), g }),
+  );
+  const held = fxShoot(fxKit(), 50, { assist: true, yawErr: 0.5, ticks: 6 });
+  check('fixed shooter: …and it does not release before it is on target', held.fired === 0, JSON.stringify({ f: held.fired }));
+  const auto = fxShoot(fxKit(), 50, { assist: true, autoFire: true, fire: false });
+  const autoOut = fxShoot(fxKit(), 30, { assist: true, autoFire: true, fire: false });
+  check(
+    'fixed shooter: AUTO FIRE releases only a shot that would score — in band it empties the hopper into the goal, out of band it holds',
+    auto.scored === 3 && autoOut.fired === 0,
+    JSON.stringify({ in: [auto.fired, auto.scored], out: autoOut.fired }),
+  );
+}
+
+// ---- the feeder waits for the wheel ------------------------------------------------------------
+{
+  let first = -1;
+  let rpmAtFeed = 0;
+  // the in-band scene with the wheel run down to 500 rpm, stepped by hand to find the feed
+  const w = fxShoot(fxKit(), 50, { ticks: 0, setup: (ww) => (ww.robots[0].flyRpm = 500) }).w;
+  const r = w.robots[0];
+  for (let k = 0; k < 90 && first < 0; k++) {
+    const before = r.flyRpm ?? 0;
+    const n = r.hopper.length;
+    step(w, 1 / 60, new Map([[0, { driveX: 0, driveY: 0, rotate: 0, leftDrive: 0, rightDrive: 0, intake: false, fire: true }]]));
+    if (r.hopper.length < n) {
+      first = k;
+      rpmAtFeed = before;
+    }
+  }
+  const min = 2411 * FLY_FEED_MIN_FRAC;
+  check(
+    'fixed shooter: a wheel below its feed minimum holds the feeder until it is back up (the OpMode’s getVelocity() > MIN)',
+    first >= 15 && rpmAtFeed + 100 >= min && !flyReady({ ...r, flyRpm: Math.floor(min) - 1 } as RobotState),
+    JSON.stringify({ first, rpmAtFeed, min }),
+  );
+  // ...and the shot leaves at the speed the wheel has, not its setpoint
+  const r2 = fxShoot(fxKit(), 50, { ticks: 0 }).w.robots[0];
+  r2.flyRpm = 2300;
+  const slow = decodeFixedRelease(r2).speed;
+  r2.flyRpm = 2411;
+  const full = decodeFixedRelease(r2).speed;
+  check(
+    'fixed shooter: the exit speed is the wheel’s, now: η·π·96 mm·rpm/60 (2411 rpm ⇒ 191 in/s)',
+    Math.abs(full - flyExitSpeedAt(96, 2411)) < 1e-9 && Math.abs(full - FLY_EXIT_EFFICIENCY * Math.PI * (96 / 25.4) * (2411 / 60)) < 1e-9 && slow < full,
+    JSON.stringify({ slow, full }),
+  );
+}
+
+// ---- presets change the band -------------------------------------------------------------------
+{
+  const spec: Partial<RobotSpec> = { ...fxKit(), flywheel: { mode: 'presets', rpm: [2411, 2550], wheelMm: 96, feedS: 0.2 } };
+  const bandAt = (preset: number): number[] => {
+    const out: number[] = [];
+    for (let d = 30; d <= 66; d += 2) {
+      if (fxShoot(spec, d, { setup: (w) => { w.robots[0].flyPreset = preset; w.robots[0].flyRpm = spec.flywheel!.rpm[preset]; } }).scored === 3) out.push(d);
+    }
+    return out;
+  };
+  const b0 = bandAt(0);
+  const b1 = bandAt(1);
+  check(
+    'fixed shooter: a faster preset moves the far band OUT (and the slow preset misses where the fast one scores)',
+    b0.length > 0 && b1.length > 0 && Math.max(...b1) > Math.max(...b0) && b1.some((d) => !b0.includes(d)),
+    JSON.stringify({ b0, b1 }),
+  );
+  const w = fxShoot(spec, 50, { ticks: 0 }).w;
+  const r = w.robots[0];
+  const press = (on: boolean): void => step(w, 1 / 60, new Map([[0, { driveX: 0, driveY: 0, rotate: 0, leftDrive: 0, rightDrive: 0, intake: false, fire: false, flyPreset: on }]]));
+  const p0 = r.flyPreset;
+  press(true);
+  press(true);
+  press(true);
+  const p1 = r.flyPreset;
+  const sp = flySetpoint(r);
+  for (let k = 0; k < 6; k++) press(false);
+  press(true);
+  check(
+    'fixed shooter: the preset button steps once per press, wraps, and the setpoint follows',
+    p0 === 0 && p1 === 1 && sp === 2550 && r.flyPreset === 0,
+    JSON.stringify({ p0, p1, sp, wrapped: r.flyPreset }),
+  );
+  const q = dequantizeCommand(quantizeCommand({ driveX: 0, driveY: 0, rotate: 0, leftDrive: 0, rightDrive: 0, intake: false, fire: false, flyPreset: true }));
+  check('fixed shooter: the preset press crosses the wire (command bit 1024)', q.flyPreset === true && quantizeCommand({ ...q }).buttons === 1024);
+}
+
+// ---- the kit's own autonomous: start against the goal, fire three --------------------------------
+{
+  // drive straight at the goal face until the chassis stops on it, then hold fire: the auto the kit
+  // ships ("starts up against the goal and launches all three"), which the hood and the efficiency
+  // were calibrated against
+  const w = createWorld('match', 5, [
+    { id: 0, alliance: 'blue', spec: { ...fxKit() }, assists: { fieldCentric: false, aimAssist: true, autoIntake: false, autoFire: false }, startIndex: 0 },
+  ]);
+  w.match.phase = 'auto';
+  w.match.phaseTimeLeft = 30;
+  const r = w.robots[0];
+  const g = goalCenter('blue');
+  const n = goalFaceNormal('blue');
+  const head = Math.atan2(-n.y, -n.x);
+  r.pos = { x: g.x + n.x * 36, y: g.y + n.y * 36 };
+  r.heading = head;
+  r.turretHeading = head;
+  let scored = 0;
+  for (let k = 0; k < 360; k++) {
+    const drive = k < 120;
+    const flying = new Set(w.balls.filter((b) => b.state.kind === 'flight').map((b) => b.id));
+    step(w, 1 / 60, new Map([[0, { driveX: 0, driveY: 0, rotate: 0, leftDrive: drive ? 0.5 : 0, rightDrive: drive ? 0.5 : 0, intake: false, fire: !drive }]]));
+    for (const b of w.balls) if (flying.has(b.id) && (b.state.kind === 'basin' || b.state.kind === 'rail') && (b.state as { goal: Alliance }).goal === 'blue') scored++;
+  }
+  const faceGap = -goalLineValue(r.pos, 'blue');
+  check('fixed shooter: the kit robot driven up against its goal scores all three of its preloads, as its own autonomous does', scored === 3, JSON.stringify({ scored, faceGap }));
+}
+
+// ---- a turret with a fixed hood and a fixed wheel still aims itself ------------------------------
+{
+  const turretFixed: Partial<RobotSpec> = { ...fxKit(), launcher: undefined };
+  const turnedAway = fxShoot(turretFixed, 50, { assist: true, yawErr: Math.PI / 2 });
+  const fixedAway = fxShoot(fxKit(), 50, { yawErr: Math.PI / 2 });
+  check(
+    'fixed shooter: a TURRET with a fixed hood and wheel yaws onto the goal from a chassis turned 90° away; the fixed launcher on the same chassis cannot',
+    turnedAway.scored === 3 && fixedAway.scored === 0,
+    JSON.stringify({ turret: turnedAway.scored, fixed: fixedAway.scored }),
+  );
+  const turretSolved: Partial<RobotSpec> = { ...fxKit(), launcher: undefined, flywheel: undefined };
+  const solvedNear = fxShoot(turretSolved, 34, { assist: true });
+  check('fixed shooter: a turret with a fixed hood and a SOLVED speed scores where the fixed wheel misses (34 in)', solvedNear.scored === 3, JSON.stringify({ s: solvedNear.scored }));
+}
+
+// ---- an imported fixed launcher -----------------------------------------------------------------
+{
+  const imp: ImportedRobot = {
+    v: 1,
+    id: '0123456789abcdef',
+    hull: [{ x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }, { x: -8, y: -8 }],
+    heightIn: 14,
+    mech: { shooter: { x: -2, y: 3, z: 12.5 }, shooterYawDeg: -90, intakes: [{ edge: 'front', from: -6, to: 6 }] },
+  };
+  const spec = coerceSpec({ ...fxKit(), imported: imp });
+  check('import (DECODE): the facing survives the coercer beside its point', spec.imported?.mech?.shooterYawDeg === -90, JSON.stringify(spec.imported?.mech));
+  const w = createWorld('match', 5, [{ id: 0, alliance: 'blue', spec, assists: { fieldCentric: false, aimAssist: true, autoIntake: false, autoFire: false }, startIndex: 0 }]);
+  const r = w.robots[0];
+  r.pos = { x: 5, y: -10 };
+  r.heading = 0.4;
+  r.turretHeading = wrapAngle(0.4 - Math.PI / 2);
+  const rel = decodeFixedRelease(r);
+  const lip = rot({ x: -2, y: 3 }, 0.4);
+  const dir = datan2(rel.vel.y, rel.vel.x);
+  check(
+    'import (DECODE): a fixed launcher releases from the placed lip, at its height, along heading + shooterYawDeg',
+    Math.abs(rel.origin.x - (5 + lip.x)) < 1e-9 && Math.abs(rel.origin.y - (-10 + lip.y)) < 1e-9 && rel.z === 12.5 && Math.abs(wrapAngle(dir - (0.4 - Math.PI / 2))) < 1e-9,
+    JSON.stringify({ rel, lip }),
+  );
+  const yaw = (y: unknown): number | undefined => coerceImported({ ...imp, mech: { ...imp.mech, shooterYawDeg: y } })?.mech?.shooterYawDeg;
+  check(
+    'import: shooterYawDeg is whole degrees wrapped to (−180, 180] — 450.4 → 90, −180 → 180, junk dropped',
+    yaw(450.4) === 90 && yaw(-180) === 180 && yaw(-190.6) === 169 && yaw('x') === undefined && yaw(NaN) === undefined,
+    JSON.stringify([yaw(450.4), yaw(-180), yaw(-190.6)]),
+  );
+  const noPoint = coerceImported({ ...imp, mech: { shooterYawDeg: 45, intakes: imp.mech!.intakes } });
+  const once = coerceImported({ ...imp, mech: { ...imp.mech, shooterYawDeg: 1e12 } });
+  check(
+    'import: …kept only beside a shooter, and the coercion is idempotent',
+    noPoint?.mech?.shooterYawDeg === undefined && JSON.stringify(coerceImported(once)) === JSON.stringify(once),
+    JSON.stringify({ noPoint: noPoint?.mech, once: once?.mech }),
+  );
+}
+
+// ---- the touch pad and the HUD's preset button --------------------------------------------------
+{
+  const build = (spec: RobotSpec): Parameters<typeof visibleTouchButtons>[1] => ({ spec, autoIntake: true, autoFire: true, fieldCentric: false, aimAssist: true });
+  const has = (game: GameId, spec: RobotSpec, a: string): boolean => visibleTouchButtons(game, build(spec)).some((b) => b.action === a);
+  const presets = coerceSpec({ ...fxKit(), flywheel: { mode: 'presets', rpm: [2000, 2600], wheelMm: 96, feedS: 0.2 } });
+  check(
+    'touch: SPEED is drawn only for a DECODE presets wheel with somewhere to go',
+    has('decode', presets, 'flyPreset') && !has('decode', fxKit(), 'flyPreset') && !has('decode', ROBOT_PRESETS[0], 'flyPreset') && !has('chain', presets, 'flyPreset') && !has('biobuzz', presets, 'flyPreset'),
+  );
+  check(
+    'touch: a fixed launcher keeps SHOOT under auto fire — holding it is the driver’s call, and it steers the chassis',
+    has('decode', fxKit(), 'fire') && !has('decode', ROBOT_PRESETS[0], 'fire'),
   );
 }
 

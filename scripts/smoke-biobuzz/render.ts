@@ -250,7 +250,8 @@ import {
 } from '../../src/games/biobuzz/scene/renderRobots';
 import { lengthLimits } from '../../src/sim/drivetrain';
 import { BB_MOUNT_POSITIONS, bbMouthFrame, turretLocal, type BbMountPos } from '../../src/games/biobuzz/mounts';
-import { bbMuzzleLocal } from '../../src/games/biobuzz/robot';
+import { bbFixedLocal, bbMuzzleLocal } from '../../src/games/biobuzz/robot';
+import { BB_FIXED_HOOD_MAX_DEG, BB_FIXED_HOOD_MIN_DEG } from '../../src/games/biobuzz/config';
 import { INTAKE_RAIL_T } from '../../src/config';
 import { BB_DEFAULT_SPEC } from '../../src/games/biobuzz/coerce';
 import { bbCoerceSpec } from '../../src/games/biobuzz/robotConfig';
@@ -1799,6 +1800,49 @@ export function renderChecks(check: Check): void {
   freeCamChecks(check);
   driverEyeChecks(check);
   importedRobotChecks(check);
+  fixedShooterChecks(check);
+}
+
+/**
+ * THE FIXED SHOOTER IN 3D (`buildFixedShooter`): the turret's own head on a riser, square to its
+ * edge, at the build's hood angle — so its drawn lip (`bb-turret-exit`, the node the hood
+ * builder marks it with) must BE the sim's release (`bbFixedLocal`), on every edge and at both ends
+ * of the hood's travel. One muzzle, two drawings: the turret's rule, for the head that does not turn.
+ */
+function fixedShooterChecks(check: Check): void {
+  let worst = 0;
+  let where = '';
+  let nodes = 0;
+  for (const mount of ['front', 'back', 'left', 'right'] as const) {
+    for (const hoodDeg of [BB_FIXED_HOOD_MIN_DEG, 77, BB_FIXED_HOOD_MAX_DEG]) {
+      const spec = coerceSpec(
+        { ...BB_DEFAULT_SPEC, scoreMode: 'dumper', shooterMount: mount, bbMech: { launcher: { kind: 'fixed', mount, hoodDeg }, lift: null, intake: { kind: 'sweeper' } } },
+        BB_DEFAULT_SPEC,
+        'biobuzz',
+      );
+      const g = buildRobotGroup(spec, 1, 'blue', 'high');
+      g.updateMatrixWorld(true);
+      const shooter = g.getObjectByName('bb-fixed-shooter');
+      const exit = shooter?.getObjectByName('bb-turret-exit');
+      if (shooter) nodes++;
+      if (!exit) {
+        worst = Infinity;
+        where = `${mount}@${hoodDeg}: no lip node`;
+        continue;
+      }
+      const p = new THREE.Vector3();
+      exit.getWorldPosition(p);
+      const sim = bbFixedLocal(spec);
+      const err = Math.hypot(p.x - sim.x, p.y - sim.y, p.z - sim.z);
+      if (err > worst) {
+        worst = err;
+        where = `${mount}@${hoodDeg}: drawn (${p.x.toFixed(4)}, ${p.y.toFixed(4)}, ${p.z.toFixed(4)}) vs sim (${sim.x.toFixed(4)}, ${sim.y.toFixed(4)}, ${sim.z.toFixed(4)})`;
+      }
+      disposeRobotGroup(g);
+    }
+  }
+  check('fixed shooter 3D: every edge and hood angle builds one fixed head', nodes === 12, `${nodes}/12`);
+  check('fixed shooter 3D: its drawn lip IS the sim’s release (`bbFixedLocal`), on every edge, at both ends of the hood’s travel', worst < 1e-6, `worst ${worst} ${where}`);
 }
 
 /**

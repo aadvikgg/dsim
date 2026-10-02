@@ -393,6 +393,12 @@ export function bbChassisKeepOuts(spec: Pick<RobotSpec, 'length' | 'width'> & Pa
       out.push({ what: 'turretRing', cx: c.x, cy: c.y, r: ring, z0: BB_DECK_Z, z1: BB_DECK_Z + BB_TURRET_RING_H });
       out.push({ what: 'turretHead', cx: c.x, cy: c.y, r: sweep, z0: BB_DECK_Z + BB_TURRET_RING_H, z1: top });
     }
+  } else if (launcher.kind === 'fixed') {
+    // a FIXED shooter: the turret's head on a riser where the ring would be, facing one way — its
+    // keep-out is the disc a turret head at that cell would sweep, a safe over-approximation
+    const c = turretLocal(spec, launcher.mount);
+    out.push({ what: 'turretRing', cx: c.x, cy: c.y, r: turretRadius(spec), z0: BB_DECK_Z, z1: BB_DECK_Z + BB_TURRET_RING_H });
+    out.push({ what: 'turretHead', cx: c.x, cy: c.y, r: BB3_TURRET_R, z0: BB_DECK_Z + BB_TURRET_RING_H, z1: BB3_TURRET_TOP_Z });
   } else if (launcher.kind === 'dumper') {
     // Only the dumper's two POSTS reach the deck (`buildDumper`: 0.6-in square, at the pivot, just
     // inside each end of the shaft). The bucket hangs off the shaft at `BB_LAUNCH_Z0 − 2.3` and its

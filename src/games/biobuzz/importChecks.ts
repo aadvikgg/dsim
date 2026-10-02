@@ -13,7 +13,7 @@ import {
   bbImportMouths,
   bbImportTurretAxleZ,
 } from './importMech';
-import { bbIntakeEdges, bbIntakeMountOf, bbShooterEdgeOf, edgeGeom, MOUNT_DIR, turretLocal } from './mounts';
+import { bbIntakeEdges, bbIntakeMountOf, bbShooterEdgeOf, EDGE_ANGLE, edgeGeom, MOUNT_DIR, turretLocal } from './mounts';
 import { bbLauncherOf, bbLiftOf } from './mechs';
 import { bbHead } from './config';
 
@@ -35,6 +35,11 @@ function handles(spec: RobotSpec): ImportMechHandle[] {
   const l = launcherOf(spec);
   if (l.kind === 'dumper') {
     out.push({ key: 'shooter', kind: 'point', label: 'Dumper lip', z: bbDumpZ(spec), zMin: BB_IMPORT_DUMP_Z.min, zMax: BB_IMPORT_DUMP_Z.max });
+  } else if (l.kind === 'fixed') {
+    // the FIXED shooter's release lip, at the dumper's height range (both read `bbDumpZ`), and the
+    // direction it fires — its edge until the player turns it
+    const facingDeg = spec.imported?.mech?.shooterYawDeg ?? Math.round((EDGE_ANGLE[bbShooterEdgeOf({ shooterMount: l.mount })] * 180) / Math.PI);
+    out.push({ key: 'shooter', kind: 'point', label: 'Fixed shooter', z: bbDumpZ(spec), zMin: BB_IMPORT_DUMP_Z.min, zMax: BB_IMPORT_DUMP_Z.max, facingDeg });
   } else {
     const zOf = (which: 0 | 1) => bbImportTurretAxleZ(spec, which) + bbHead(which).pathR;
     out.push({ key: 'shooter', kind: 'point', label: l.kind === 'twinturret' ? 'Pollen turret' : 'Turret', z: zOf(0), zMin: BB_IMPORT_TURRET_Z.min, zMax: BB_IMPORT_TURRET_Z.max });
@@ -52,12 +57,14 @@ function defaults(spec: RobotSpec): ImportedMech {
   const mech: ImportedMech = { intakes: defaultSpans(bbImportMouths(bare)) };
   const l = launcherOf(bare);
   const cap = (z: number) => Math.min(z, imp.heightIn);
-  if (l.kind === 'dumper') {
+  if (l.kind === 'dumper' || l.kind === 'fixed') {
     const edge = bbShooterEdgeOf({ shooterMount: l.mount });
     const line = bbImportLaunchLine(bare, edge, edgeGeom(bare, edge).span * BB_LAUNCH_LINE_FRAC);
     // a hair inside the hull's edge, so coercion keeps it where it is
     const o = inward(line.origin, MOUNT_DIR[edge], 0.5);
     mech.shooter = { x: o.x, y: o.y, z: cap(BB_LAUNCH_Z0) };
+    // a FIXED shooter faces straight out of its edge until the player turns it
+    if (l.kind === 'fixed') mech.shooterYawDeg = Math.round((EDGE_ANGLE[edge] * 180) / Math.PI);
   } else {
     const t0 = turretLocal(bare, l.mount);
     mech.shooter = { x: t0.x, y: t0.y, z: cap(bbImportTurretAxleZ(bare, 0) + bbHead(0).pathR) };
@@ -80,8 +87,10 @@ function issues(spec: RobotSpec): ImportMechIssue[] {
   const out = mouthIssues(imp, bbImportMouths(spec), BB_IMPORT_MOUTH_MIN_HALF, 'Pick that edge in the intake mount to use it.');
   const l = launcherOf(spec);
   const m = imp.mech;
-  if (!m?.shooter) out.push(unplacedIssue('shooter', l.kind === 'dumper' ? 'The dumper' : 'The turret'));
-  if (l.kind === 'dumper') {
+  if (!m?.shooter) out.push(unplacedIssue('shooter', l.kind === 'dumper' ? 'The dumper' : l.kind === 'fixed' ? 'The fixed shooter' : 'The turret'));
+  if (l.kind === 'fixed') {
+    out.push(...heightIssue('shooter', 'Fixed shooter', m?.shooter?.z, BB_IMPORT_DUMP_Z.min, BB_IMPORT_DUMP_Z.max));
+  } else if (l.kind === 'dumper') {
     out.push(...heightIssue('shooter', 'Dumper', m?.shooter?.z, BB_IMPORT_DUMP_Z.min, BB_IMPORT_DUMP_Z.max));
   } else {
     out.push(...heightIssue('shooter', 'Turret', m?.shooter?.z, BB_IMPORT_TURRET_Z.min, BB_IMPORT_TURRET_Z.max));

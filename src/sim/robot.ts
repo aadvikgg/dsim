@@ -7,6 +7,16 @@ import { robotIntersectsConvex } from './physics';
 import { importedInertia, importedWheels } from './imported';
 import { decodeImportLaunchZ, decodeImportMouth, decodeImportTurret } from './importedMech';
 import { robotsEnabled } from './match';
+import {
+  decodeFixedAim,
+  decodeFixedFacing,
+  decodeFixedLauncher,
+  decodeFixedOnTarget,
+  decodeFixedRelease,
+  decodeFixedShotScores,
+  decodeShotSpecial,
+} from './fixedShot';
+import { flyReady, flyShot, flyStep } from './flywheel';
 
 /** launch is legal when ANY part of the robot is inside a launch zone. Uses a
  * true OBB-vs-triangle overlap (not just corner containment): the launch wedge
@@ -653,6 +663,13 @@ export function updateRobotActions(world: World, r: RobotState, cmd: RobotComman
     r.autoFire = true;
   }
 
+  // a FIXED SHOOTER / FIXED HOOD / SETPOINT WHEEL (`fixedShot.ts`) takes its own branch; every
+  // robot without one runs the lines below it exactly as before
+  if (decodeShotSpecial(r.spec)) {
+    updateFixedShotActions(world, r, cmd, dt);
+    return;
+  }
+
   // ---- turret: aim assist tracks the firing solution exactly -------------
   // Apply aim assist if enabled (now forced true during autoPathActive)
   if (r.aimAssist) {
@@ -696,6 +713,127 @@ export function updateRobotActions(world: World, r: RobotState, cmd: RobotComman
   updateIntake(world, r, cmd);
 }
 
+
+/**
+ * THE ACTIONS OF A ROBOT WITH A FIXED SHOOTER, A FIXED HOOD OR A SETPOINT WHEEL
+ * (`decodeShotSpecial`). The same three stages as the turret's — aim, flywheel, fire — with the
+ * hardware's limits in them:
+ *   · AIM: a fixed launcher points where the chassis does (plus its facing); a turret still yaws
+ *     onto the lead-compensated solution of whatever the build leaves free (`decodeFixedAim`).
+ *   · FLYWHEEL: a setpoint wheel ramps, drops per shot and gates the feeder (`flyStep`/`flyReady`),
+ *     and reports its own speed to the power-draw terms; a solved-speed build keeps the distance
+ *     ramp every other robot uses.
+ *   · FIRE: the driver's button fires once ready — after a FIXED launcher has turned onto its aim
+ *     heading, when aim assist is steering it — and the shot goes where the hardware sends it, in
+ *     band or not. AUTO FIRE (the player default, and every auto path) fires only a shot that the
+ *     flight stage, run forward, says would score: a launcher that can miss would otherwise empty
+ *     its hopper at the first wall it faced.
+ */
+function updateFixedShotActions(world: World, r: RobotState, cmd: RobotCommand, dt: number): void {
+  if (r.autoPathActive) {
+    r.aimAssist = true;
+    r.autoIntake = true;
+    r.autoFire = true;
+  }
+  const fixed = decodeFixedLauncher(r.spec);
+  // ---- aim
+  if (fixed) r.turretHeading = wrapAngle(r.heading + decodeFixedFacing(r.spec));
+  else r.turretHeading = r.aimAssist ? decodeFixedAim(r).yaw : r.heading;
+
+  // ---- flywheel
+  const enabled = robotsEnabled(world);
+  if (r.spec.flywheel) {
+    const before = r.flyRpm ?? 0;
+    flyStep(r, cmd, enabled, world.time, dt);
+    const now = r.flyRpm ?? 0;
+    // the wheel's own speed is what draws current: a held setpoint, and its spin-up after a shot
+    // or a preset change (spinning down is free) — the same two terms, on the same 0..1 scale
+    r.flywheelSpinRate = dt > 0 ? Math.max(0, (now - before) / dt) / C.FLY_RPM_MAX : 0;
+    r.flywheelSpin = now / C.FLY_RPM_MAX;
+  } else {
+    const target = flywheelSpinTarget(r.alliance, r.pos);
+    r.flywheelSpinRate = dt > 0 ? Math.max(0, (target - r.flywheelSpin) / dt) : 0;
+    r.flywheelSpin = target;
+  }
+
+  // ---- fire
+  const canFire = enabled && r.hopper.length > 0 && world.time >= r.fireReadyAt && flyReady(r);
+  const zoneOk = world.mode === 'free' || robotInLaunchZone(r);
+  if (!canFire || !zoneOk) {
+    updateIntake(world, r, cmd);
+    return;
+  }
+  let go = false;
+  if (cmd.fire) {
+    // the driver's call — and with aim assist turning a fixed launcher, once it is on target
+    go = !(fixed && r.aimAssist) || decodeFixedOnTarget(r);
+  } else if (r.autoFire) {
+    go = decodeFixedShotScores(r, dt);
+  }
+  if (go) fireFixed(world, r);
+  updateIntake(world, r, cmd);
+}
+
+/** the shot of a `decodeShotSpecial` robot: `fire()`'s ball handling, the release from
+ * `decodeFixedRelease`, and the setpoint wheel's own cadence */
+function fireFixed(world: World, r: RobotState): void {
+  const rel = decodeFixedRelease(r);
+  const held = heldBallsOf(world, r.id);
+  let fireBall: Artifact | undefined;
+  if (r.spec.canSort) {
+    const retained = world.balls.filter(
+      (b) => b.state.kind === 'rail' && b.state.goal === r.alliance && !b.state.overflow && !b.state.pending,
+    ).length;
+    const want = world.motif[retained % 3];
+    fireBall = held.find((b) => b.color === want) ?? held[0];
+  } else {
+    fireBall = held[0];
+  }
+  const color: ArtifactColor = fireBall ? fireBall.color : r.hopper[0]!;
+  const hIdx = r.hopper.indexOf(color);
+  if (hIdx >= 0) r.hopper.splice(hIdx, 1);
+  r.lastFireAt = world.time;
+
+  const sortPenalty = r.spec.canSort ? C.SORT_FIRE_PENALTY : 0;
+  const ip = C.INTAKE_PRESETS[r.spec.intake];
+  if (r.spec.flywheel) {
+    // a SETPOINT WHEEL: the feeder's own time per artifact, and the wheel gives up some speed —
+    // the next feed waits for it to come back (`flyReady`), which is the recovery
+    r.fireReadyAt = world.time + Math.max(r.spec.flywheel.feedS + sortPenalty, ip.fireCap);
+    flyShot(r);
+  } else {
+    // a SOLVED wheel behind a fixed launcher or hood: the turret's own recovery model, unchanged
+    const shotNorm = Math.max(
+      0,
+      Math.min(1, (rel.speed - C.FLYWHEEL_CLOSE_SPEED) / (C.LAUNCH_MAX_SPEED - C.FLYWHEEL_CLOSE_SPEED)),
+    );
+    const closeRecovery =
+      C.FLYWHEEL_CLOSE_RECOVERY * Math.max(0, 1 - r.spec.flywheelInertia / C.FLYWHEEL_CLOSE_INERTIA_KNEE);
+    const recovery =
+      closeRecovery + C.FLYWHEEL_RECOVERY_MAX * shotNorm * shotNorm * (1 - r.spec.flywheelInertia);
+    r.fireReadyAt = world.time + Math.max(ip.fireInterval + recovery + sortPenalty, ip.fireCap);
+  }
+  if (fireBall) {
+    fireBall.state = { kind: 'flight', target: r.alliance };
+    fireBall.pos = { x: rel.origin.x, y: rel.origin.y };
+    fireBall.vel = { x: rel.vel.x, y: rel.vel.y };
+    fireBall.z = rel.z;
+    fireBall.vz = rel.vz;
+  } else {
+    world.balls.push({
+      id: world.balls.reduce((m, b) => Math.max(m, b.id), 0) + 1,
+      color,
+      state: { kind: 'flight', target: r.alliance },
+      pos: { x: rel.origin.x, y: rel.origin.y },
+      vel: { x: rel.vel.x, y: rel.vel.y },
+      z: rel.z,
+      vz: rel.vz,
+    });
+  }
+  heldBallsOf(world, r.id).forEach((b, i) => {
+    if (b.state.kind === 'held') b.state.slot = i;
+  });
+}
 
 /** a robot's PHYSICAL held balls, in slot order (slot 0 = oldest / fired first) */
 function heldSlot(b: Artifact): number {

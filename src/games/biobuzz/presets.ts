@@ -1,5 +1,14 @@
 import type { RobotSpec } from '../../types';
-import { BB_DEFAULT_SCORE_MODE, BB_HOOD_DEFAULT_DEG, BB_PRESETS, BB_STORAGE_MAX, bbMassLimits } from './config';
+import {
+  BB_DEFAULT_SCORE_MODE,
+  BB_FIXED_FLY_DEFAULT,
+  BB_FIXED_HOOD_DEFAULT_DEG,
+  BB_HOOD_DEFAULT_DEG,
+  BB_PRESETS,
+  BB_STORAGE_MAX,
+  bbMassLimits,
+} from './config';
+import { flywheelEq } from '../../sim/flywheelSpec';
 import { bbIntakeMountOf, bbShooterMountOf } from './mounts';
 import { type BbMechSpec, bbLauncherOf, bbLiftOf } from './mechs';
 import { bbCoerceSpec } from './robotConfig';
@@ -73,18 +82,25 @@ const BB_STARTER_BUILDS: readonly RobotSpec[] = [
     // A 6WD drop-centre tank: four driven traction wheels chained per side plus two undriven
     // omni wheels at the dropped centre, one gearmotor a side. A single chassis-fixed launcher
     // over the front, fed by a front sweeper. No Box Tube — the kit has no placement mechanism.
-    //   driveRpm: a 96 mm wheel on a ~312 rpm drive gearmotor,
+    //   driveRpm: a 96 mm wheel on a ~312 rpm drive gearmotor (19.2:1),
     //             π·(96/25.4)·312/60 = 61.7 in/s ÷ (0.20367 · 1.06 tank) = 286
-    // The launcher is modelled as a front DUMPER at the default hood: chassis-fixed, so the
-    // robot turns to aim, and it carries both POLLEN and NECTAR.
+    // THE LAUNCHER IS A FIXED FLYWHEEL (2026-10-02 — it used to be modelled as a dumper, which
+    // the kit robot is not). The kit's own teleop OpMode: one motor at 1:1 driving one 96-mm wheel
+    // under a fixed polycarbonate guide, run to LAUNCHER_TARGET_VELOCITY 1250 ticks/s at 28 PPR =
+    // 2679 rpm at any range, a windmill servo feeding only above LAUNCHER_MIN_VELOCITY 1200
+    // (`FLY_FEED_MIN_FRAC` is the DECODE kit's 1075/1125 = 0.956, against this kit's 0.960). No
+    // turret, so the robot turns to aim; a wheel sized for a 3-in POLLEN carries no NECTAR. The
+    // guide's angle is not published: `BB_FIXED_HOOD_DEFAULT_DEG` is APPROX, and the windmill's
+    // rate is too (`BB_FIXED_FLY_DEFAULT.feedS`). Holds 4 (`BB_STORAGE_MAX`, the same).
     name: 'StarterBot', teamName: 'Kit robot · 6WD tank', teamNumber: 0,
     length: 15, width: 16, // APPROX — kit side rails are ~15"; no kit publishes a width
     intake: 'sloped', massLb: 0, drivetrain: 'tank',
     driveRpm: 286, flywheelInertia: 0, canSort: false,
-    scoreMode: 'dumper',
+    scoreMode: 'dumper', // the flat mirror of a FIXED launcher (`bbScoreModeMirror`)
     intakeMount: 'front', shooterMount: 'front',
     ballStorage: BB_G407_CAP,
-    bbMech: { launcher: { kind: 'dumper', mount: 'front', hoodDeg: BB_HOOD_DEFAULT_DEG }, lift: null },
+    bbMech: { launcher: { kind: 'fixed', mount: 'front', hoodDeg: BB_FIXED_HOOD_DEFAULT_DEG }, lift: null },
+    flywheel: { ...BB_FIXED_FLY_DEFAULT, rpm: [...BB_FIXED_FLY_DEFAULT.rpm] },
     assists: { ...BB_STARTER_ASSISTS },
   },
 ] as const;
@@ -195,7 +211,10 @@ export function bbSpecMatches(spec: RobotSpec, preset: RobotSpec): boolean {
 function bbMechMatches(spec: RobotSpec, preset: RobotSpec): boolean {
   const sl = bbLauncherOf(spec, BB_HOOD_DEFAULT_DEG);
   const pl = bbLauncherOf(preset, BB_HOOD_DEFAULT_DEG);
-  const launcherEq = sl.hoodDeg === pl.hoodDeg && sl.mount2 === pl.mount2;
+  // the KIND too: a fixed launcher and a dumper share the flat `scoreMode` mirror, so the mirror
+  // alone cannot tell them apart; and a fixed launcher's speed is part of its build
+  const launcherEq =
+    sl.kind === pl.kind && sl.hoodDeg === pl.hoodDeg && sl.mount2 === pl.mount2 && flywheelEq(spec.flywheel, preset.flywheel);
   const sf = bbLiftOf(spec);
   const pf = bbLiftOf(preset);
   const liftEq = sf === null || pf === null ? sf === pf : sf.mount === pf.mount;

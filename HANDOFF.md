@@ -1,3 +1,13 @@
+# HANDOFF — 2026-10-02d (fixed shooters and fixed hoods, merged on `feat/robot-import`)
+
+**State: merged on `feat/robot-import`; nothing deployed (server change: sim, coercer and a command bit).** At the last commit: `smokeshard --shards=4` 3648, `bbshard --shards=3` 5491 (ROBOT and RENDER lanes re-run green after the fixes), `build`, `server:check`, `bundleaudit`, `uiaudit`, `docaudit`, `contrast` pass. Server code changed (sim, coercer, command bit 1024), so it needs a server deploy with the client.
+
+- **Owner:** fixed shooters and fixed-angle hoods so the official starter bots can be modelled, DECODE and BIOBUZZ, standard and imported robots.
+- **Built:** DECODE `launcher: 'fixed'`, `hoodDeg`, `flywheel` (`src/sim/fixedShot.ts`); a shared setpoint wheel (`src/sim/flywheel.ts`, `RobotState.flyRpm`); BIOBUZZ launcher kind `fixed` (one setpoint, mirrored as `dumper`); `ImportedMech.shooterYawDeg` with an importer facing handle; builders (`src/ui/LauncherRows.tsx`); HUD line; DECODE preset step on Z / R3 (`flyPreset`, bit 1024, touch SPEED); 2D/3D drawing (the turret's head on a riser); AI stands in `bbFixedBand`. Guides: `docs/area/decode.md` "Fixed shooters", `docs/area/biobuzz.md` "THE FIXED LAUNCHER".
+- **Calibration:** `FLY_EXIT_EFFICIENCY` 0.40 with the DECODE kit hood 70° makes the kit's against-the-goal autonomous score. Measured bands: DECODE kit 12–22 and 40–60 in (muzzle to goal centroid); BIOBUZZ kit at hood 77° 26–46 in (robot centre to cell centre).
+- **Presets:** DECODE gains a StarterBot card (last, so `DEFAULT_SPEC` is unchanged); BIOBUZZ's StarterBot is now a fixed launcher, not a dumper. Its 43.0 bench score predates that and was not re-measured (`npm run bench:ai`).
+- **Not done:** hand loading for a no-intake DECODE robot (design in the fixed-shooter report: an `intake: 'none'` option plus a human-player hand-off in the LOADING ZONE), so the DECODE kit card carries a sloped intake. BIOBUZZ presets (no free pad button). No Electron capture of the new builder rows or HUD line.
+
 # HANDOFF — 2026-10-02c (robot import: integration review fixed, merged on `feat/robot-import`)
 
 **State: merged on `feat/robot-import` (with alpha's swerve fix, `SIM_VERSION` 5); not on `alpha`/`main`; the feature is not deployed (the alpha server runs alpha, swerve included).** `npm test` (shared 3641, BIOBUZZ 5434), `build`, `server:check`, `test:workers` 149, `bundleaudit`, `uiaudit`, `docaudit` pass. Standard robots step byte-identically (`IMP_STANDARD_PINS`, `L2_MECH_PINS` untouched); no `SIM_VERSION`/`BALANCE_VERSION` change. Every fix has a smoke check that failed on the old code.

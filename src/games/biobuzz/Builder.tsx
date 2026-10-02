@@ -1,10 +1,14 @@
 import type { RobotSpec } from '../../types';
 import { rangeFill } from '../../ui/rangeFill';
+import { FlywheelRows, HoodSlider } from '../../ui/LauncherRows';
 import {
   BB3_HEIGHT_MAX,
   BB3_HEIGHT_MIN,
   BB_DUMP_MAX_DIST,
   BB_HOOD_DEFAULT_DEG,
+  BB_FIXED_FLY_DEFAULT,
+  BB_FIXED_HOOD_MAX_DEG,
+  BB_FIXED_HOOD_MIN_DEG,
   BB_SIZE_STEP,
   BB_MASS_STEP,
   BB_STORAGE_MIN,
@@ -32,12 +36,12 @@ import {
   bbCellsAdjacent,
   bbFoldTwinMount,
   bbIntakeKindOf,
-  bbIsTurreted,
   bbLauncherBlocker,
   bbLauncherOf,
   bbLiftOf,
   bbResolveLiftMount,
   bbResolveMount2,
+  bbScoreModeMirror,
 } from './mechs';
 import {
   BB_INTAKE_KIND_BLURBS,
@@ -114,13 +118,14 @@ function twinCellBlock(m: BbMountPos, at: BbMountPos, other: BbMountPos, otherNa
 }
 
 /** what a chassis-map cell carries on top of its own name: the mechanism already bolted there. */
-type BbCellMark = 'turret' | 'nectar' | 'dumper' | 'tube';
+type BbCellMark = 'turret' | 'nectar' | 'dumper' | 'fixed' | 'tube';
 
 /** a cell's mark in words, for its accessible name — the glyph itself is `aria-hidden`. */
 const BB_CELL_MARK_NAMES: Record<BbCellMark, string> = {
   turret: 'turret',
   nectar: 'NECTAR turret',
   dumper: 'dumper',
+  fixed: 'fixed shooter',
   tube: 'Box tube',
 };
 
@@ -141,6 +146,12 @@ function BbMountGlyph({ mark }: { mark: BbCellMark }) {
           <rect x="2" y="3" width="12" height="3" rx="1.2" fill={s} />
           <line x1="4" y1="6" x2="4" y2="12" stroke={s} strokeWidth="1.4" strokeLinecap="round" />
           <line x1="12" y1="6" x2="12" y2="12" stroke={s} strokeWidth="1.4" strokeLinecap="round" />
+        </>
+      ) : mark === 'fixed' ? (
+        // the FIXED shooter: a flywheel head with its barrel out over the edge, and no ring
+        <>
+          <rect x="4" y="7" width="8" height="7" rx="1.2" fill="none" stroke={s} strokeWidth="1.5" />
+          <line x1="8" y1="7" x2="8" y2="1.5" stroke={s} strokeWidth="1.8" strokeLinecap="round" />
         </>
       ) : mark === 'tube' ? (
         // the box-tube lift: three nested tubes, widest at the base, drawn as one stack
@@ -294,7 +305,7 @@ export function BiobuzzBuilder({ spec, setSpec, hideFrame = false }: BiobuzzBuil
   // sweeper on the next coercion (`coerceBbMech` reads `bbMech.intake` off exactly what is sent).
   function send(next: BbLauncherSpec, nextLift: BbLiftSpec | null, nextIntake: BbIntakeKind = intakeKind) {
     setSpec({
-      scoreMode: next.kind,
+      scoreMode: bbScoreModeMirror(next.kind),
       shooterMount: next.mount,
       bbMech: { launcher: next, lift: nextLift, intake: { kind: nextIntake } },
     });
@@ -360,7 +371,7 @@ export function BiobuzzBuilder({ spec, setSpec, hideFrame = false }: BiobuzzBuil
   // `bbResolveLiftMount` folds around.
   const launcherMarks: Partial<Record<BbMountPos, BbCellMark>> = {};
   for (const c of occupiedCells(launcher.mount, launcher.kind === 'dumper')) {
-    launcherMarks[c] = launcher.kind === 'dumper' ? 'dumper' : 'turret';
+    launcherMarks[c] = launcher.kind === 'dumper' ? 'dumper' : launcher.kind === 'fixed' ? 'fixed' : 'turret';
   }
   if (launcher.kind === 'twinturret' && launcher.mount2) launcherMarks[launcher.mount2] = 'nectar';
   const tubeMarks: Partial<Record<BbMountPos, BbCellMark>> = lift ? { [lift.mount]: 'tube' } : {};
@@ -564,6 +575,29 @@ export function BiobuzzBuilder({ spec, setSpec, hideFrame = false }: BiobuzzBuil
           />
         </div>
       )}
+      {launcher.kind === 'fixed' && (
+        // a FIXED shooter faces out of one EDGE, like a dumper — but it is one head on that edge's
+        // middle cell, so the corners beside it stay free for a Box Tube
+        <BbChassisMap
+          caption="Firing edge"
+          mark="fixed"
+          cells={BB_SHOOTER_EDGES}
+          at={launcher.mount}
+          marks={tubeMarks}
+          onPick={pickLauncherMount}
+        />
+      )}
+      {launcher.kind === 'fixed' && (
+        <>
+          <HoodSlider
+            value={launcher.hoodDeg}
+            min={BB_FIXED_HOOD_MIN_DEG}
+            max={BB_FIXED_HOOD_MAX_DEG}
+            onChange={(hoodDeg) => send({ ...launcher, hoodDeg }, lift)}
+          />
+          <FlywheelRows spec={spec} setSpec={setSpec} allowAuto={false} allowPresets={false} defaultRpm={BB_FIXED_FLY_DEFAULT.rpm[0]} />
+        </>
+      )}
       {launcher.kind === 'dumper' && (
         // FOUR targets on the same nine-cell chassis. The corners and the centre are drawn as
         // frame rather than left out: a dumper's launch line spans a whole side, so a corner is
@@ -582,7 +616,7 @@ export function BiobuzzBuilder({ spec, setSpec, hideFrame = false }: BiobuzzBuil
           ONLY THE DUMPER SAYS SO. Its line carries a NUMBER that is nowhere else on the screen;
           the turret's said that the control it does not have is not needed, which is a sentence
           about an absence (`docs/ui-standard.md` §8). */}
-      {!bbIsTurreted(launcher) && (
+      {launcher.kind === 'dumper' && (
         <p className="ds-hint">Lobs its load from up to {BB_DUMP_MAX_DIST} in away.</p>
       )}
 

@@ -38,7 +38,7 @@
  * empty field, because it would look finished.
  */
 
-import type { Alliance, AssistConfig, DrivetrainType, RobotSpec, StartCat, Vec2, World } from '../../types';
+import type { Alliance, AssistConfig, DrivetrainType, FlywheelSpec, RobotSpec, StartCat, Vec2, World } from '../../types';
 import { DRIVETRAIN_LIMITS, INTAKE_PRESETS, ROBOT_MAX_SIZE } from '../../config';
 import { clamp, datan2, dcos, dsin, hyp, wrapAngle } from '../../math';
 import { lengthLimits, widthLimits } from '../../sim/drivetrain';
@@ -2002,6 +2002,33 @@ export const BB_HOOD_DEFAULT_DEG = 75;
 export const BB_HOOD_MIN_DEG = 70;
 export const BB_HOOD_MAX_DEG = 85;
 
+/**
+ * THE FIXED LAUNCHER (`bbMech.launcher.kind === 'fixed'`, 2026-10-02) — one flywheel head bolted to
+ * a chassis edge at one hood angle, run at a SETPOINT (`RobotSpec.flywheel`, `src/sim/flywheel.ts`).
+ * It is the turret's own head without the slew ring or the yaw motor, so it is DRAWN with the
+ * turret's dimension chain and RELEASES from the turret's muzzle at that pitch (`bbMuzzleLocal`),
+ * which keeps "one muzzle, two drawings" true for it too. Nothing is solved: the element flies the
+ * one arc the wheel and the hood throw, and it scores only from where that arc meets the cell.
+ *
+ * HOOD TRAVEL is the turret head's own pitch range above `BB_FIXED_HOOD_MIN_DEG` (below 30° no
+ * arc a kit wheel throws rises 45 in to the HIVE opening). The kit robot's guide angle is not
+ * published, so `BB_FIXED_HOOD_DEFAULT_DEG` is APPROX: with the shared `FLY_EXIT_EFFICIENCY`, the
+ * kit setpoint (2679 rpm, 96 mm) throws 212 in/s, and at 77° that lands from 26–46 in (robot centre
+ * to cell centre, on the mouth axis — the FIXED lane measures it), a band with both edges on the
+ * field. At the DECODE kit's 70° the same wheel scores from 37 in out to the far wall, and below
+ * ~2450 rpm no arc reaches the 53.4-in opening at all.
+ */
+export const BB_FIXED_HOOD_MIN_DEG = 30;
+export const BB_FIXED_HOOD_MAX_DEG = 80;
+export const BB_FIXED_HOOD_DEFAULT_DEG = 77;
+/** the kit launcher: one 96-mm wheel on a 1:1 motor at 1250 ticks/s (28 PPR ⇒ 2679 rpm). The feed
+ * is a continuous windmill whose rate is not published; 0.3 s an element is APPROX. */
+export const BB_FIXED_FLY_DEFAULT: FlywheelSpec = { mode: 'fixed', rpm: [2679], wheelMm: 96, feedS: 0.3 };
+/** aim assist holds a FIXED launcher still inside this heading error (rad, ~2.3°). Tighter than
+ * the dumper's `BB_AIM_TOL`: a dumper solves its throw for where it is, a fixed arc does not, and
+ * 8° off at 50 in is 7 in sideways — off a 10-in cell. */
+export const BB_FIXED_AIM_TOL = 0.04;
+
 /** how long a DUMPER takes to re-arm after a dump (s). APPROX — a tray swinging back down. It is
  * what stops a held fire button re-dumping on every capture. */
 export const BB_DUMP_RELOAD_S = 0.75;
@@ -2912,6 +2939,9 @@ export const BB_MASS_TURRET2 = 3.5;
  * no aiming hardware, so it is well under a turret — which is the archetype's real tradeoff.
  * APPROX. */
 export const BB_MASS_DUMPER = 3.5;
+/** a FIXED launcher (lb): a turret's flywheel, hood, motor and plates with no slew ring and no yaw
+ * motor, plus its feeder. APPROX. */
+export const BB_MASS_FIXED = 3.5;
 /** a BOX TUBE (lb): the three nested tubes (`BB_BOX_TUBE_SECTIONS`), the pivot plates, the
  * spool, the wrist servo and the claw. Offset lists its 2-stage Box Tube Slide Kit at about
  * 475 g (1.05 lb, 275 g of it moving); the wrist and claw take it to 1.5 (owner, 2026-09-24:
@@ -2945,7 +2975,7 @@ export function bbMassLimits(spec: RobotSpec): { min: number; max: number } {
   const raw =
     (BB_MASS_BASE[spec.drivetrain] ?? BB_MASS_BASE.mecanum) +
     edges * BB_MASS_SWEEPER_EDGE +
-    (launcher.kind === 'dumper' ? BB_MASS_DUMPER : BB_MASS_TURRET) +
+    (launcher.kind === 'dumper' ? BB_MASS_DUMPER : launcher.kind === 'fixed' ? BB_MASS_FIXED : BB_MASS_TURRET) +
     (launcher.kind === 'twinturret' ? BB_MASS_TURRET2 : 0) +
     (bbLiftOf(spec) ? BB_MASS_BOX_TUBE : 0);
   const max = DRIVETRAIN_LIMITS[spec.drivetrain]?.maxMass ?? DRIVETRAIN_LIMITS.mecanum.maxMass;
@@ -3627,7 +3657,7 @@ export const BB3_DUMPER_WALL_T = 0.14;
  */
 export interface BbMechEnvelope {
   /** the mechanism's own name, for the smoke lanes' own reporting */
-  what: 'turret' | 'nectarTurret' | 'dumper' | 'liftBase' | 'liftColumn';
+  what: 'turret' | 'nectarTurret' | 'dumper' | 'fixedShooter' | 'liftBase' | 'liftColumn';
   cx: number;
   cy: number;
   /** a cylinder of this radius about `(cx, cy)`, or `undefined` for the box below */
@@ -3702,7 +3732,9 @@ export function bbMechEnvelopes(spec: RobotSpec, heightIn: number): BbMechEnvelo
     return out;
   }
   const t0 = turretLocal(spec, launcher.mount);
-  out.push({ what: 'turret', cx: t0.x, cy: t0.y, r: BB3_TURRET_R, top: cap(BB3_TURRET_TOP_Z) });
+  // a FIXED launcher is the turret's head without its ring, at its edge cell (`turretLocal`), so
+  // the turret's own cylinder bounds it at any hood angle
+  out.push({ what: launcher.kind === 'fixed' ? 'fixedShooter' : 'turret', cx: t0.x, cy: t0.y, r: BB3_TURRET_R, top: cap(BB3_TURRET_TOP_Z) });
   if (launcher.kind === 'twinturret') {
     const m2 = launcher.mount2 ?? bbResolveMount2(launcher.mount, undefined);
     const t1 = turretLocal(spec, m2);

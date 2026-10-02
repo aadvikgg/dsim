@@ -155,6 +155,8 @@ handle (`GATE_ARM_SHORT`) pokes OUT into the gate zone (what a robot pushes) and
 
 ## Shooter + intake (DECODE)
 
+- **The TURRET never misses** (the paragraph below). A FIXED SHOOTER can — see "Fixed shooters"
+  at the end of this section.
 - **The shooter NEVER misses**: no dispersion; `solveShot` uses the MINIMUM-SPEED trajectory to
   the goal opening — the adaptive hood angle sweeps ~89° (near-vertical lob at point-blank)
   down to ~45° far out, so an exact finite solution exists at EVERY distance and the required
@@ -277,6 +279,52 @@ handle (`GATE_ARM_SHORT`) pokes OUT into the gate zone (what a robot pushes) and
   sit behind the import's own roller line on its centreline. The turret is the placed shooter,
   the launch height the placed `z`, never under 10.5 in (a lower release would be pushed out of
   its own hull by the flight-contact pass).
+
+## Fixed shooters (`src/sim/fixedShot.ts`, `src/sim/flywheel.ts`, 2026-10-02)
+
+Three optional spec fields, each ABSENT on every robot built before them, and absent means
+today's turret path byte for byte (`decodeShotSpecial` is the one gate; smoke `FX_PINS` were
+recorded before any of it existed):
+
+| field | absent | present |
+|---|---|---|
+| `launcher: 'fixed'` | the turret aims itself | bolted to the chassis: fires along the heading (an import: plus `mech.shooterYawDeg`), so the ROBOT aims |
+| `hoodDeg` (20–80, whole °) | the hood solves its angle | one angle |
+| `flywheel` `{ mode: 'fixed' \| 'presets', rpm[1..3], wheelMm, feedS }` | the speed is solved | a setpoint wheel |
+
+Whatever is not fixed is still solved (`decodePlannedShot`): a fixed hood with a solved speed
+solves the speed for that angle; a setpoint wheel under an adjustable hood solves the angle (high
+root first, 20–80°, 45° when out of reach). With both fixed nothing is solved: the artifact flies
+the one arc, and the unchanged flight stage and `checkGoalEntry` decide the hit.
+
+- **Read off the RAW input only** (`coerceSpec`, the `imported` rule): a client that switches
+  back to a turret sends none of the three, and a fallback to `base` would keep them. Chain
+  Reaction strips all three; BIOBUZZ keeps `flywheel` on its own fixed launcher only.
+- **The wheel is state** (`RobotState.flyRpm`, whole rpm, written only for a `flywheel` build):
+  it ramps to the setpoint at `FLY_RAMP_RPM_S` (slower with `flywheelInertia`), each shot takes
+  `FLY_SHOT_DROP` (less with inertia), and the feeder runs only at `FLY_FEED_MIN_FRAC` of the
+  setpoint (the kit OpMode's 1075/1125), `feedS` per artifact. The artifact leaves at
+  `FLY_EXIT_EFFICIENCY · π · wheel · flyRpm / 60` — the speed at the feed, not the setpoint.
+  Spawn seeds the wheel at its first setpoint (no spin-up before the first shot, the turret's rule).
+- **`FLY_EXIT_EFFICIENCY` 0.40 is CALIBRATED.** A wheel rolling an artifact along a fixed hood
+  gives it half the surface speed; 0.4 leaves a fifth of that to squeeze and slip. With the kit's
+  unpublished hood at `DECODE_KIT_HOOD_DEG` 70°, it is the value at which the kit's own autonomous
+  (drive against the goal, fire three) scores. Measured, muzzle to goal centroid along the face
+  normal: the kit scores from **12–22 in** (rising through the opening, the against-the-goal shot:
+  muzzle ≈ 18 in there) and **40–60 in** (falling into it); 24–38 and 62+ miss. 0.35 merges the
+  bands (14–44); 0.45 moves the far one to 58–66.
+- **Aim assist turns the chassis** while fire is held (`decodeFixedAimAssist`, a hook in
+  `world.ts` before `updateRobot`, written into `rotate` AND the tank side drives — BIOBUZZ's stage
+  2), lead-compensated over the arc's flight time; a held fire releases once within
+  `DECODE_FIXED_AIM_TOL`. **A driver's shot is not range-gated**: out of band it leaves and
+  misses. **Auto fire** (the player default, every auto path) releases only a shot the flight
+  stage, run forward (`decodeShotEnters`), says would score.
+- **Presets** step on `RobotCommand.flyPreset` (bit 1024, debounced edge; Z / R3, the mode-toggle
+  role shared with BIOBUZZ's Deploy ramp). DECODE only: BIOBUZZ's fixed launcher runs one setpoint.
+- **The kit card** (`ROBOT_PRESETS`, LAST so `DEFAULT_SPEC` still mirrors the first): tank 286,
+  fixed launcher, hood 70°, 2411 rpm on 96 mm, 0.20-s feed. Clamps: 13.5 lb → the 22-lb tank floor;
+  it has no intake (the human player loads it by hand in the LOADING ZONE), DSIM has no hand
+  loading, so the card carries the sloped intake.
 
 ## Scoring + multi-robot
 

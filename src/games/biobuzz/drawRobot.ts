@@ -63,7 +63,7 @@ import {
   bbBoxTubeStages,
   type BbBoxTubeFrame,
 } from './config';
-import { type BbLauncherSpec, type BbLiftSpec, bbIntakeKindOf, bbIsTurreted, bbLauncherOf, bbLiftOf } from './mechs';
+import { type BbLauncherSpec, type BbLiftSpec, bbHasHead, bbIntakeKindOf, bbIsTurreted, bbLauncherOf, bbLiftOf } from './mechs';
 import {
   EDGE_ANGLE,
   type BbMountPos,
@@ -72,7 +72,7 @@ import {
   turretLocal,
   turretRadius,
 } from './mounts';
-import { bbFlowerInReach, bbFootprint, bbMouths, bbPlacePointLocal } from './robot';
+import { bbFixedFacing, bbFixedHood, bbFixedLocal, bbFlowerInReach, bbFootprint, bbMouths, bbPlacePointLocal } from './robot';
 import { BB_ALLIANCE_BLUE, ELEMENT_FILL, ELEMENT_LINE } from './draw';
 
 /**
@@ -267,7 +267,7 @@ export function drawBiobuzzRobot(
   // draws the same two marks on its hull: the bar along the edge(s) facing forward, the arrow at
   // its centroid.
   if (imp) {
-    const rings = bbIsTurreted(launcher)
+    const rings = bbHasHead(launcher)
       ? [launcher.mount, ...(launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount2] : [])].map((m) => ({
           ...turretLocal(r.spec, m),
           r: turretRadius(r.spec),
@@ -321,6 +321,16 @@ export function drawBiobuzzRobot(
     } else {
       drawAimMark(ctx, p0.x, p0.y, r.turretHeading, ring, loaded);
     }
+  } else if (launcher.kind === 'fixed' && pictured) {
+    // over a picture: where the FIXED shooter is aimed, from its release
+    const loc = bbFixedLocal(r.spec);
+    const x = r.pos.x + Math.cos(r.heading) * loc.x - Math.sin(r.heading) * loc.y;
+    const y = r.pos.y + Math.sin(r.heading) * loc.x + Math.cos(r.heading) * loc.y;
+    drawAimMark(ctx, x, y, r.heading + bbFixedFacing(r.spec), turretRadius(r.spec), loaded);
+  } else if (launcher.kind === 'fixed') {
+    // THE FIXED SHOOTER: the turret's own head, with no ring under it, square to its edge and held
+    // at the build's hood angle — the sim's release (`bbFixedLocal`) is this head's lip
+    drawTurret(ctx, r, launcher.mount, r.heading + bbFixedFacing(r.spec), bbFixedHood(r.spec), loaded, null, true);
   } else if (bbIsTurreted(launcher)) {
     // A DOUBLE turret is TWO INDIVIDUAL turrets, each at its own cell with its own yaw and pitch:
     // turret 0 (`mount`) launches POLLEN, turret 1 (`mount2`) launches NECTAR and wears the
@@ -678,6 +688,8 @@ function drawTurret(
    * the only colour this head takes: the cosmetic accent used to tint the flywheel here and no
    * longer reaches the shooter at all (owner, 2026-09-21: "keep the flywheel black"). */
   nectarAccent: string | null,
+  /** a FIXED shooter: the head alone on a square riser, no slew ring, no teeth, no feed hole */
+  ringless = false,
 ): void {
   const ring = turretRadius(r.spec);
   const local = turretLocal(r.spec, pos);
@@ -685,6 +697,18 @@ function drawTurret(
   const cy = r.pos.y + Math.sin(r.heading) * local.x + Math.cos(r.heading) * local.y;
   ctx.save();
   ctx.translate(cx, cy);
+  if (ringless) {
+    // the riser it is bolted to (`buildFixedShooter`'s, the same square), turned with the head
+    const side = Math.max(1.2, ring * 1.3);
+    ctx.save();
+    ctx.rotate(heading);
+    ctx.fillStyle = ALU_DK;
+    ctx.fillRect(-side / 2, -side / 2, side, side);
+    ctx.strokeStyle = 'rgba(200,214,230,0.34)';
+    ctx.lineWidth = 0.22;
+    ctx.strokeRect(-side / 2, -side / 2, side, side);
+    ctx.restore();
+  } else {
 
   // THE SLEW RING STAYS WITH THE CHASSIS. The toothed ring is bolted to the frame and the head
   // turns on it, so drawing it inside the rotation makes the whole assembly spin as one piece,
@@ -725,6 +749,7 @@ function drawTurret(
   ctx.strokeStyle = 'rgba(200,214,230,0.28)';
   ctx.lineWidth = 0.18;
   ctx.stroke();
+  }
 
   // THE HEAD — everything below turns with this turret's own heading
   ctx.rotate(heading);
@@ -1009,7 +1034,7 @@ export function bbHeldSlots(spec: RobotSpec, launcher: BbLauncherSpec, lift: BbL
   const hw = spec.width / 2;
   const box = imp ? polyBounds(imp.hull) : { minX: -hl, maxX: hl, minY: -hw, maxY: hw };
   const circles: { x: number; y: number; r: number }[] = [];
-  if (bbIsTurreted(launcher)) {
+  if (bbHasHead(launcher)) {
     const ring = turretRadius(spec) + 0.3;
     circles.push({ ...turretLocal(spec, launcher.mount), r: ring });
     if (launcher.kind === 'twinturret' && launcher.mount2) circles.push({ ...turretLocal(spec, launcher.mount2), r: ring });

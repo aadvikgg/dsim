@@ -1887,6 +1887,66 @@ export const LAUNCH_MAX_SPEED = 320; // in/s
  * aim solver lead-compensates for it, so shooting on the move is accurate. */
 export const SHOT_ROBOT_VEL_INHERIT = 0.5;
 
+// --------------------------------------- fixed shooter / setpoint flywheel ----
+/**
+ * A LAUNCHER THAT DOES NOT SOLVE ITS OWN SHOT (`src/sim/flywheel.ts`, `RobotSpec.launcher` /
+ * `hoodDeg` / `flywheel`). Shared by DECODE and BIOBUZZ: the hardware is the same in both games,
+ * a wheel on one shaft pinching the artifact against a fixed hood.
+ *
+ * EXIT SPEED = `FLY_EXIT_EFFICIENCY · π · wheelMm/25.4 · rpm/60` in/s. A wheel rolling an artifact
+ * along a hood that does not move gives the artifact's centre HALF the surface speed (0.5); the
+ * squeeze and the slip take some of that back. The value is CALIBRATED, not measured: it is the
+ * efficiency at which the DECODE kit robot (1125 ticks/s on a 28-PPR 1:1 motor = 2411 rpm, 96 mm
+ * wheels, the hood at `DECODE_KIT_HOOD_DEG`) scores the shot its own autonomous makes — three
+ * artifacts from a start against the goal. Smoke measures the band it gives (see
+ * `docs/area/decode.md`, "Fixed shooters"), and BIOBUZZ uses the same number unchanged.
+ */
+export const FLY_EXIT_EFFICIENCY = 0.4;
+/** the feeder waits until the wheel is back to this fraction of its setpoint. 1075 / 1125, the
+ * kit OpMode's `LAUNCHER_MIN_VELOCITY` over its `LAUNCHER_TARGET_VELOCITY`. */
+export const FLY_FEED_MIN_FRAC = 1075 / 1125;
+/** how fast the wheel spins up toward its setpoint, rpm per second, at `flywheelInertia` 0. APPROX
+ * — a 6000-rpm motor 1:1 on a light wheel reaches the kit's 2411 rpm in about 0.4 s. */
+export const FLY_RAMP_RPM_S = 6000;
+/** at `flywheelInertia` 1 the ramp is this much slower (a heavier wheel takes longer to spin up). */
+export const FLY_RAMP_INERTIA_SLOW = 0.5;
+/** the fraction of its speed the wheel loses to one artifact, at `flywheelInertia` 0. APPROX. */
+export const FLY_SHOT_DROP = 0.1;
+/** at `flywheelInertia` 1 the per-shot drop is cut by this much (a heavier wheel stores more). */
+export const FLY_SHOT_DROP_INERTIA_CUT = 0.75;
+/** setpoint, wheel and feeder bounds the coercer clamps to. 6000 rpm is a 1:1 FTC motor's free
+ * speed; 48–140 mm spans the kit wheels; three presets is what a bumper-and-trigger driver uses. */
+export const FLY_RPM_MIN = 500;
+export const FLY_RPM_MAX = 6000;
+export const FLY_WHEEL_MM_MIN = 48;
+export const FLY_WHEEL_MM_MAX = 140;
+export const FLY_FEED_S_MIN = 0.05;
+export const FLY_FEED_S_MAX = 1;
+export const FLY_PRESETS_MAX = 3;
+/** a setpoint flywheel's defaults: the DECODE kit's launcher (2411 rpm, 96 mm, 0.20-s feed). */
+export const FLY_DEFAULT_RPM = 2411;
+export const FLY_DEFAULT_WHEEL_MM = 96;
+export const FLY_DEFAULT_FEED_S = 0.2;
+/** no setpoint flywheel throws faster than this (in/s) — past any FTC launcher, a guard on the
+ * clamps rather than a tuning value. */
+export const FLY_EXIT_MAX = 450;
+/** DECODE's FIXED HOOD range, degrees above level. 80 is the adjustable hood's own ceiling
+ * (`LAUNCH_ANGLE_MAX`); below 20 nothing rises 27 in to the opening. */
+export const DECODE_HOOD_MIN_DEG = 20;
+export const DECODE_HOOD_MAX_DEG = 80;
+/** the hood an adjustable-speed-only solve falls back to when no angle reaches the goal: the
+ * maximum-range throw, so the shot falls honestly short. */
+export const DECODE_HOOD_FALLBACK_DEG = 45;
+/** the DECODE kit robot's hood. Not published; APPROX, chosen with `FLY_EXIT_EFFICIENCY` so its
+ * against-the-goal autonomous shot scores (the kit's own documented auto). */
+export const DECODE_KIT_HOOD_DEG = 70;
+/** a FIXED launcher with aim assist releases a held fire only once the chassis is within this of
+ * the aim heading (rad, ~3.4°: the 11-in opening seen from ~6 ft). */
+export const DECODE_FIXED_AIM_TOL = 0.06;
+/** the chassis-turn P gain aim assist uses on a fixed launcher (rotate command per rad of error),
+ * BIOBUZZ's `BB_AIM_GAIN`. */
+export const DECODE_FIXED_AIM_GAIN = 4.5;
+
 // ----------------------------------------------------------------- goal ----
 /** GOAL footprint: a right triangle tucked into the far corner with its legs
  * flush along the two walls. Measured from the manual's "Top View Goal Opening
@@ -2966,6 +3026,38 @@ export const ROBOT_PRESETS: readonly RobotSpec[] = [
     name: 'Ditto', teamName: 'Galactic Narwhal Chicken Effect - Diamond', teamNumber: 22489,
     length: 14.5, width: 16, intake: 'vector', massLb: 28, drivetrain: 'mecanum',
     driveRpm: 450, flywheelInertia: 0.9, canSort: false, assists: PRESET_ASSISTS,
+  },
+  /**
+   * THE KIT ROBOT — the season's official starter bot, as the sim can build it. LAST, because
+   * `ROBOT_PRESETS[0]` is the build `DEFAULT_SPEC` mirrors, and every card above it is a team's.
+   * No vendor is named (the BIOBUZZ card's owner ruling, `games/biobuzz/presets.ts`).
+   *
+   * FROM THE KIT'S DOCUMENTATION AND ITS OWN TELEOP / AUTONOMOUS OPMODES:
+   *  · drive: skid-steer, two 312-rpm gearmotors (19.2:1) on 96-mm wheels, two driven and two
+   *    omni ⇒ `tank`; `driveRpm` = π·(96/25.4)·312/60 = 61.7 in/s ÷ (`SPEED_PER_RPM` 0.20367 ·
+   *    1.06 tank) = 286, the BIOBUZZ kit card's own conversion.
+   *  · launcher: no turret — the robot turns to aim ⇒ `launcher: 'fixed'`. One 1:1 motor
+   *    (6000 rpm, 28 PPR) driving two 96-mm wheels at LAUNCHER_TARGET_VELOCITY 1125 ticks/s =
+   *    2411 rpm, at any range ⇒ flywheel `fixed` [2411], 96 mm. The feeder (two continuous
+   *    servos) runs FEED_TIME 0.20 s a shot, and only above LAUNCHER_MIN_VELOCITY 1075
+   *    (`FLY_FEED_MIN_FRAC`).
+   *  · hood: fixed polycarbonate ramps, angle not published ⇒ `DECODE_KIT_HOOD_DEG` (APPROX,
+   *    calibrated with `FLY_EXIT_EFFICIENCY` so the kit's own autonomous — start against the goal,
+   *    fire three — scores).
+   *  · hopper 3 (`HOPPER_CAPACITY`, the same).
+   * WHERE THE SIM CANNOT FOLLOW IT, each a clamp rather than a choice:
+   *  · MASS: the kit is 13.5 lb with its hub; DECODE's tank floor is 22 (`DRIVETRAIN_LIMITS`), so
+   *    the card sits ON the floor, with `flywheelInertia` 0 to keep it there.
+   *  · INTAKE: the kit has none — the human player loads it by hand in the LOADING ZONE — and DSIM
+   *    has no hand loading yet, so the card carries the `sloped` intake, the one whose length
+   *    ceiling (15) is nearest the kit's frame. Width 16 is APPROX (no published overall width).
+   */
+  {
+    name: 'StarterBot', teamName: 'Kit robot · tank', teamNumber: 0,
+    length: 15, width: 16, intake: 'sloped', massLb: 22, drivetrain: 'tank',
+    driveRpm: 286, flywheelInertia: 0, canSort: false, assists: PRESET_ASSISTS,
+    launcher: 'fixed', hoodDeg: DECODE_KIT_HOOD_DEG,
+    flywheel: { mode: 'fixed', rpm: [2411], wheelMm: 96, feedS: 0.2 },
   },
 ] as const;
 

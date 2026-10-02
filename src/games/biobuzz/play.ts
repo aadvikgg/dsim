@@ -1,4 +1,4 @@
-import type { Alliance, Artifact, RobotCommand, RobotState, Vec2, World } from '../../types';
+import type { Alliance, Artifact, RobotCommand, RobotSpec, RobotState, Vec2, World } from '../../types';
 import * as C from '../../config';
 import { clamp, hyp, nextRandom, rot, wrapAngle } from '../../math';
 import { solveArtifacts, type SweepFrom } from '../../sim/physicsEngine';
@@ -8,6 +8,7 @@ import { robotSolids, type RobotSolids } from '../../sim/artifactSolids';
 import {
   BB_AIM_GAIN,
   BB_AIM_TOL,
+  BB_FIXED_AIM_TOL,
   BB_FLOWERS,
   BB_FLOWER_RETRIEVE_S,
   BB_FLOWER_UNLOCK_S,
@@ -53,11 +54,15 @@ import {
   bbRampSwingProgress,
   bbSlewTurret,
   bbTurretRelease,
+  bbFixedRelease,
+  bbFixedFacing,
+  bbFootprint,
   bbTurretOnTarget,
   bbTurretSolution,
   mouthAxes,
 } from './robot';
 import { type BiobuzzState, type ScoreTarget, type Vec3 } from './state';
+import { flyExitSpeed, flyStep } from '../../sim/flywheel';
 
 /**
  * BIOBUZZ GAMEPLAY TICK — POLLEN physics and the intake/launch loop.
@@ -735,7 +740,15 @@ export function updateBiobuzz(
     const pretend = bbPretendHive(bb.hives[rob.alliance], bbCellSideOf(bbAimTarget(world, rob)));
     // `lands` is read only while the driver is holding fire (or pass), so only then is it predicted.
     const asking = enabled && ((cmds.get(rob.id)?.fire ?? false) || passing) && rob.hopper.length > 0;
-    if (bbIsTurreted(launcher)) {
+    // A SETPOINT FLYWHEEL ramps, and its preset button steps, every tick (nothing for any other
+    // build). BEFORE the landing prediction, so it predicts the speed the wheel has this tick.
+    flyStep(rob, cmds.get(rob.id), enabled, world.time, dt);
+    if (launcher.kind === 'fixed') {
+      // A FIXED LAUNCHER lands when the release it would make NOW — at this tick's wheel speed,
+      // along the chassis it does not aim — runs forward into the pretend-up cell. The assist
+      // turns the chassis while fire is held (step.ts); nothing here can change the arc's reach.
+      shots.set(rob.id, { target, speed: [], lands: [asking && bbFixedShotEnters(pretend, rob, dt)] });
+    } else if (bbIsTurreted(launcher)) {
       // EVERY TURRET: one for a single turret, both for a double (POLLEN turret 0, NECTAR 1).
       const speed: (number | undefined)[] = [];
       const lands: boolean[] = [];
@@ -1275,6 +1288,71 @@ export function bbTurretShotEnters(
 }
 
 /**
+ * WOULD A FIXED LAUNCHER'S SHOT GO IN — the release it would make NOW (`bbFixedRelease`, at the
+ * speed the wheel is turning this tick) run forward through the flight stage. Stage 5b, 3D's stage
+ * 11 and `shotPath.ts` all ask this one predicate, the `bbTurretShotEnters` rule.
+ */
+export function bbFixedShotEnters(
+  hive: BiobuzzState['hives'][Alliance],
+  r: RobotState,
+  dt: number,
+  trace?: BbFlightTrace,
+): boolean {
+  const rel = bbFixedRelease(r, flyExitSpeed(r));
+  return bbFlightEnters(hive, r.alliance, rel.origin, rel.z, rel.vel, dt, trace);
+}
+
+/** one band per BUILD (`bbFixedBand`) — a pure function of the spec, measured once */
+const FIXED_BAND_CACHE = new Map<string, readonly [number, number] | null>();
+
+/**
+ * WHERE A FIXED LAUNCHER SCORES FROM — the range of distances (robot centre to cell centre, on the
+ * cell's mouth axis, the robot facing it, parked, the wheel at its first setpoint) from which the
+ * shot enters a settled up-cell: the run nearest the cell, or `null` when it scores from nowhere.
+ * Measured by running `bbFixedShotEnters` itself at every inch, so it is the fire gate's own
+ * answer and not a second ballistics. The AI stands in it (`ai/policy.ts`); smoke prints it.
+ *
+ * Cached per build, keyed on everything the release reads. Pure, so the cache cannot make two
+ * machines disagree.
+ */
+export function bbFixedBand(spec: RobotSpec): readonly [number, number] | null {
+  const l = bbLauncherOf(spec, BB_HOOD_DEFAULT_DEG);
+  if (l.kind !== 'fixed') return null;
+  const key = JSON.stringify([spec.length, spec.width, l, spec.flywheel, spec.imported?.hull, spec.imported?.mech, spec.imported?.heightIn]);
+  const hit = FIXED_BAND_CACHE.get(key);
+  if (hit !== undefined) return hit;
+  const hive: BiobuzzState['hives'][Alliance] = { up: 'north', contents: [], tips: 0, tipping: 0, released: false };
+  const cell = hiveCellTarget('blue', 'north');
+  const face = bbFixedFacing(spec);
+  const rpm = spec.flywheel?.rpm[0] ?? 0;
+  // ...and only where the robot fits on the field: past the wall is a pose nobody can drive to
+  const rear = bbFootprint(spec).rear;
+  let lo = -1;
+  let hi = -1;
+  for (let d = 4; cell.pos.y + d + rear <= BB_HALF_Y; d++) {
+    const r = {
+      id: -1,
+      alliance: 'blue',
+      spec,
+      pos: { x: cell.pos.x, y: cell.pos.y + d },
+      heading: -Math.PI / 2 - face,
+      vel: { x: 0, y: 0 },
+      angVel: 0,
+      flyRpm: rpm,
+    } as unknown as RobotState;
+    if (bbFixedShotEnters(hive, r, C.SIM_DT)) {
+      if (lo < 0) lo = d;
+      hi = d;
+    } else if (lo >= 0) {
+      break;
+    }
+  }
+  const band = lo < 0 ? null : ([lo, hi] as const);
+  FIXED_BAND_CACHE.set(key, band);
+  return band;
+}
+
+/**
  * WOULD THIS DUMP GO IN — every element of it, which is the same verdict a dump gets when it is
  * fired: one arc short is a dump that drops elements on the tiles.
  *
@@ -1421,7 +1499,9 @@ export function bbAimAssist(
   const want = bbAimHeading(r, bbAimTarget(world, r));
   if (want === null) return null; // turreted: the turret does this
   const err = wrapAngle(want - r.heading);
-  if (Math.abs(err) < BB_AIM_TOL) return 0; // lined up — hold still rather than hunt
+  // a FIXED arc is not re-solved for where the robot points, so it holds a tighter line
+  const tol = bbLauncherOf(r.spec, BB_HOOD_DEFAULT_DEG).kind === 'fixed' ? BB_FIXED_AIM_TOL : BB_AIM_TOL;
+  if (Math.abs(err) < tol) return 0; // lined up — hold still rather than hunt
   return clamp(err * BB_AIM_GAIN, -1, 1);
 }
 

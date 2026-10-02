@@ -23,7 +23,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 | `.ds-import-body` | src/ui/importer.css:40 | 1 |
 | `.ds-import-canvas` | src/ui/importer.css:90 | 2 |
 | `.ds-import-canvas-host` | src/ui/importer.css:86 | 1 |
-| `.ds-import-checks` | src/ui/importer.css:324 | 1 |
+| `.ds-import-checks` | src/ui/importer.css:330 | 1 |
 | `.ds-import-drop` | src/ui/importer.css:140 | 3 |
 | `.ds-import-drop-acts` | src/ui/importer.css:156 | 1 |
 | `.ds-import-filerow` | src/ui/importer.css:164 | 1 |
@@ -328,7 +328,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-opt` | src/ui/importer.css:140 | 77 |
+| `.ds-opt` | src/ui/importer.css:140 | 83 |
 | `.ds-opt-add` | src/ui/importer.css:11 | 7 |
 | `.ds-opt-del` | src/ui/shell.css:4527 | 2 |
 | `.ds-opt-slot` | src/ui/shell.css:4519 | 3 |
@@ -448,7 +448,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-field` | src/ui/shell.css:2206 | 80 |
+| `.ds-field` | src/ui/shell.css:2206 | 84 |
 | `.ds-field-row` | src/ui/shell.css:2095 | 8 |
 
 ## `ds-fold` — 2
@@ -463,7 +463,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 | class | declared | used |
 |---|---|---|
 | `.ds-head` | src/ui/shell.css:4228 | 15 |
-| `.ds-head-spacer` | src/ui/importer.css:363 | 12 |
+| `.ds-head-spacer` | src/ui/importer.css:369 | 12 |
 
 ## `ds-hint` — 2
 
@@ -700,7 +700,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-fields` | src/ui/shell.css:5065 | 17 |
+| `.ds-fields` | src/ui/shell.css:5065 | 19 |
 
 ## `ds-friends` — 1
 
@@ -796,7 +796,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-opts` | src/ui/shell.css:4423 | 41 |
+| `.ds-opts` | src/ui/shell.css:4423 | 45 |
 
 ## `ds-padhint` — 1
 
@@ -850,7 +850,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-range` | src/ui/shell.css:5112 | 23 |
+| `.ds-range` | src/ui/shell.css:5112 | 27 |
 
 ## `ds-rejoin` — 1
 

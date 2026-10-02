@@ -1290,6 +1290,8 @@ export const robotToModel = (p: Vec2, origin: Vec2): Vec2 => ({ x: p.x + origin.
 export function mechModelToRobot(mech: ImportedMech, origin: Vec2): ImportedMech {
   const out: ImportedMech = {};
   if (mech.shooter) out.shooter = { x: q64(mech.shooter.x - origin.x), y: q64(mech.shooter.y - origin.y), z: q64(mech.shooter.z) };
+  // a direction: a shift of origin does not turn it
+  if (mech.shooterYawDeg !== undefined) out.shooterYawDeg = mech.shooterYawDeg;
   if (mech.shooter2) out.shooter2 = { x: q64(mech.shooter2.x - origin.x), y: q64(mech.shooter2.y - origin.y), z: q64(mech.shooter2.z) };
   if (mech.place) out.place = { x: q64(mech.place.x - origin.x), y: q64(mech.place.y - origin.y), z: q64(mech.place.z) };
   if (mech.intakes) {

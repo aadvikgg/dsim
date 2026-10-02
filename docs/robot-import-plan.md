@@ -101,6 +101,10 @@ export interface ImportedRobot {
 export interface ImportedMech {
   /** a turret's axis, or a turretless launcher's lip centre; z = release height at rest pitch */
   shooter?: { x: number; y: number; z: number };
+  /** a turretless launcher's facing, degrees CCW from forward, whole, (−180, 180]; only beside
+   *  `shooter`. DECODE's fixed launcher fires along it (absent = forward); BIOBUZZ's fixed kind
+   *  reads it when present, else its mount edge. */
+  shooterYawDeg?: number;
   /** BIOBUZZ double turret: the NECTAR head */
   shooter2?: { x: number; y: number; z: number };
   /** span along an edge (y across front/back, x along left/right); one per edge, ordered

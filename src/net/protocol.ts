@@ -81,6 +81,10 @@ const BTN_BBRAMP = 256;
 // new client NOTHING against an old server: the packet is accepted, the bit is simply
 // ignored by a step that has no pass in it.
 const BTN_BBPASS = 512;
+// A SETPOINT FLYWHEEL'S PRESET STEP (DECODE + BIOBUZZ, `RobotCommand.flyPreset`), an EDGE like
+// `driveMode`. Bit 1024, inside the 16 bits every sanitizer since 2026-09-20 admits, so an older
+// server accepts the packet and ignores the bit — on a build that has no presets to step.
+const BTN_FLYPRESET = 1024;
 /** the widest `buttons` an honest sender can produce — every bit above is refused. */
 const BUTTONS_MAX = 0xffff;
 
@@ -99,7 +103,8 @@ export function quantizeCommand(c: RobotCommand): QCommand {
       (c.bbPlace ? BTN_BBPLACE : 0) |
       (c.bbNectar ? BTN_BBNECTAR : 0) |
       (c.bbRamp ? BTN_BBRAMP : 0) |
-      (c.bbPass ? BTN_BBPASS : 0),
+      (c.bbPass ? BTN_BBPASS : 0) |
+      (c.flyPreset ? BTN_FLYPRESET : 0),
     ld: Math.round(clamp(c.leftDrive ?? 0, -1, 1) * 127),
     rd: Math.round(clamp(c.rightDrive ?? 0, -1, 1) * 127),
   };
@@ -164,6 +169,7 @@ export function dequantizeCommand(q: QCommand): RobotCommand {
     bbNectar: (q.buttons & BTN_BBNECTAR) !== 0,
     bbRamp: (q.buttons & BTN_BBRAMP) !== 0,
     bbPass: (q.buttons & BTN_BBPASS) !== 0,
+    flyPreset: (q.buttons & BTN_FLYPRESET) !== 0,
   };
 }
 

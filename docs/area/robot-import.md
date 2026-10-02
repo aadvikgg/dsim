@@ -177,6 +177,16 @@ end; now it is handled at once and the workers are terminated (the core is idle 
 the time this Electron takes to stop even a bare busy-loop worker). Memory: the streamed STL reader
 cut the STL peaks by a quarter; a GLB's peak is about what it was (18 % higher on the 80 MB flat\none: the worker holds the buffers the main thread did), and a STEP's is occt's.
 
+## A fixed launcher's facing
+
+`ImportedMech.shooterYawDeg` (plan §3.1) is the direction a TURRETLESS launcher fires, degrees CCW
+from robot forward: whole degrees wrapped to (−180, 180], kept only beside `shooter`. A direction,
+so the model↔robot frame shift (`mechModelToRobot` / `mechRobotToModel`) copies it unchanged. A
+game's handle carries `facingDeg` when the build fires along one (DECODE `launcher: 'fixed'`,
+BIOBUZZ's `fixed` kind); the Mechanisms step then draws a ray from the point and a second handle
+4 in out along it (`shape: 'aim'`), dragged round the point, plus a Facing field (15° steps). Home
+puts the game's pre-fill back (DECODE forward, BIOBUZZ its edge).
+
 ## Relayed to a room (VISUALS RELAY)
 
 The picture and mesh live on the owner's device, so a custom or LAN room relays them (`docs/area/netcode.md`, VISUALS RELAY has the wire, budgets and validation). What the importer owns:
