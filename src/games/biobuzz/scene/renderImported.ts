@@ -277,12 +277,6 @@ export function importedDeckZ(imp: ImportedRobot): number {
   return Math.min(BB_DECK_Z, imp.heightIn);
 }
 
-/** the aim sight's height: the stated release height (`mech.shooter.z`), else `fallback`, never
- * more than half an inch above the robot's own top */
-export function importedSightZ(imp: ImportedRobot, fallback: number): number {
-  return Math.min(imp.mech?.shooter?.z ?? fallback, imp.heightIn + 0.5);
-}
-
 /** one piece of a placeholder body: a solid prism to the deck, or the open tower above it */
 export interface ImportedBodyPart {
   kind: 'hull' | 'tower';
@@ -409,40 +403,54 @@ export function importedFrontMarkGeometries(
 }
 
 /**
- * THE TURRET'S AIM, for a launcher the robot's own mesh cannot point: a YAW node (`head`) at the
- * sim's turret axis, a PITCH node under it, and a slim dark sight along +x at the release height —
- * the two nodes `sync` already poses for a standard turret (`turretHeads`/`turretPitches`), so the
- * pointer follows `turretHeading` and `bbTurretPitch` with no new code there. Deliberately a
- * sight, not a second launcher: the mesh already has one.
+ * THE TURRET'S AIM, for a launcher the robot's own mesh cannot point — built on the SIM'S MUZZLE.
+ * A YAW node (`head`) at the turret axis (`turretLocal`), the fixed AXLE node `axleX` forward at the
+ * flywheel axle's height (`bbImportTurretAxleZ`), the PITCH node at its origin, and under it a
+ * small hub `pathR` above the axle with a slim sight running forward from it. `sync` poses `head`
+ * by `turretHeading` and `pitch` by `bbTurretPitch` (rotation.y = −pitch), exactly as it poses a
+ * standard turret, and those two rotations put the hub at
+ *     axis + yaw(axleX − pathR·sin p, 0, axleZ + pathR·cos p)
+ * — `bbMuzzleLocal(p, which, axleZ)`, the point the sim releases from, at every pitch. Deliberately
+ * a sight, not a second launcher: the mesh already has one.
  */
-export function buildAimSight(material: THREE.Material, at: Vec2, z: number, ring: number): {
+export function buildAimSight(
+  material: THREE.Material,
+  at: Vec2,
+  axleZ: number,
+  head3: { axleX: number; pathR: number },
+): {
   node: THREE.Group;
   head: THREE.Group;
   pitch: THREE.Group;
+  hub: THREE.Mesh;
   meshes: THREE.Mesh[];
 } {
   const node = new THREE.Group();
   node.name = 'bb-import-aim';
-  node.position.set(at.x, at.y, z);
+  node.position.set(at.x, at.y, 0);
   const head = new THREE.Group();
   head.name = 'bb-turret-head';
+  const axle = new THREE.Group();
+  axle.name = 'bb-turret-axle';
+  axle.position.set(head3.axleX, 0, axleZ);
   const pitch = new THREE.Group();
   pitch.name = 'bb-turret-pitch';
   node.add(head);
-  head.add(pitch);
-  // a short HUB on the axis, not a hoop: a floating ring read as a marker, not as hardware
+  head.add(axle);
+  axle.add(pitch);
+  // a short HUB at the muzzle, not a hoop: a floating ring read as a marker, not as hardware
   // (looked at, 2026-10-01 — the first pass had a torus at the turret radius)
-  const hubGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.5, 16);
-  hubGeo.rotateX(Math.PI / 2); // the cylinder's axis (+y) onto +z
-  const ringMesh = new THREE.Mesh(hubGeo, material);
-  ringMesh.name = 'bb-import-aim-hub';
-  head.add(ringMesh);
-  const len = Math.max(2.5, ring + 1.6);
-  const rodGeo = new THREE.CylinderGeometry(0.16, 0.22, len, 10);
+  const hubGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.45, 16);
+  const hub = new THREE.Mesh(hubGeo, material); // the cylinder's axis (+y) is the axle's own
+  hub.name = 'bb-import-aim-hub';
+  hub.position.set(0, 0, head3.pathR);
+  pitch.add(hub);
+  const len = 3.2;
+  const rodGeo = new THREE.CylinderGeometry(0.14, 0.2, len, 10);
   rodGeo.rotateZ(-Math.PI / 2); // the cylinder's axis (+y) onto +x
-  rodGeo.translate(len / 2, 0, 0);
+  rodGeo.translate(len / 2, 0, head3.pathR);
   const rod = new THREE.Mesh(rodGeo, material);
   rod.name = 'bb-import-aim-sight';
   pitch.add(rod);
-  return { node, head, pitch, meshes: [ringMesh, rod] };
+  return { node, head, pitch, hub, meshes: [hub, rod] };
 }

@@ -525,10 +525,10 @@ import {
   topPixelToRobot,
   unregisterImportedAssets,
 } from '../src/render/importedAssets';
-import { frontArrowSpot, pullInsideHull } from '../src/render/drawImported';
+import { frontArrowSpot } from '../src/render/drawImported';
 import { drawRobot as drawDecodeSprite } from '../src/render/drawRobot';
 import { drawChainRobot } from '../src/games/chain/drawRobot';
-import { drawBiobuzzRobot } from '../src/games/biobuzz/drawRobot';
+import { bbHeldSlots, drawBiobuzzRobot } from '../src/games/biobuzz/drawRobot';
 import { wheelLocals, chassisInertia } from '../src/sim/robot';
 import { placeGroundArtifact } from '../src/sim/world';
 import { bbFootprintGap, bbRobotsContact } from '../src/games/biobuzz/penalties';
@@ -30558,10 +30558,15 @@ function impPlayCheck(g: GameId): void {
       check(`imported 2D ${game}: a STANDARD robot still clips to a rectangle and draws no picture`,
         s.clips.length > 0 && s.clips[0].length === 4 && s.images.length === 0, JSON.stringify(s.clips[0]));
     }
-    // held elements are pulled onto the deck the hull has (BIOBUZZ's slots are searched on the box)
-    const corner = pullInsideHull(imp, { x: 9.5, y: 7.5 }, 1.15);
-    check('imported 2D: a held-element slot in an empty box corner is pulled inside the hull with its clearance',
-      polyFeature(imp.hull, corner).depth >= 1.15 - 1e-9, JSON.stringify(corner));
+    // BIOBUZZ's held-element slots are searched on an import's HULL, not its box: every disc on the deck
+    {
+      const bbSpec = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_NOSE }, DEFAULT_SPEC, 'biobuzz');
+      const { bbLauncherOf, bbLiftOf } = await import('../src/games/biobuzz/mechs');
+      const slots = bbHeldSlots(bbSpec, bbLauncherOf(bbSpec, 45), bbLiftOf(bbSpec));
+      const worst = Math.min(...slots.map((s) => polyFeature(bbSpec.imported!.hull, s).depth));
+      check('imported 2D: BIOBUZZ held-element slots are searched on the hull — every disc lies on the deck',
+        slots.length === 4 && worst >= 0.85, `worst depth ${worst.toFixed(2)}`);
+    }
     // the deck arrow (which end is the front) is never under a turret ring — a centre turret moves it forward
     const free = frontArrowSpot(imp.hull);
     const ring = { ...polyCentroid(imp.hull), r: 3 };
@@ -30570,6 +30575,256 @@ function impPlayCheck(g: GameId): void {
       Math.hypot(free.x - ring.x, free.y - ring.y) < 1e-9 && Math.hypot(moved.x - ring.x, moved.y - ring.y) >= ring.r + moved.len / 2 &&
         moved.x > ring.x && polyFeature(imp.hull, { x: moved.x + moved.len / 2, y: moved.y }).depth > 0,
       JSON.stringify(moved));
+  } finally {
+    resetImportedAssetsForTests();
+    if (hadImage) g.Image = prevImage;
+    else delete g.Image;
+  }
+}
+
+/**
+ * ---- IMPORTED ROBOTS, 2D: THE MECHANISMS ARE DRAWN WHERE THE SIM PUTS THEM ----
+ *
+ * An import with PLACED mechanisms (an off-centre mouth, placed turrets, a placed base), drawn at
+ * the origin facing +x through a recorder that tracks the full canvas transform, so every drawn
+ * point is in the robot frame. Each game's drawn mouth (the state fill over a picture, the tray of
+ * the hardware on a silhouette), turret ring, place marker and catalyst origin must equal the sim's
+ * own accessor to 1e-9 — and the drawn mouth must sit ON the hull: never past the hull's own extent
+ * along its normal (beyond it by no more than the roller grab DECODE's nip allows), with the ends of
+ * its face line inside the hull.
+ */
+{
+  interface Pt { x: number; y: number }
+  interface Fill { style: string; pts: Pt[] }
+  const recorder = () => {
+    let m = [1, 0, 0, 1, 0, 0];
+    const stack: number[][] = [];
+    let fillStyle = '';
+    let strokeStyle = '';
+    const fills: Fill[] = [];
+    const arcs: { c: Pt; r: number }[] = [];
+    const points: Pt[] = [];
+    const frames: { o: Pt; angle: number }[] = [];
+    const ap = (x: number, y: number): Pt => ({ x: m[0] * x + m[2] * y + m[4], y: m[1] * x + m[3] * y + m[5] });
+    const mul = (n: number[]) => {
+      m = [
+        m[0] * n[0] + m[2] * n[1],
+        m[1] * n[0] + m[3] * n[1],
+        m[0] * n[2] + m[2] * n[3],
+        m[1] * n[2] + m[3] * n[3],
+        m[0] * n[4] + m[2] * n[5] + m[4],
+        m[1] * n[4] + m[3] * n[5] + m[5],
+      ];
+    };
+    const target: Record<string, unknown> = {
+      save: () => stack.push(m.slice()),
+      restore: () => {
+        m = stack.pop() ?? m;
+      },
+      translate: (x: number, y: number) => mul([1, 0, 0, 1, x, y]),
+      rotate: (t: number) => {
+        mul([Math.cos(t), Math.sin(t), -Math.sin(t), Math.cos(t), 0, 0]);
+        frames.push({ o: ap(0, 0), angle: Math.atan2(m[1], m[0]) });
+      },
+      scale: (sx: number, sy: number) => mul([sx, 0, 0, sy, 0, 0]),
+      transform: (...n: number[]) => mul(n),
+      fillRect: (x: number, y: number, w: number, h: number) => fills.push({ style: fillStyle, pts: [ap(x, y), ap(x + w, y), ap(x + w, y + h), ap(x, y + h)] }),
+      arc: (x: number, y: number, r: number) => arcs.push({ c: ap(x, y), r }),
+      moveTo: (x: number, y: number) => points.push(ap(x, y)),
+      lineTo: (x: number, y: number) => points.push(ap(x, y)),
+      createLinearGradient: () => ({ addColorStop: () => undefined }),
+      measureText: () => ({ width: 0 }),
+    };
+    const ctx = new Proxy(target, {
+      get: (t, k) => (k === 'fillStyle' ? fillStyle : k === 'strokeStyle' ? strokeStyle : k in t ? t[k as string] : () => undefined),
+      set: (_t, k, v) => {
+        if (k === 'fillStyle') fillStyle = String(v);
+        if (k === 'strokeStyle') strokeStyle = String(v);
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+    return { ctx, fills, arcs, points, frames };
+  };
+  const box = (pts: Pt[]) => ({
+    x0: Math.min(...pts.map((p) => p.x)),
+    x1: Math.max(...pts.map((p) => p.x)),
+    y0: Math.min(...pts.map((p) => p.y)),
+    y1: Math.max(...pts.map((p) => p.y)),
+  });
+  const same = (a: { x0: number; x1: number; y0: number; y1: number }, b: { x0: number; x1: number; y0: number; y1: number }) =>
+    Math.abs(a.x0 - b.x0) < 1e-9 && Math.abs(a.x1 - b.x1) < 1e-9 && Math.abs(a.y0 - b.y0) < 1e-9 && Math.abs(a.y1 - b.y1) < 1e-9;
+  const near = (p: Pt, q: Pt) => Math.hypot(p.x - q.x, p.y - q.y) < 1e-9;
+  // a mouth's fill, live or idle (a world before the start whistle draws the idle one)
+  const STATE = new Set(['rgba(34,197,94,0.16)', 'rgba(160,175,195,0.07)']);
+  const TRAY = new Set(['rgba(34,197,94,0.11)', 'rgba(160,175,195,0.06)']);
+  const N: Record<string, Pt> = { front: { x: 1, y: 0 }, back: { x: -1, y: 0 }, left: { x: 0, y: 1 }, right: { x: 0, y: -1 } };
+  const P: Record<string, Pt> = { front: { x: 0, y: 1 }, back: { x: 0, y: -1 }, left: { x: -1, y: 0 }, right: { x: 1, y: 0 } };
+  /** the mouth sits ON the hull: no further out along n than the hull reaches (+ `slack`), and the
+   *  two ends of its face line inside the hull */
+  const onHull = (hull: Pt[], edge: string, r: { x0: number; x1: number; y0: number; y1: number }, face: number, slack: number): string => {
+    const n = N[edge];
+    const p = P[edge];
+    const corners = [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }];
+    const out = Math.max(...corners.map((c) => c.x * n.x + c.y * n.y));
+    const support = Math.max(...hull.map((h) => h.x * n.x + h.y * n.y));
+    if (out > support + slack + 1e-9) return `reaches ${(out - support).toFixed(3)} past the hull`;
+    const vs = corners.map((c) => c.x * p.x + c.y * p.y);
+    for (const v of [Math.min(...vs), Math.max(...vs)]) {
+      const q = { x: n.x * face + p.x * v, y: n.y * face + p.y * v };
+      if (polyFeature(hull, q).depth < -1e-6) return `face-line end ${JSON.stringify(q)} outside the hull`;
+    }
+    return '';
+  };
+  const g = globalThis as unknown as { Image?: unknown };
+  const hadImage = 'Image' in g;
+  const prevImage = g.Image;
+  class StubImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    decoding = '';
+    set src(_v: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  g.Image = StubImage;
+  const IMP_PLACED: ImportedRobot = {
+    ...IMP_NOSE,
+    id: '00ddee1122334455',
+    mech: {
+      intakes: [{ edge: 'front', from: -2, to: 5 }],
+      shooter: { x: -3, y: 2.5, z: 11 },
+      shooter2: { x: -3, y: -3, z: 12 },
+      place: { x: -2, y: -1, z: 6 },
+    },
+  };
+  const im = await import('../src/sim/importedMech');
+  const cfg = await import('../src/config');
+  const bbr = await import('../src/games/biobuzz/robot');
+  const bbmt = await import('../src/games/biobuzz/mounts');
+  const bbmc = await import('../src/games/biobuzz/mechs');
+  const bbim = await import('../src/games/biobuzz/importMech');
+  const bbc = await import('../src/games/biobuzz/config');
+  const chs = await import('../src/games/chain/state');
+  const chim = await import('../src/games/chain/importMech');
+  const chdr = await import('../src/games/chain/drawRobot');
+  const chm = await import('../src/games/chain/mounts');
+  const settle = async () => {
+    for (let i = 0; i < 6; i++) await new Promise<void>((res) => setTimeout(res, 0));
+  };
+  const drawBoth = async (game: GameId, patch: Partial<RobotSpec>, draw: (ctx: CanvasRenderingContext2D, w: World) => void) => {
+    const { w } = impWorld(game, [{ ...patch, imported: IMP_PLACED }]);
+    const r = w.robots[0];
+    r.pos = { x: 0, y: 0 };
+    r.heading = 0;
+    r.turretHeading = 0;
+    const sil = recorder();
+    draw(sil.ctx, w);
+    registerImportedAssets(IMP_PLACED.id, { top: new Blob(['png'], { type: 'image/png' }) });
+    importedTopImage(IMP_PLACED.id);
+    await settle();
+    const pic = recorder();
+    draw(pic.ctx, w);
+    unregisterImportedAssets(IMP_PLACED.id);
+    return { r, spec: r.spec, sil, pic };
+  };
+  try {
+    resetImportedAssetsForTests();
+    // ── DECODE ──────────────────────────────────────────────────────────────────────────────
+    {
+      const { r, spec, sil, pic } = await drawBoth('decode', {}, (ctx, w) => drawDecodeSprite(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w));
+      const want = im.decodeImportGrabRect(spec);
+      const d = im.decodeImportMouth(spec);
+      const drawn = pic.fills.filter((f) => STATE.has(f.style)).map((f) => box(f.pts));
+      check('imported 2D DECODE: the drawn grab band IS the sim\'s (`decodeImportGrabRect`: the nip about this mouth\'s axle, across its span)',
+        drawn.length === 1 && same(drawn[0], want), JSON.stringify({ drawn, want }));
+      const beam = sil.fills.filter((f) => f.style === '#166534').map((f) => box(f.pts));
+      check('imported 2D DECODE: the silhouette\'s roller beam stands on the sim\'s axle, across the sim\'s span',
+        beam.length === 1 && Math.abs((beam[0].x0 + beam[0].x1) / 2 - d.axle) < 1e-9 &&
+          Math.abs(beam[0].y0 - (d.yc - d.mouth.mouthHalf)) < 1e-9 && Math.abs(beam[0].y1 - (d.yc + d.mouth.mouthHalf)) < 1e-9,
+        JSON.stringify({ beam, axle: d.axle, yc: d.yc }));
+      const nip = cfg.intakeNip(spec);
+      const why = drawn.length ? onHull(spec.imported!.hull, 'front', drawn[0], d.face, nip.front - cfg.intakeRollerDia(spec) / 2) : 'none drawn';
+      check('imported 2D DECODE: the drawn mouth sits on the hull (past it only by the nip the roller grabs in)', why === '', why);
+      const t = turretWorldPos(r);
+      check('imported 2D DECODE: the turret ring is drawn at the sim\'s turret (the placed shooter), in both bodies',
+        near(t, { x: IMP_PLACED.mech!.shooter!.x, y: IMP_PLACED.mech!.shooter!.y }) && pic.arcs.some((a) => near(a.c, t)) && sil.arcs.some((a) => near(a.c, t)),
+        JSON.stringify(t));
+    }
+    // ── BIOBUZZ ─────────────────────────────────────────────────────────────────────────────
+    {
+      const patch = { bbMech: { launcher: { kind: 'twinturret', mount: 'left', mount2: 'right', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'back' }, intake: { kind: 'sweeper' } } } as Partial<RobotSpec>;
+      const { spec, sil, pic } = await drawBoth('biobuzz', patch, (ctx, w) => drawBiobuzzRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w));
+      const mouths = bbr.bbMouths(spec);
+      const drawn = pic.fills.filter((f) => STATE.has(f.style)).map((f) => box(f.pts));
+      check('imported 2D BIOBUZZ: the drawn grab areas ARE `bbMouths` (fitted to the hull, off-centre where placed)',
+        mouths.length === 1 && drawn.length === 1 && same(drawn[0], mouths[0]) && Math.abs((mouths[0].y0 + mouths[0].y1) / 2) > 0.5,
+        JSON.stringify({ drawn, mouths }));
+      const tray = sil.fills.filter((f) => TRAY.has(f.style)).map((f) => box(f.pts));
+      check('imported 2D BIOBUZZ: the silhouette\'s sweeper fills the mouth from the sim\'s face to its roller line',
+        tray.length === 1 && Math.abs(tray[0].x0 - mouths[0].face!) < 1e-9 && Math.abs(tray[0].x1 - mouths[0].x1) < 1e-9 &&
+          Math.abs(tray[0].y0 - mouths[0].y0) < 1e-9 && Math.abs(tray[0].y1 - mouths[0].y1) < 1e-9,
+        JSON.stringify({ tray, mouth: mouths[0] }));
+      const why = onHull(spec.imported!.hull, 'front', mouths[0], mouths[0].face!, 0);
+      check('imported 2D BIOBUZZ: the drawn mouth sits on the hull — no further out than the hull, its face line inside it', why === '', why);
+      const launcher = bbmc.bbLauncherOf(spec, 45);
+      const t0 = bbmt.turretLocal(spec, launcher.mount);
+      const t1 = bbmt.turretLocal(spec, launcher.mount2!);
+      check('imported 2D BIOBUZZ: both turrets are drawn at the sim\'s heads — POLLEN at `shooter`, NECTAR at `shooter2` — in both bodies',
+        near(t0, { x: IMP_PLACED.mech!.shooter!.x, y: IMP_PLACED.mech!.shooter!.y }) && near(t1, { x: IMP_PLACED.mech!.shooter2!.x, y: IMP_PLACED.mech!.shooter2!.y }) &&
+          [t0, t1].every((t) => pic.arcs.some((a) => near(a.c, t)) && sil.arcs.some((a) => near(a.c, t))),
+        JSON.stringify({ t0, t1 }));
+      const place = bbr.bbPlacePointLocal(spec)!;
+      check('imported 2D BIOBUZZ: the place marker is drawn at the sim\'s placement point (out of the hull from the placed base)',
+        !!place && near(place, bbim.bbImportPlacePoint(spec)!) && pic.arcs.some((a) => near(a.c, place) && Math.abs(a.r - 1) < 2) && sil.arcs.some((a) => near(a.c, place)),
+        JSON.stringify(place));
+      const frame = bbc.bbBoxTubeFrame(spec, 'back', place);
+      check('imported 2D/3D BIOBUZZ: the Box Tube stands inside the hull, on the sim\'s placer ray',
+        polyFeature(spec.imported!.hull, frame.outer).depth > 0, JSON.stringify(frame.outer));
+      // the DUMPER on the sim's release line
+      const dpatch = { bbMech: { launcher: { kind: 'dumper', mount: 'front', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } }, intakeMount: 'back' } as Partial<RobotSpec>;
+      const { spec: ds } = await drawBoth('biobuzz', dpatch, (ctx, w) => drawBiobuzzRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w));
+      const f = bbim.bbDumperFrame(ds, 'front');
+      const line = bbim.bbImportLaunchLine(ds, 'front', bbmt.edgeGeom(ds, 'front').span * bbc.BB_LAUNCH_LINE_FRAC);
+      check('imported BIOBUZZ: the dumper is drawn on the sim\'s release line (`bbDumperFrame` = `bbImportLaunchLine`, centre and half)',
+        Math.abs(f.dist - line.origin.x) < 1e-9 && Math.abs(f.lateral - line.origin.y) < 1e-9 && Math.abs(f.span * bbc.BB_LAUNCH_LINE_FRAC - line.half) < 1e-9 &&
+          Math.abs(line.origin.x - IMP_PLACED.mech!.shooter!.x) < 1e-9,
+        JSON.stringify({ f, line }));
+    }
+    // ── CHAIN REACTION ──────────────────────────────────────────────────────────────────────
+    {
+      const patch = { scoreMode: 'turret', catalystType: 'arm', catalystMount: 'back' } as Partial<RobotSpec>;
+      const { spec, sil, pic } = await drawBoth('chain', patch, (ctx, w) => drawChainRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w));
+      const mouths = chs.chainIntakeMouths(spec);
+      const drawn = pic.fills.filter((f) => STATE.has(f.style)).map((f) => box(f.pts));
+      check('imported 2D Chain: the drawn grab areas ARE `chainIntakeMouths` (fitted to the hull, off-centre where placed)',
+        mouths.length === 1 && drawn.length === 1 && same(drawn[0], mouths[0]), JSON.stringify({ drawn, mouths }));
+      const tray = sil.fills.filter((f) => TRAY.has(f.style)).map((f) => box(f.pts));
+      check('imported 2D Chain: the silhouette\'s sweeper fills the mouth from the sim\'s face to its roller line',
+        tray.length === 1 && Math.abs(tray[0].x0 - mouths[0].face!) < 1e-9 && Math.abs(tray[0].x1 - mouths[0].x1) < 1e-9 &&
+          Math.abs(tray[0].y0 - mouths[0].y0) < 1e-9 && Math.abs(tray[0].y1 - mouths[0].y1) < 1e-9,
+        JSON.stringify({ tray, mouth: mouths[0] }));
+      const why = onHull(spec.imported!.hull, mouths[0].edge, mouths[0], mouths[0].face!, 0);
+      check('imported 2D Chain: the drawn mouth sits on the hull', why === '', why);
+      const t = turretLocal(spec);
+      check('imported 2D Chain: the turret is drawn at the sim\'s turret (the placed shooter), in both bodies',
+        near(t, { x: IMP_PLACED.mech!.shooter!.x, y: IMP_PLACED.mech!.shooter!.y }) && pic.arcs.some((a) => near(a.c, t)) && sil.arcs.some((a) => near(a.c, t)),
+        JSON.stringify(t));
+      const o = chs.catalystOrigin(spec, 'back');
+      check('imported 2D Chain: the catalyst arm is drawn from where the sim measures its reach (`catalystOrigin`)',
+        sil.frames.some((fr) => near(fr.o, o) && Math.abs(Math.cos(fr.angle - MOUNT_ANGLE.back) - 1) < 1e-9),
+        JSON.stringify({ o, frames: sil.frames.slice(0, 6) }));
+      // the DRUM on the sim's launch line
+      const { spec: ds } = await drawBoth('chain', { scoreMode: 'drum' } as Partial<RobotSpec>, (ctx, w) => drawChainRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w));
+      const edge = shooterMountOf(ds) as 'front' | 'back' | 'left' | 'right';
+      const f = chdr.launcherFrame(ds, edge);
+      const line = chim.chainImportLaunchLine(ds, edge, chm.edgeGeom(ds, edge).span);
+      const n = N[edge];
+      const p = P[edge];
+      check('imported Chain: the drum is drawn on the sim\'s launch line (`launcherFrame` = `chainImportLaunchLine`, centre and half)',
+        Math.abs(f.dist - (line.origin.x * n.x + line.origin.y * n.y)) < 1e-9 && Math.abs(f.lateral - (line.origin.x * p.x + line.origin.y * p.y)) < 1e-9 &&
+          Math.abs(f.span - line.half) < 1e-9,
+        JSON.stringify({ f, line }));
+    }
   } finally {
     resetImportedAssetsForTests();
     if (hadImage) g.Image = prevImage;
@@ -30617,6 +30872,35 @@ function impPlayCheck(g: GameId): void {
   const bare = renderToStaticMarkup(createElement(FootprintSvg, { imported: imp }));
   check('FootprintSvg: without a picture it draws the silhouette and four wheels; unlabelled it is decorative',
     !bare.includes('<image') && (bare.match(/rx="0.5"/g) ?? []).length === 4 && bare.includes('aria-hidden="true"'));
+  // THE BUILDER PREVIEWS' MARKS ARE THE SIM'S: a placed BIOBUZZ import's preview draws `bbMouths`,
+  // the placed heads and `bbPlacePointLocal`; a placed Chain import's, the catalyst's `catalystOrigin`
+  {
+    const placedImp: ImportedRobot = {
+      ...IMP_NOSE,
+      mech: { intakes: [{ edge: 'front', from: -2, to: 5 }], shooter: { x: -3, y: 2.5, z: 11 }, shooter2: { x: -3, y: -3, z: 13 }, place: { x: -2, y: -1, z: 6 } },
+    };
+    const { BiobuzzRobotPreview } = await import('../src/games/biobuzz/RobotPreview');
+    const { ChainRobotPreview } = await import('../src/games/chain/RobotPreview');
+    const bbr = await import('../src/games/biobuzz/robot');
+    const chs = await import('../src/games/chain/state');
+    const bbSpec = coerceSpec(
+      { ...DEFAULT_SPEC, imported: placedImp, bbMech: { launcher: { kind: 'twinturret', mount: 'left', mount2: 'right', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'back' }, intake: { kind: 'sweeper' } } },
+      DEFAULT_SPEC,
+      'biobuzz',
+    );
+    const bbHtml = renderToStaticMarkup(createElement(BiobuzzRobotPreview, { spec: bbSpec }));
+    const m = bbr.bbMouths(bbSpec)[0];
+    const pl = bbr.bbPlacePointLocal(bbSpec)!;
+    check('FootprintSvg: a BIOBUZZ import\'s preview marks its sim mouth, both placed heads and its placement point',
+      bbHtml.includes(`x="${m.x0}" y="${m.y0}" width="${m.x1 - m.x0}" height="${m.y1 - m.y0}"`) &&
+        bbHtml.includes('translate(-3 2.5)') && bbHtml.includes('translate(-3 -3)') && bbHtml.includes(`cx="${pl.x}" cy="${pl.y}"`),
+      bbHtml.slice(0, 200));
+    const chSpec = coerceSpec({ ...DEFAULT_SPEC, imported: placedImp, scoreMode: 'turret', catalystType: 'arm', catalystMount: 'back' }, DEFAULT_SPEC, 'chain');
+    const chHtml = renderToStaticMarkup(createElement(ChainRobotPreview, { spec: chSpec }));
+    const co = chs.catalystOrigin(chSpec, 'back');
+    check('FootprintSvg: a Chain import\'s preview marks the catalyst where the sim measures its reach from (`catalystOrigin`)',
+      chHtml.includes(`cx="${co.x}" cy="${co.y}"`), JSON.stringify(co));
+  }
 }
 
 /**

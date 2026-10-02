@@ -375,6 +375,18 @@ export function decodeImportMouth(spec: RobotSpec): DecodeImportMouth {
 }
 
 /**
+ * WHERE AN IMPORT'S DECODE INTAKE GRABS, robot-local, for the renderers: fore-aft the roller NIP
+ * about this mouth's axle (`intakeNip` — the band `updateIntake` captures in, `axle − back` to
+ * `axle + front`), across the mouth's own span (`yc ± mouthHalf`). Read only by drawing code; the
+ * capture itself reads the same two terms where it always has.
+ */
+export function decodeImportGrabRect(spec: RobotSpec): { edge: 'front'; x0: number; x1: number; y0: number; y1: number } {
+  const d = decodeImportMouth(spec);
+  const nip = C.intakeNip(spec);
+  return { edge: 'front', x0: d.axle - nip.back, x1: d.axle + nip.front, y0: d.yc - d.mouth.mouthHalf, y1: d.yc + d.mouth.mouthHalf };
+}
+
+/**
  * DECODE's artifact solids on an imported robot: the hull behind the face, and per side the
  * standard funnel wedge (sloped/triangle) or the hull flanking the mouth with its rail (vector).
  *

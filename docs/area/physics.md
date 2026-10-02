@@ -320,6 +320,11 @@ Contract: `docs/robot-import-plan.md` §3.1 and §4.
   is what meets the field.
 - `IMP_STANDARD_PINS`' mechanism twin is `L2_MECH_PINS`: an intake/fire/place run per game (BIOBUZZ
   2D and 3D), recorded before the mechanism branches existed.
+- **The renderers read these accessors and nothing else** (docs/area/ui.md, docs/area/biobuzz.md).
+  Two exist for them alone, beside the sim's own: `decodeImportGrabRect` (the nip about the axle,
+  across the mouth — the terms `updateIntake` captures with) and BIOBUZZ's `bbDumperFrame` (the
+  release line `launchLine` uses, in its edge's frame). A renderer that needs a position the sim
+  does not expose gets an accessor here, gated on `spec.imported`, rather than its own arithmetic.
 
 ## Robot spec, builder, and drive feel
 

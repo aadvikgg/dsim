@@ -13,6 +13,8 @@ export interface FootprintMarks {
   turrets?: readonly { x: number; y: number; r: number }[];
   /** a placement point (BIOBUZZ Box Tube, Chain catalyst reach origin) */
   place?: Vec2 | null;
+  /** a turretless launcher's release LINE (BIOBUZZ dumper, Chain drum/catapult) */
+  lines?: readonly { x0: number; y0: number; x1: number; y1: number }[];
 }
 
 /** dimension-label type size, in the viewBox's inch units (the SVG previews' own) */
@@ -89,6 +91,10 @@ export function FootprintSvg({
     grow(m.x1, m.y1);
   }
   for (const t of marks?.turrets ?? []) grow(t.x, t.y, t.r + 1.4);
+  for (const l of marks?.lines ?? []) {
+    grow(l.x0, l.y0, 0.4);
+    grow(l.x1, l.y1, 0.4);
+  }
   if (marks?.place) grow(marks.place.x, marks.place.y, 1.2);
 
   const dimLabel = `${wide.toFixed(1)}" wide · ${long.toFixed(1)}" long`;
@@ -186,6 +192,9 @@ export function FootprintSvg({
             <circle r={t.r} fill="none" stroke={ink} strokeWidth={0.3} />
             <path d={`M ${t.r + 1.2} 0 L ${t.r * 0.25} 0.5 L ${t.r * 0.25} -0.5 Z`} fill={ink} />
           </g>
+        ))}
+        {(marks?.lines ?? []).map((l, i) => (
+          <line key={`l${i}`} x1={l.x0} y1={l.y0} x2={l.x1} y2={l.y1} stroke={accent} strokeWidth={0.5} strokeLinecap="round" />
         ))}
         {marks?.place ? (
           <circle cx={marks.place.x} cy={marks.place.y} r={1.0} fill="none" stroke={ink} strokeWidth={0.3} />

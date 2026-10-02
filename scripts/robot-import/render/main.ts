@@ -31,7 +31,7 @@ import { ChainRobotPreview } from '../../../src/games/chain/RobotPreview';
 import { BiobuzzRobotPreview } from '../../../src/games/biobuzz/RobotPreview';
 import { FootprintSvg } from '../../../src/ui/FootprintSvg';
 import { COLORS } from '../../../src/config';
-import type { GameId, ImportedRobot, RobotSpec, World } from '../../../src/types';
+import type { GameId, ImportedMech, ImportedRobot, RobotSpec, World } from '../../../src/types';
 
 const params = new URLSearchParams(location.search);
 document.documentElement.dataset.theme = params.get('theme') === 'light' ? 'light' : 'dark';
@@ -70,32 +70,52 @@ async function run(): Promise<void> {
   const file = new File([await (await fetch('/robot.glb')).arrayBuffer()], 'robot.glb');
   const prepared = await eng.simplifyModel(await eng.loadModel([file]), 100_000);
   const norm = eng.normalise(prepared, defaultImportSetup());
-  const owner = buildDescriptor({ id: OWNER, measurement: norm.measurement });
+  // PLACED mechanisms (the editor's step 3), so every renderer has to follow the sim's accessors
+  // rather than the bounding box: an off-centre front mouth, two placed launcher heads at their own
+  // heights, a placed placer base
+  const mech: ImportedMech = {
+    intakes: [{ edge: 'front', from: -2, to: 5 }],
+    shooter: { x: -3, y: 2.5, z: 11 },
+    shooter2: { x: -3, y: -3, z: 13 },
+    place: { x: -2, y: -1, z: 6 },
+  };
+  const owner = buildDescriptor({ id: OWNER, measurement: norm.measurement, mech });
   const baked = await eng.bake({ modelParts: norm.modelParts, origin: norm.measurement.origin, descriptor: owner });
   registerImportedAssets(OWNER, { top: baked.top, mesh: baked.mesh });
   const remote: ImportedRobot = { ...owner, id: REMOTE };
+  // a turretless launcher's LIP placed on the nose (a drum or a dumper throws over its own edge)
+  const remoteLip: ImportedRobot = { ...owner, id: 'feedfacecafe0003', mech: { ...mech, shooter: { x: 7, y: 1, z: 9 } } };
 
   // ── 2D: the three sprites ──────────────────────────────────────────────────────────────
-  const games: [GameId, string, Partial<RobotSpec>, (ctx: CanvasRenderingContext2D, w: World) => void][] = [
-    ['decode', 'DECODE', {}, (ctx, w) => drawRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w)],
-    ['chain', 'Chain Reaction', { scoreMode: 'turret' }, (ctx, w) => drawChainRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w)],
+  const games: [GameId, string, Partial<RobotSpec>, Partial<RobotSpec> | null, (ctx: CanvasRenderingContext2D, w: World) => void][] = [
+    ['decode', 'DECODE', {}, null, (ctx, w) => drawRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w)],
+    [
+      'chain',
+      'Chain Reaction',
+      { scoreMode: 'turret', catalystType: 'arm', catalystMount: 'back' } as Partial<RobotSpec>,
+      { scoreMode: 'drum', catalystType: 'arm', catalystMount: 'back' } as Partial<RobotSpec>,
+      (ctx, w) => drawChainRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w),
+    ],
     [
       'biobuzz',
       'BIOBUZZ',
       { bbMech: { launcher: { kind: 'twinturret', mount: 'left', mount2: 'right', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'back' }, intake: { kind: 'sweeper' } } } as Partial<RobotSpec>,
+      { intakeMount: 'back', bbMech: { launcher: { kind: 'dumper', mount: 'front', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } } } as Partial<RobotSpec>,
       (ctx, w) => drawBiobuzzRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w),
     ],
   ];
   const redraws: (() => void)[] = [];
-  for (const [game, name, patch, draw] of games) {
+  for (const [game, name, patch, turretless, draw] of games) {
     const row = section(`${name} — 2D sprite`);
     const base = game === 'biobuzz' ? BB_DEFAULT_SPEC : DEFAULT_SPEC;
-    for (const [label, imp] of [
-      ['standard', undefined],
-      ['import, no picture (remote player)', remote],
-      ['import, picture (owner)', owner],
-    ] as const) {
-      const spec = coerceSpec({ ...base, ...patch, ...(imp ? { imported: imp } : {}) }, base, game);
+    const cells: [string, ImportedRobot | undefined, Partial<RobotSpec>][] = [
+      ['standard', undefined, patch],
+      ['import, no picture (remote player)', remote, patch],
+      ['import, picture (owner)', owner, patch],
+    ];
+    if (turretless) cells.push([game === 'chain' ? 'import drum, no picture' : 'import dumper, no picture', remoteLip, turretless]);
+    for (const [label, imp, cellPatch] of cells) {
+      const spec = coerceSpec({ ...base, ...cellPatch, ...(imp ? { imported: imp } : {}) }, base, game);
       const w = simModuleFor(game).createWorld('free', 5, [{ id: 0, alliance: 'blue', spec, assists: { ...DEFAULT_ASSISTS }, startIndex: 0 }]);
       const r = w.robots[0];
       r.heading = Math.PI / 2;
@@ -150,6 +170,7 @@ async function run(): Promise<void> {
     const shots: [string, RobotSpec, 'high' | 'extreme'][] = [
       ['standard', coerceSpec({ ...BB_DEFAULT_SPEC, ...turret }, BB_DEFAULT_SPEC, 'biobuzz'), 'high'],
       ['import placeholder (no mesh)', specFor('biobuzz', remote, turret), 'high'],
+      ['import placeholder, dumper', specFor('biobuzz', remoteLip, games[2][3] ?? {}), 'high'],
       ['import mesh', specFor('biobuzz', owner, turret), 'high'],
       ['import mesh, physical materials', specFor('biobuzz', owner, turret), 'extreme'],
     ];
