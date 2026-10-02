@@ -43,7 +43,8 @@ export type Op =
   | { k: 'hide'; rid: number; id: string }
   /** `sock` 0 = this socket never attached (the socket thread's `conn` was still 0) */
   | { k: 'detach'; rid: number; id: string; sock: number; clean: boolean }
-  | { k: 'reattach'; rid: number; seq: number; call: number; id: string; sock: number; token?: string; trusted: boolean }
+  /** `caps`: the returning socket's, which replace the seat's (`Room.reattach`); absent keeps them */
+  | { k: 'reattach'; rid: number; seq: number; call: number; id: string; sock: number; token?: string; trusted: boolean; caps?: string[] }
   | { k: 'msg'; rid: number; id: string; msg: ClientMsg }
   | { k: 'pending'; rid: number; seq: number; call: number; p: PendingMatch }
   | { k: 'maybeStart'; rid: number }
@@ -80,9 +81,10 @@ export interface RoomFacts {
   /**
    * What the room holds as far as imported robots go (`Room.importState`, minus `allows`, which
    * the socket thread answers itself from the config and the staged roster). The join, rejoin
-   * and spectate doors read it through `RemoteRoom.importState`.
+   * and spectate doors read it through `RemoteRoom.importState`. `ids`: the robot ids the seats
+   * hold, so the join door can refuse a second seat claiming one.
    */
-  imports: { hasImport: boolean; capless: boolean };
+  imports: { hasImport: boolean; capless: boolean; ids: string[] };
 }
 
 /** per-worker load, pushed once a second for `/api/perf` */

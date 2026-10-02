@@ -60,6 +60,7 @@ import {
   IMPORT_START_REFUSED,
   hasImportCap,
   importAdmission,
+  importIdOf,
   isImportedSpec,
   setupsHaveImported,
   stripImported,
@@ -362,6 +363,14 @@ export interface Client {
    * `[]` for a guest or when the lookup found nothing.
    */
   earnedCosmetics?: string[];
+  /**
+   * WHO PAYS for this client's imported-robot visuals (`server/importVisuals.ts`): a 32-bit hash
+   * of its account (`u:<id>`) or, signed out, its address (`ip:<addr>`), taken by the socket
+   * thread at the door (`visualSourceKey`). The process budget is charged per key as well as in
+   * all, so one source cannot hold the whole budget. Never the address itself: only the hash
+   * crosses into a room. Absent (the LAN tab host, a test) ⇒ the client id is the source.
+   */
+  budgetKey?: number;
 }
 
 /** one driver's outcome in a finished match (for persistence) */
@@ -1211,12 +1220,13 @@ export class Room {
      * THE ROOM'S OWN IMPORTED-ROBOT CHECK, behind the join door's (`server/index.ts`), which asks
      * a mirror that can be a message behind when this room runs on a worker, and which the LAN
      * tab host does not have at all (`src/lan/hostWorker.ts` calls this directly). Refused with
-     * the sentence and NOT seated: a robot this room may not field, or a client that cannot play
-     * the one it holds, is not a seat.
+     * the sentence and NOT seated: a robot this room may not field, a client that cannot play
+     * the one it holds, or a robot whose id another seat already holds, is not a seat.
      */
-    const refusal = importAdmission(this.importState(), {
+    const refusal = importAdmission(this.importState(client.id), {
       imported: isImportedSpec(client.player.spec),
       caps: client.caps,
+      id: importIdOf(client.player.spec),
     });
     if (refusal) {
       client.send({ t: 'error', message: refusal });
@@ -1713,6 +1723,7 @@ export class Room {
     backlog?: () => number,
     token?: string,
     trusted = false,
+    caps?: string[],
   ): number | null {
     const c = this.clients.get(id);
     if (!c) return null;
@@ -1730,6 +1741,23 @@ export class Room {
      * behavioural tests for it build clients that advertise no caps.
      */
     if (!trusted && !this.seatOwner(c, token)) return null;
+    /**
+     * THE RETURNING SOCKET'S BUILD IS THE ONE THAT WILL PLAY, so its capabilities replace the ones
+     * the seat joined with (`caps`, from `rejoin` or the account reclaim; absent from a caller that
+     * has none to give, which keeps the old ones). It used to keep the join's: a tab that came back
+     * on an older build still read as able to play an imported robot, so a later `update` to one
+     * was admitted and that client predicted a rectangle. A build without the import capability
+     * coming back to a room that holds an imported robot (its own seat's included) is refused, as
+     * the door refuses it; `seatSecured` stays what the join made it.
+     */
+    if (caps !== undefined) {
+      const refusal = importAdmission(this.importState(), { imported: false, caps });
+      if (refusal) {
+        send({ t: 'error', message: refusal });
+        return null;
+      }
+      c.caps = caps;
+    }
     /**
      * TELL THE SOCKET THIS ONE IS REPLACING, while it still has a sender.
      *
@@ -1920,10 +1948,15 @@ export class Room {
     if (this.cancelled) return;
     switch (msg.t) {
       case 'update': {
+        // an import is admitted or refused on the RAW patch, BEFORE anything is coerced: a refused
+        // one never reaches `coerceSpec` (see `vetImportedPatch`)
+        const raw = this.vetImportedPatch(c, msg.patch);
         // sanitize the patch against this player's current config: a spoofed
         // spec/size/assist patch is clamped to legal ranges before it applies
-        const patch = sanitizePlayerPatch(msg.patch, c.player, this.game);
-        this.vetImportedPatch(c, msg.patch, patch);
+        const patch = sanitizePlayerPatch(raw, c.player, this.game);
+        // the sent spec has no import ⇒ the robot is standard, whatever the patch's base held
+        // (`coerceSpec` starts from the seat's CURRENT spec)
+        if (patch.spec && !isImportedSpec((raw as { spec?: unknown } | null)?.spec)) patch.spec = stripImported(patch.spec);
         // ENTITLEMENT STRIP (docs/cosmetics-plan.md §3.3), AFTER the shape clamp above and
         // BEFORE it lands on the roster: a re-pick is the other live point (besides join)
         // where a client DECLARES a spec, and `sanitizePlayerPatch` only shape-validated it
@@ -2095,31 +2128,35 @@ export class Room {
   }
 
   /**
-   * AN `update` PATCH THAT ADDS, KEEPS OR DROPS AN IMPORTED ROBOT (docs/area/netcode.md,
-   * IMPORTED ROBOTS). Runs on the patch `sanitizePlayerPatch` returned, against what the client
-   * actually SENT (`rawPatch`), because the wire is what states the intent:
+   * AN `update` PATCH THAT ADDS AN IMPORTED ROBOT (docs/area/netcode.md, IMPORTED ROBOTS), decided
+   * on what the client actually SENT, BEFORE `sanitizePlayerPatch` runs. Returns the patch to
+   * sanitize: the raw one, or — refused — a copy without its spec.
    *
-   *  · the sent spec has no import ⇒ the robot is standard, whatever the patch's base held.
-   *    `coerceSpec` starts from the seat's CURRENT spec, so without this a re-pick of a standard
-   *    robot would keep the import it was meant to replace.
    *  · the sent spec has one ⇒ it is allowed only where `importAdmission` says (a custom or LAN
-   *    room, a client with the cap, nobody in the room without it). Refused, the whole spec part
-   *    of the patch is dropped and the seat keeps the robot it had; the rest of the patch (ready,
-   *    pose, name) still applies, and the seat is told why.
+   *    room, a client with the cap, nobody in the room without it, no other seat holding its id).
+   *    Refused, the whole spec part of the patch is dropped and the seat keeps the robot it had;
+   *    the rest of the patch (ready, pose, name) still applies, and the seat is told why.
+   *  · ⚠️ BEFORE, NOT AFTER, THE COERCION. A refused import used to be coerced first and dropped
+   *    after, so a ranked or record room paid `coerceImported` for a robot it was about to refuse,
+   *    and a hostile one (16 bands of 256 far-off points, 62 KB) cost 70 ms of the thread every
+   *    room on it shares. The coercer is bounded now too; this keeps a refusal free.
+   *
+   * The other half (a sent spec WITHOUT an import makes the robot standard, whatever the seat's
+   * current spec held) is applied by the caller on the sanitised patch.
    */
-  private vetImportedPatch(c: Client, rawPatch: unknown, patch: ReturnType<typeof sanitizePlayerPatch>): void {
-    if (!patch.spec) return;
-    const sent = (rawPatch as { spec?: unknown } | null)?.spec;
-    if (!isImportedSpec(sent)) {
-      patch.spec = stripImported(patch.spec);
-      return;
-    }
-    const refusal = importAdmission(this.importState(), { imported: true, caps: c.caps });
-    if (!refusal) return;
-    delete patch.spec;
-    delete patch.teamName;
-    delete patch.teamNumber;
+  private vetImportedPatch(c: Client, rawPatch: unknown): unknown {
+    if (typeof rawPatch !== 'object' || rawPatch === null || !('spec' in rawPatch)) return rawPatch;
+    const sent = (rawPatch as { spec?: unknown }).spec;
+    if (!isImportedSpec(sent)) return rawPatch;
+    const refusal = importAdmission(this.importState(c.id), { imported: true, caps: c.caps, id: importIdOf(sent) });
+    if (!refusal) return rawPatch;
     c.send({ t: 'error', message: refusal });
+    // the team fields ride the spec when one is sent, so they go with it
+    const rest = { ...(rawPatch as Record<string, unknown>) };
+    delete rest.spec;
+    delete rest.teamName;
+    delete rest.teamNumber;
+    return rest;
   }
 
   private onInput(id: string, tick: number, q: unknown, ack?: number, gen?: number): void {
@@ -4084,16 +4121,22 @@ export class Room {
    *
    * ⚠️ `capless` is over seats AND spectators — a spectator steps the world like a driver's
    * client does, so one on a build without imports would draw and predict a standard robot too.
+   *
+   * `ids` are the robot ids the seats hold, held seats included; `except` leaves one seat's out (a
+   * seat re-picking may keep its own id).
    */
-  importState(): ImportRoomState {
+  importState(except?: string): ImportRoomState {
     let hasImport = this.phase === 'match' && setupsHaveImported(this.matchSetups);
     let capless = false;
+    const ids: string[] = [];
     for (const c of this.clients.values()) {
       if (isImportedSpec(c.player.spec)) hasImport = true;
       if (!hasImportCap(c.caps)) capless = true;
+      const id = c.id === except ? undefined : importIdOf(c.player.spec);
+      if (id !== undefined) ids.push(id);
     }
     for (const s of this.spectators.values()) if (!hasImportCap(s.caps)) capless = true;
-    return { allows: this.allowsImportedRobots(), hasImport, capless };
+    return { allows: this.allowsImportedRobots(), hasImport, capless, ids };
   }
 
   private broadcastRoster(): void {

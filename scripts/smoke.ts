@@ -375,10 +375,12 @@ import {
   IMPORT_REFUSED_RANKED,
   IMPORT_ROOM_NEEDS_UPDATE,
   IMPORT_START_REFUSED,
+  IMPORT_ID_TAKEN,
   REPLAY_FORMAT_IMPORTED,
   ROBOT_IMPORT_CAP,
   hasImportCap,
   importAdmission,
+  importIdOf,
   isImportedSpec,
   replayHasImported,
   setupsHaveImported,
@@ -491,7 +493,9 @@ import {
 import { CHAIN_CATALYST_MOUNTS, CHAIN_INTAKE_MOUNTS, CHAIN_TURRET_POSITIONS, MOUNT_ANGLE, RAIL_DIR, catalystMountOf, catalystMountPositions, catalystSwingOf, isSwingMount, swingAxesFor, intakeMountOf, isEdgePos, isTurreted, mountsClash, shooterMountOf, turretLocal, turretRadius } from '../src/games/chain/mounts';
 import { isDeepStrictEqual } from 'node:util';
 import {
+  IMPORT_MAX_BAND_INPUTS,
   IMPORT_MAX_EXTENT,
+  IMPORT_MAX_INPUT_POINTS,
   IMPORT_ORIGIN_MARGIN,
   IMPORT_QUANTUM,
   coerceImported,
@@ -499,6 +503,8 @@ import {
   polyBounds,
   polyCentroid,
   polyFeature,
+  polyPointDepth,
+  pullInside,
   rotatedPolyBounds,
 } from '../src/sim/imported';
 import { robotHullWorld } from '../src/sim/physics';
@@ -27490,13 +27496,14 @@ const dumperSetup = (): RobotSetup => {
   check('seat: abandonSlot checks it', /if \(!this\.seatOwner\(c, token\)\) return false;/.test(room));
   check(
     '⚠️ seat: the ONLY trusted reclaim is the one holding a verified account id',
-    (idx.match(/reattach\([^)]*true\)/g) ?? []).length === 1 &&
-      /seatFor\(user\.userId\)[\s\S]{0,400}?reattach\(seat, send, sendRaw, backlog, undefined, true\)/.test(idx),
+    // the sixth argument is `trusted`; the seventh (the returning socket's caps) is not a bypass
+    (idx.match(/reattach\([^;]*?,\s*true\s*[,)]/g) ?? []).length === 1 &&
+      /seatFor\(user\.userId\)[\s\S]{0,600}?reattach\(seat, send, sendRaw, backlog, undefined, true, coerceCaps\(msg\.caps\)\)/.test(idx),
     'a trusted bypass anywhere else would undo the seat secret from the door next to it',
   );
   check(
     'seat: both doors forward the frame’s token to the room',
-    /r\.reattach\(msg\.clientId, send, sendRaw, backlog, msg\.seatToken\)/.test(idx) &&
+    /r\.reattach\(msg\.clientId, send, sendRaw, backlog, msg\.seatToken, false, coerceCaps\(msg\.caps\)\)/.test(idx) &&
       /abandonSlot\(msg\.clientId, msg\.seatToken\)/.test(idx),
   );
   check(
@@ -29260,9 +29267,16 @@ const dumperSetup = (): RobotSetup => {
   check('imports/admit: ...but not to a room that holds an imported robot', importAdmission({ ...custom, hasImport: true }, { imported: false, caps: none }) === IMPORT_ROOM_NEEDS_UPDATE);
   check('imports/admit: ...while a client with the cap is', importAdmission({ ...custom, hasImport: true }, { imported: false, caps: CLIENT_CAPS }) === null);
   check('imports/admit: a ranked room is untouched for a client without the cap (ranked never holds an import)', importAdmission(staged, { imported: false, caps: none }) === null);
+  check('imports/admit: ⚠️ an imported robot whose id another seat holds is refused (its look is relayed and drawn by that id)',
+    importAdmission({ ...custom, ids: ['0123456789abcdef'] }, { imported: true, caps: CLIENT_CAPS, id: '0123456789abcdef' }) === IMPORT_ID_TAKEN
+      && importAdmission({ ...custom, ids: ['0123456789abcdef'] }, { imported: true, caps: CLIENT_CAPS, id: 'fedcba9876543210' }) === null
+      && importAdmission({ ...custom, ids: ['0123456789abcdef'] }, { imported: false, caps: CLIENT_CAPS }) === null);
+  check('imports/admit: the raw id is read with coerceImported’s own rule (16 lowercase hex), so a bad one is not an id',
+    importIdOf({ imported: { id: '0123456789abcdef' } }) === '0123456789abcdef' && importIdOf({ imported: { id: '0123456789ABCDEF' } }) === undefined
+      && importIdOf({ imported: { id: 5 } }) === undefined && importIdOf({}) === undefined && importIdOf(null) === undefined);
   check(
     'imports/copy: every refusal is a plain sentence — Couldn’t, a next step, typographic apostrophe, no ASCII one',
-    [IMPORT_REFUSED_RANKED, IMPORT_REFUSED_HERE, IMPORT_ROOM_NEEDS_UPDATE, IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_START_REFUSED]
+    [IMPORT_REFUSED_RANKED, IMPORT_REFUSED_HERE, IMPORT_ROOM_NEEDS_UPDATE, IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_START_REFUSED, IMPORT_ID_TAKEN]
       .every((s) => s.startsWith('Couldn’t') && !s.includes("'") && s.endsWith('.') && s.split('. ').length >= 2),
   );
 
@@ -29469,6 +29483,62 @@ const dumperSetup = (): RobotSetup => {
     room.onMessage('a', { t: 'update', patch: { spec: { ...DEFAULT_SPEC } } });
     check('imports/room: a re-pick of a STANDARD robot drops the import (the base spec must not keep it)', !isImportedSpec(rosterSpec(s, 'b', 'a')));
     room.stop();
+  }
+
+  // ---- ONE ROBOT ID PER ROOM (review 2026-10-01): a robot's look is relayed and drawn by its id ----
+  {
+    const s: Sink = {};
+    const room = new Room('smoke-imp-ids', () => {}, { kind: 'versus' });
+    const ownId = { ...DEFAULT_SPEC, imported: { ...IMP, id: 'fedcba9876543210' } } as typeof DEFAULT_SPEC;
+    room.add(mk(s, 'a', CLIENT_CAPS, impSpec, 'red'));
+    room.add(mk(s, 'b', CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    check('imports/ids: the room knows the robot ids its seats hold', isDeepStrictEqual(room.importState().ids, [IMP.id]));
+    room.onMessage('b', { t: 'update', patch: { spec: impSpec } });
+    check('imports/ids: ⚠️ an update to a robot whose id another seat holds is refused with the sentence, and the seat keeps its robot',
+      errs(s, 'b').includes(IMPORT_ID_TAKEN) && !isImportedSpec(rosterSpec(s, 'b', 'b')), JSON.stringify(errs(s, 'b')));
+    room.onMessage('b', { t: 'update', patch: { spec: ownId } });
+    check('imports/ids: ...an imported robot with an id of its own is taken', isImportedSpec(rosterSpec(s, 'b', 'b')) && errs(s, 'b').length === 1);
+    room.onMessage('a', { t: 'update', patch: { spec: impSpec, ready: false } });
+    check('imports/ids: a seat re-sending its OWN robot is not refused for holding its own id', errs(s, 'a').length === 0 && isImportedSpec(rosterSpec(s, 'b', 'a')));
+    room.add(mk(s, 'c', CLIENT_CAPS, impSpec, 'red'));
+    check('imports/ids: ⚠️ a joiner bringing an id a seat holds is not seated, with the sentence', !welcomed(s, 'c') && errs(s, 'c')[0] === IMPORT_ID_TAKEN, String(errs(s, 'c')[0]));
+    room.detach('a');
+    room.add(mk(s, 'd', CLIENT_CAPS, impSpec, 'red'));
+    check('imports/ids: ...and once that seat has left the lobby, the id is free', welcomed(s, 'd'));
+    room.stop();
+  }
+
+  // ---- A RETURNING SOCKET'S BUILD IS THE ONE THAT PLAYS (review 2026-10-01) ----------------------
+  {
+    const clientsOf = (r: Room) => (r as unknown as { clients: Map<string, Client> }).clients;
+    const s: Sink = {};
+    const room = new Room('smoke-imp-rejoin', () => {}, { kind: 'versus' });
+    room.add(mk(s, 'a', CLIENT_CAPS, impSpec, 'red'));
+    room.add(mk(s, 'b', CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    const back: ServerMsg[] = [];
+    const nc = room.reattach('b', (m) => back.push(m), undefined, undefined, undefined, true, []);
+    check('imports/rejoin: ⚠️ a seat coming back on a build WITHOUT the import cap, to a room that holds an imported robot, is refused with the sentence',
+      nc === null && back.some((m) => m.t === 'error' && m.message === IMPORT_ROOM_NEEDS_UPDATE) && hasImportCap(clientsOf(room).get('b')!.caps));
+    const nc2 = room.reattach('b', (m) => back.push(m), undefined, undefined, undefined, true, CLIENT_CAPS);
+    check('imports/rejoin: ...and taken back on a build with it', nc2 !== null);
+    const own: ServerMsg[] = [];
+    check('imports/rejoin: a seat whose OWN robot is imported cannot come back on a build without the cap',
+      room.reattach('a', (m) => own.push(m), undefined, undefined, undefined, true, ['strategy']) === null && own.some((m) => m.t === 'error'));
+    room.stop();
+    // no import yet: the downgraded seat is seated, and reads as capless from then on
+    const s2: Sink = {};
+    const r2 = new Room('smoke-imp-rejoin2', () => {}, { kind: 'versus' });
+    r2.add(mk(s2, 'k', CLIENT_CAPS, DEFAULT_SPEC, 'red'));
+    r2.add(mk(s2, 'l', CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    const nc3 = r2.reattach('k', (m) => s2.k.push(m), undefined, undefined, undefined, true, ['strategy']);
+    check('imports/rejoin: a seat back on an older build, in a room with no import, is seated with ITS caps now',
+      nc3 !== null && isDeepStrictEqual(clientsOf(r2).get('k')!.caps, ['strategy']) && r2.importState().capless);
+    r2.onMessage('l', { t: 'update', patch: { spec: impSpec } });
+    check('imports/rejoin: ⚠️ ...so an imported robot is no longer added beside it (the seat used to keep the join’s caps, and this was admitted)',
+      errs(s2, 'l').includes(IMPORT_MEMBER_NEEDS_UPDATE) && !isImportedSpec(rosterSpec(s2, 'l', 'l')), JSON.stringify(errs(s2, 'l')));
+    const nc4 = r2.reattach('l', (m) => s2.l.push(m), undefined, undefined, undefined, true);
+    check('imports/rejoin: a caller with no caps to give keeps the seat’s own', nc4 !== null && hasImportCap(clientsOf(r2).get('l')!.caps));
+    r2.stop();
   }
 
   // ---- a RECORD room -----------------------------------------------------------------------------
@@ -29865,6 +29935,141 @@ function impBroken(c: ImportedRobot): string[] {
     );
   }
   check('coerceImported: a mech with nothing valid is dropped', want('mech with nothing valid')!.mech === undefined);
+}
+
+/**
+ * THE COERCER'S COST ON HOSTILE INPUT (review 2026-10-01). `coerceImported` runs at the door, in
+ * every `update` patch, at `createWorld` and in every `coerceSpec`. With 16 bands of 256 far-off
+ * points a 62 KB `update` cost 66–78 ms of the room's thread (every room on a worker shares it), at
+ * up to 240 messages a second. Now: points read are bounded (`IMPORT_MAX_INPUT_POINTS`,
+ * `IMPORT_MAX_BAND_INPUTS`), `pullInside` is a single pass whose answer is the old 65-step walk's
+ * bit for bit, and a room decides a refused import before anything is coerced.
+ *
+ * MEASURED (dev box, idle): the worst frame below sanitises in 0.12 ms median (0.7 ms max over 200).
+ * The bound is 1 ms for the median of 25, about 8× that, so a loaded shard does not trip it while
+ * the old 70 ms would fail it by 70×.
+ */
+{
+  const ID_A = '0123456789abcdef';
+  const ID_B = 'fedcba9876543210';
+  // the old walk, kept here as the reference the new one must equal
+  const qz = (v: number): number => Math.round(v / IMPORT_QUANTUM) * IMPORT_QUANTUM + 0;
+  const oldPull = (hull: { x: number; y: number }[], p: { x: number; y: number }, snap: boolean): { x: number; y: number } => {
+    for (let j = 0; j <= 64; j++) {
+      const k = 1 - j / 64;
+      const c = snap ? { x: qz(p.x * k), y: qz(p.y * k) } : { x: p.x * k, y: p.y * k };
+      if (polyPointDepth(hull, c) >= 0) return c;
+    }
+    return { x: 0, y: 0 };
+  };
+  {
+    const rnd = VF.prng(2026);
+    let compared = 0;
+    let diffs = 0;
+    let firstDiff = '';
+    for (let h = 0; h < 1500; h++) {
+      const m = 3 + Math.floor(rnd() * 14);
+      const imp = coerceImported({ v: 1, id: ID_A, heightIn: 10, hull: Array.from({ length: m }, () => ({ x: qz(rnd() * 18 - 9), y: qz(rnd() * 18 - 9) })) });
+      if (!imp) continue;
+      const hull = imp.hull;
+      for (let i = 0; i < 30; i++) {
+        const r = rnd();
+        const v = hull[Math.floor(rnd() * hull.length)];
+        const p =
+          r < 0.3 ? { x: rnd() * 40 - 20, y: rnd() * 40 - 20 }
+          : r < 0.5 ? { x: rnd() * 2e4 - 1e4, y: rnd() * 2e4 - 1e4 }
+          : r < 0.8 ? { x: v.x * (1 + (rnd() - 0.5) * 0.05), y: v.y * (1 + (rnd() - 0.5) * 0.05) }
+          : { x: qz(v.x + Math.round((rnd() - 0.5) * 6) / 64), y: qz(v.y + Math.round((rnd() - 0.5) * 6) / 64) };
+        for (const snap of [true, false]) {
+          const a = oldPull(hull, p, snap);
+          const b = pullInside(hull, p, snap);
+          compared++;
+          if (!Object.is(a.x, b.x) || !Object.is(a.y, b.y)) {
+            diffs++;
+            firstDiff ||= JSON.stringify({ hull, p, snap, a, b });
+          }
+        }
+      }
+    }
+    check('imports/pull: ⚠️ the single-pass pull equals the old 65-step walk BIT FOR BIT (far points, near-boundary points, on-grid points, snapped and not)',
+      diffs === 0 && compared > 50_000, `${diffs} of ${compared}: ${firstDiff.slice(0, 300)}`);
+  }
+
+  // ---- the worst frame that fits the 64 KiB cap ----------------------------------------------------
+  const far = Array.from({ length: 256 }, () => ({ x: 99, y: 0 }));
+  const circle16 = Array.from({ length: 16 }, (_, i) => ({ x: Math.round(9 * dcos((2 * Math.PI * i) / 16) * 64) / 64, y: Math.round(9 * dsin((2 * Math.PI * i) / 16) * 64) / 64 }));
+  const hostileImp = (id: string) => ({
+    v: 1, id, heightIn: 10, hull: circle16,
+    bands: Array.from({ length: 16 }, () => ({ z0: 0, z1: 5, hull: far })),
+    wheels: far.slice(0, 4),
+    mech: { shooter: { x: 99, y: 99, z: 9 }, shooter2: { x: -99, y: 9, z: 9 }, place: { x: 9, y: -99, z: 9 }, intakes: Array.from({ length: 16 }, () => ({ edge: 'front', from: -99, to: 99 })) },
+  });
+  const frame = JSON.stringify({ t: 'update', patch: { spec: { ...DEFAULT_SPEC, imported: hostileImp(ID_A) } } });
+  check('imports/cost: the hostile frame fits the server’s 64 KiB cap (it is a real attack, not a hypothetical one)', frame.length < 64 * 1024 && frame.length > 60_000, String(frame.length));
+  check('imports/cost: the input bounds are what the importer needs and no more (64 points a polygon, 6 bands read)',
+    IMPORT_MAX_INPUT_POINTS === 64 && IMPORT_MAX_BAND_INPUTS === 6);
+  /** the median of `n` timed calls, after 10 untimed ones (JIT); `inputs` are parsed BEFORE the clock
+   *  starts, so what is measured is the coercion, not `JSON.parse` of 62 KB */
+  const median = <T,>(make: () => T, f: (x: T) => void, n = 25): number => {
+    for (let i = 0; i < 10; i++) f(make());
+    const inputs = Array.from({ length: n }, make);
+    const t: number[] = [];
+    for (const x of inputs) {
+      const s0 = performance.now();
+      f(x);
+      t.push(performance.now() - s0);
+    }
+    t.sort((a, b) => a - b);
+    return t[n >> 1];
+  };
+  const cur = { ...sanitizePlayer(undefined, 'decode'), clientId: 'x' };
+  for (const g of ['decode', 'chain', 'biobuzz'] as GameId[]) {
+    const ms = median(() => (JSON.parse(frame) as { patch: unknown }).patch, (patch) => sanitizePlayerPatch(patch, cur, g));
+    check(`imports/cost: ⚠️ the worst 64 KiB update sanitises in under 1 ms (median of 25) — ${g}`, ms < 1, `${ms.toFixed(3)} ms`);
+  }
+  {
+    // the LAN tab host seats a guest through `sanitizePlayer` (`hostWorker.seat`) and runs the same Room
+    const player = JSON.stringify({ ...cur, spec: { ...DEFAULT_SPEC, imported: hostileImp(ID_A) } });
+    const ms = median(() => JSON.parse(player) as unknown, (pl) => sanitizePlayer(pl, 'biobuzz'));
+    check('imports/cost: ...and the LAN tab host’s seat (`sanitizePlayer`) is as cheap', ms < 1, `${ms.toFixed(3)} ms`);
+  }
+  const coerced = coerceImported(hostileImp(ID_A));
+  check('imports/cost: what it coerces to is still a canonical robot (bands from the first readable ones, mech moved inside)',
+    !!coerced && coerced.hull.length <= 16 && (coerced.bands?.length ?? 0) <= 3 && isDeepStrictEqual(coerceImported(coerced), coerced));
+
+  // ---- through a real Room: the custom room's accept path, and a refusal that costs nothing ---------------
+  const mkSeat = (s: ServerMsg[], id: string, spec: typeof DEFAULT_SPEC, caps: string[] = CLIENT_CAPS): Client => ({
+    id, send: (m) => s.push(m),
+    player: { clientId: id, name: id, teamName: 'T', teamNumber: 1, alliance: 'red', startIndex: 0, ready: false, spec: { ...spec }, assists: { ...DEFAULT_ASSISTS } },
+    connected: true, disconnectAt: 0, caps,
+  });
+  {
+    const s: ServerMsg[] = [];
+    const room = new Room('smoke-imp-cost', () => {}, { kind: 'versus' });
+    room.add(mkSeat(s, 'a', DEFAULT_SPEC));
+    let n = 0;
+    const ms = median(
+      () => JSON.parse(JSON.stringify({ t: 'update', patch: { spec: { ...DEFAULT_SPEC, imported: hostileImp(n++ % 2 ? ID_A : ID_B) } } })) as PROTO.ClientMsg,
+      (m) => room.onMessage('a', m),
+      15,
+    );
+    check('imports/cost: ⚠️ a custom Room takes the hostile update (and the LAN tab host is this Room) in under 2 ms', ms < 2, `${ms.toFixed(3)} ms`);
+    room.stop();
+  }
+  {
+    const s: ServerMsg[] = [];
+    const room = new Room('smoke-imp-cost-rec', () => {}, { kind: 'record', record: 'solo' });
+    room.add(mkSeat(s, 'r', DEFAULT_SPEC));
+    // a record room refuses the import on the RAW patch: nothing is coerced, and the rest still applies
+    const patch = { spec: { ...DEFAULT_SPEC, imported: hostileImp(ID_A) }, name: 'renamed', teamName: 'Nope' };
+    const ms = median(() => JSON.parse(JSON.stringify({ t: 'update', patch })) as PROTO.ClientMsg, (m) => room.onMessage('r', m), 15);
+    const last = [...s].reverse().find((m) => m.t === 'roster') as Extract<ServerMsg, { t: 'roster' }> | undefined;
+    const me = last?.players.find((p) => p.clientId === 'r');
+    check('imports/cost: a record room refuses it before coercing anything (a refusal is free), and the rest of the patch still applies',
+      ms < 1 && s.some((m) => m.t === 'error' && m.message === IMPORT_REFUSED_HERE) && !isImportedSpec(me?.spec) && me?.name === 'renamed' && me?.teamName === 'T',
+      `${ms.toFixed(3)} ms, name ${me?.name}, team ${me?.teamName}`);
+    room.stop();
+  }
 }
 
 /**
@@ -31774,6 +31979,101 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// THE GLB ALLOWLIST (review 2026-10-01): files three's GLTFLoader would turn on every viewer
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const { glbBytes, glbFrom } = VF;
+  const v = IV.validateMeshGlb;
+  const bad = (edit: (j: Record<string, any>) => void, tris = 3): string | null => v(glbBytes({ tris, edit }));
+  const roots = (j: Record<string, any>): void => {
+    j.scenes[0].nodes = j.nodes.map((_: unknown, i: number) => i);
+  };
+  const { buildBoxesGlb, IMPORT_FIXTURE_BOXES } = await import('./smoke-biobuzz/fixtures/importGlb');
+  check('visuals/glb+: our own GLBs pass — the fixture, a 20k-triangle one, and the synthetic importer robot (real exporter and liteMesh output: visuals/lite)',
+    v(glbBytes()) === null && v(glbBytes({ tris: 20_000 })) === null && v(new Uint8Array(buildBoxesGlb(IMPORT_FIXTURE_BOXES))) === null,
+    String(v(new Uint8Array(buildBoxesGlb(IMPORT_FIXTURE_BOXES)))));
+  check('visuals/glb+: our exporter writes no extension, so none is allowed', IV.VISUAL_GLB_EXTENSIONS.length === 0);
+
+  // ---- the five crafted files of the review ----------------------------------------------------------
+  check('visuals/glb+: ⚠️ GPU INSTANCING (512 nodes × 500,000 copies from a 546 KB file) is refused, declared or not',
+    bad((j) => {
+      j.extensionsUsed = ['EXT_mesh_gpu_instancing'];
+      j.nodes = Array.from({ length: 512 }, () => ({ mesh: 0, extensions: { EXT_mesh_gpu_instancing: { attributes: { TRANSLATION: 0 } } } }));
+      roots(j);
+    }) === 'extension'
+      && bad((j) => { j.nodes[0].extensions = { EXT_mesh_gpu_instancing: { attributes: { TRANSLATION: 0 } } }; }) === 'extension');
+  check('visuals/glb+: ⚠️ a MESHOPT buffer view (it allocates count × byteStride, here 1.6 GB) is refused',
+    bad((j) => { j.bufferViews[0].extensions = { EXT_meshopt_compression: { buffer: 0, byteOffset: 0, byteLength: 36, byteStride: 4, count: 4e8, mode: 'ATTRIBUTES' } }; }) === 'extension');
+  check('visuals/glb+: ⚠️ images and textures sent as OBJECTS (the loader indexes `{"0": …}` like an array) are refused, as is a texture slot on a material',
+    bad((j) => {
+      j.images = { 0: { bufferView: 0, mimeType: 'image/png' } };
+      j.textures = { 0: { source: 0 } };
+      j.materials[0].pbrMetallicRoughness.baseColorTexture = { index: 0 };
+    }) === 'images'
+      && bad((j) => { j.textures = { 0: { source: 0 } }; }) === 'textures'
+      && bad((j) => { j.materials[0].pbrMetallicRoughness.baseColorTexture = { index: 0 }; }) === 'textures'
+      && bad((j) => { j.materials[0].normalTexture = { index: 0 }; }) === 'textures'
+      && bad((j) => { j.samplers = []; }) === 'samplers' && bad((j) => { j.images = []; }) === 'images');
+  check('visuals/glb+: ⚠️ one mesh drawn by 512 nodes is counted 512 times (512 × 1,000 triangles is over the 150,000 cap), while 100 nodes is not',
+    bad((j) => { j.nodes = Array.from({ length: 512 }, () => ({ mesh: 0 })); roots(j); }, 1000) === 'too many triangles'
+      && bad((j) => { j.nodes = Array.from({ length: 100 }, () => ({ mesh: 0 })); roots(j); }, 1000) === null);
+  check('visuals/glb+: ⚠️ a node CYCLE (the load never settles), a node that is its own child, and a node with two parents are refused',
+    bad((j) => { j.nodes = [{ mesh: 0, children: [1] }, { children: [0] }]; }) === 'node graph'
+      && bad((j) => { j.nodes = [{ mesh: 0, children: [0] }]; }) === 'node graph'
+      && bad((j) => { j.nodes = [{ mesh: 0 }, { children: [0] }, { children: [0] }]; j.scenes[0].nodes = [1, 2]; }) === 'node graph');
+  {
+    const chain = (n: number) => (j: Record<string, any>): void => {
+      j.nodes = Array.from({ length: n }, (_, i) => (i < n - 1 ? { children: [i + 1] } : { mesh: 0 }));
+    };
+    check('visuals/glb+: a node more than 32 deep is refused, 30 deep is not', bad(chain(40)) === 'node graph' && bad(chain(30)) === null);
+  }
+  check('visuals/glb+: a scene that lists a child as a root, or a root twice, is refused',
+    bad((j) => { j.nodes = [{ mesh: 0, children: [1] }, {}]; j.scenes[0].nodes = [0, 1]; }) === 'scene'
+      && bad((j) => { j.scenes[0].nodes = [0, 0]; }) === 'scene' && bad((j) => { j.scene = 3; }) === 'scene');
+
+  // ---- own-property lookups, and what the loader would read past --------------------------------------
+  check('visuals/glb+: ⚠️ a component type or a type that is a PROTOTYPE key (`constructor`, `toString`) is refused, as is an unknown one',
+    bad((j) => { j.accessors[0].componentType = 'constructor'; }) === 'accessor' && bad((j) => { j.accessors[0].type = 'toString'; }) === 'accessor'
+      && bad((j) => { j.accessors[0].componentType = 5130; }) === 'accessor');
+  {
+    // three vertices and a real index buffer: [0, 1, 2] passes, [0, 1, 3] names a vertex that is not there
+    const withIndices = (ix: number[], type = 5123): Uint8Array => {
+      const bin = new Uint8Array(36 + 8);
+      new Float32Array(bin.buffer, 0, 9).set([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+      const dv = new DataView(bin.buffer);
+      ix.forEach((x, i) => dv.setUint16(36 + 2 * i, x, true));
+      return glbFrom({
+        asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }],
+        meshes: [{ primitives: [{ attributes: { POSITION: 0 }, indices: 1, mode: 4 }] }],
+        buffers: [{ byteLength: bin.length }],
+        bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: 36 }, { buffer: 0, byteOffset: 36, byteLength: 8 }],
+        accessors: [{ bufferView: 0, componentType: 5126, count: 3, type: 'VEC3' }, { bufferView: 1, componentType: type, count: ix.length, type: 'SCALAR' }],
+      }, bin);
+    };
+    check('visuals/glb+: ⚠️ an index past the last vertex is refused (the values are read, not just the counts)',
+      v(withIndices([0, 1, 2])) === null && v(withIndices([0, 1, 3])) === 'index out of range' && v(withIndices([0, 1, 2, 0], 5121)) === 'primitive indices', String(v(withIndices([0, 1, 2]))));
+  }
+  check('visuals/glb+: an attribute with fewer entries than the positions is refused (the loader would read past it)',
+    bad((j) => {
+      j.accessors.push({ bufferView: 0, componentType: 5126, count: 3, type: 'VEC3' });
+      j.meshes[0].primitives[0].attributes.NORMAL = 1;
+    }, 4) === 'primitive attribute count');
+  check('visuals/glb+: skinning, custom and morph attributes are refused; so are a node skin or camera and an unknown top-level key',
+    bad((j) => { j.meshes[0].primitives[0].attributes.JOINTS_0 = 0; }) === 'primitive attribute'
+      && bad((j) => { j.meshes[0].primitives[0].targets = [{ POSITION: 0 }]; }) === 'primitive'
+      && bad((j) => { j.nodes[0].skin = 0; }) === 'node' && bad((j) => { j.nodes[0].camera = 0; }) === 'node'
+      && bad((j) => { j.skins = []; }) === 'skins' && bad((j) => { j.animations = []; }) === 'animations' && bad((j) => { j.cameras = []; }) === 'cameras'
+      && /^unexpected/.test(bad((j) => { j.lights = []; }) ?? ''));
+  check('visuals/glb+: an `extensionsRequired` that is not an empty list, and any declared extension, are refused',
+    bad((j) => { j.extensionsRequired = { 0: 'KHR_draco_mesh_compression' }; }) === 'required extension'
+      && bad((j) => { j.extensionsUsed = ['KHR_lights_punctual']; }) === 'extension'
+      && bad((j) => { j.extensionsUsed = []; j.extensionsRequired = []; }) === null);
+  check('visuals/glb+: a node transform that is not finite numbers, and a vertex stride that is not a multiple of 4, are refused',
+    bad((j) => { j.nodes[0].translation = [null, 0, 0]; }) === 'node transform' && bad((j) => { j.nodes[0].matrix = [1, 0, 0]; }) === 'node transform'
+      && bad((j) => { j.bufferViews[0].byteStride = 3; }) === 'bufferView stride');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // THE RELAY, with a stand-in room: uploads, refusals, budgets, freeing, the pump
 // ════════════════════════════════════════════════════════════════════════════
 {
@@ -32049,13 +32349,13 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
       else asks++;
       drain(relay, 40);
     }
-    check('visuals/egress: ⚠️ one viewer is stopped after about 8 MiB however many times it asks', busy && asks * big.length <= IV.VISUAL_SERVE_CLIENT_BYTES && asks >= 25, `${asks} asks of ${big.length} B`);
-    check('visuals/egress: the room’s own running total reflects it', relay.stats().servedRoom === asks * big.length);
+    check('visuals/egress: ⚠️ one viewer is stopped after about 8 MiB a minute however many times it asks', busy && asks * big.length <= IV.VISUAL_SERVE_CLIENT_BYTES && asks >= 25, `${asks} asks of ${big.length} B`);
+    check('visuals/egress: the room’s running total (this minute’s) reflects it', relay.stats().servedRoom === asks * big.length);
     // a second viewer is still served (the per-client cap is per client)
     const c = mkFake('c', PROTO.CLIENT_CAPS);
     get(relay, c, 'a', ID_A, 'top');
     drain(relay);
-    check('visuals/egress: ...while another viewer is still served', same(received(c, 'a', 'top').bytes, big));
+    check('visuals/egress: ...while another viewer (another source) is still served', same(received(c, 'a', 'top').bytes, big));
     // the room cap: many fresh viewers, each within its own quota
     const { relay: r2 } = reset();
     const o = mkFake('o', PROTO.CLIENT_CAPS, ID_A);
@@ -32069,7 +32369,7 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
       else served++;
       drain(r2, 20);
     }
-    check('visuals/egress: ⚠️ the ROOM stops serving after its own total too (48 MiB), however many viewers come', stopped && served * big.length <= IV.VISUAL_SERVE_ROOM_BYTES, `${served} viewers`);
+    check('visuals/egress: ⚠️ the ROOM stops serving after its own total too (24 MiB a minute), however many viewers come', stopped && served * big.length <= IV.VISUAL_SERVE_ROOM_BYTES, `${served} viewers`);
     r2.dispose();
     relay.dispose();
   }
@@ -32219,20 +32519,134 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
     check('visuals/dup: ⚠️ a second seat claiming the same robot id is refused (`dup`), so a viewer keying a picture by id cannot be handed the wrong one', refusals(b).join() === 'put:dup' && relay.stats().owners === 1);
     relay.dispose();
   }
+  // ---- per-source budgets, rolling serve windows, the sweep timer (review 2026-10-01) -----------------
+  {
+    // ONE SOURCE (an account, else an address) cannot hold the whole budget
+    const set = IV.VISUAL_MAX_BYTES.top + IV.VISUAL_MAX_BYTES.mesh;
+    fakes.clear();
+    allows = true;
+    const budget = SV.localVisualBudget(IV.VISUAL_PROCESS_BYTES, 2 * set);
+    const relay = new SV.VisualRelay(host, budget);
+    const mesh = glbBytes({ tris: 29_000 });
+    const top = pngBytes(250, 250, { noise: true, seed: 6 });
+    const owners = [1, 2, 3].map((i) => {
+      const f = mkFake(`s${i}`, PROTO.CLIENT_CAPS, `00000000000000${i}${i}`);
+      f.c.budgetKey = 7; // three seats from one address
+      return f;
+    });
+    for (const o of owners) {
+      put(relay, o, 'mesh', mesh, o.robot);
+      put(relay, o, 'top', top, o.robot);
+    }
+    const other = mkFake('t', PROTO.CLIENT_CAPS, '0000000000000044');
+    other.c.budgetKey = 8;
+    put(relay, other, 'top', top, other.robot);
+    check('visuals/source: ⚠️ one source holds at most its share — its third seat is refused `budget` while another source still fits',
+      refusals(owners[2]).includes('put:budget') && budget.usedBy(7) <= 2 * set && refusals(other).length === 0 && budget.usedBy(8) === top.length,
+      `${budget.usedBy(7)} / ${refusals(owners[2]).join()}`);
+    check('visuals/source: the default share is eight seats’ full sets, well under the process budget',
+      IV.VISUAL_SOURCE_BYTES === 8 * set && IV.VISUAL_SOURCE_BYTES * 6 <= IV.VISUAL_PROCESS_BYTES);
+    relay.dispose();
+    check('visuals/source: ...and each source gets every byte back', budget.used() === 0 && budget.usedBy(7) === 0 && budget.usedBy(8) === 0);
+    check('visuals/source: a key is a 32-bit hash of the account or address (the address itself never enters a room)',
+      SV.visualSourceKey('ip:203.0.113.9') === SV.visualSourceKey('ip:203.0.113.9') && SV.visualSourceKey('ip:203.0.113.9') !== SV.visualSourceKey('ip:203.0.113.10')
+        && Number.isInteger(SV.visualSourceKey('u:x')) && SV.visualSourceKey('u:x') >= 0 && SV.visualSourceKey('u:x') < 2 ** 32
+        && SV.budgetKeyOf({ id: 'a', budgetKey: 5 }) === 5 && SV.budgetKeyOf({ id: 'a' }) === SV.visualSourceKey('c:a'));
+  }
+  check('visuals/source: ⚠️ the per-source count is in the SHARED buffer too: summed across threads, zeroed with a dead thread',
+    (() => {
+      const sab = SV.makeSharedVisualBudget();
+      if (!sab) return false;
+      SV.configureVisualBudget(sab, 5); // "another thread" holds 3,500 bytes for source 9
+      const other = SV.processVisualBudget(10_000, 4_000);
+      const held = other.reserve(3_500, 9);
+      SV.configureVisualBudget(sab, 2);
+      const b = SV.processVisualBudget(10_000, 4_000);
+      const seen = SV.visualSourceBytesInUse(9) === 3_500 && !b.reserve(1_000, 9) && b.reserve(1_000, 10);
+      SV.resetVisualSlot(sab, 5);
+      const freed = SV.visualSourceBytesInUse(9) === 0 && b.reserve(3_000, 9) && SV.visualBytesInUse() === 4_000;
+      b.release(3_000, 9);
+      b.release(1_000, 10);
+      const zero = SV.visualBytesInUse() === 0 && SV.visualSourceBytesInUse(9) === 0 && SV.visualSourceBytesInUse(10) === 0;
+      SV.configureVisualBudget(new ArrayBuffer(4), 0); // back to a private counter
+      return held && seen && freed && zero;
+    })());
+  {
+    // THE SERVE CAPS ARE RATES: per viewer SOURCE and per room, over a rolling minute
+    let now = 1_000_000;
+    fakes.clear();
+    allows = true;
+    liveMatch = false;
+    const relay = new SV.VisualRelay(host, SV.localVisualBudget(IV.VISUAL_PROCESS_BYTES), () => now);
+    const o = mkFake('o', PROTO.CLIENT_CAPS, ID_A);
+    const big = pngBytes(250, 250, { noise: true });
+    put(relay, o, 'top', big);
+    const ask = (id: string, key: number): boolean => {
+      const f = fakes.get(id) ?? mkFake(id, PROTO.CLIENT_CAPS);
+      f.c.budgetKey = key;
+      f.got.length = 0;
+      get(relay, f, 'o', ID_A, 'top');
+      drain(relay, 20);
+      return !refusals(f).includes('get:busy');
+    };
+    let n = 0;
+    while (n < 100 && ask('w1', 50)) n++;
+    check('visuals/window: one viewer source is stopped at about 8 MiB a minute', n * big.length <= IV.VISUAL_SERVE_CLIENT_BYTES && n >= 25, String(n));
+    check('visuals/window: ⚠️ ...and coming back as a NEW client id from the same address does not reset it (the old per-client total did)', !ask('w2', 50));
+    check('visuals/window: another source is served meanwhile', ask('w3', 51));
+    now += IV.VISUAL_SERVE_WINDOW_MS + 1;
+    check('visuals/window: ⚠️ a minute later the same source is served again (a rate, not a lifetime total)', ask('w2', 50));
+    // the room's own window: many sources until it says busy, then a minute later it serves again
+    let served = 0;
+    let key = 1000;
+    while (served < 400 && ask(`r${key}`, key)) {
+      served++;
+      key++;
+    }
+    check('visuals/window: the ROOM stops after 24 MiB a minute, however many sources ask', served < 400 && served >= 50 && (served + 1) * big.length <= IV.VISUAL_SERVE_ROOM_BYTES, String(served));
+    check('visuals/window: ...and the room total is the window’s, not the room’s life', relay.stats().servedRoom <= IV.VISUAL_SERVE_ROOM_BYTES);
+    now += IV.VISUAL_SERVE_WINDOW_MS + 1;
+    check('visuals/window: ⚠️ ...and a busy room serves newcomers again a minute later (a lifetime total ran out after about nine viewer sessions)', ask('late', 9999) && relay.stats().servedRoom === big.length);
+    relay.dispose();
+  }
+  {
+    // A HALF-SENT UPLOAD IS SWEPT ON A TIMER, not only when somebody else uploads
+    let now = 5_000_000;
+    fakes.clear();
+    allows = true;
+    const budget = SV.localVisualBudget(IV.VISUAL_PROCESS_BYTES);
+    const relay = new SV.VisualRelay(host, budget, () => now);
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    put(relay, a, 'top', png, ID_A, 2); // the last frame never comes
+    check('visuals/sweep: an open upload starts the sweep timer, and holds its reservation', relay.stats().sweeping && budget.used() === png.length);
+    now += IV.VISUAL_SWEEP_EVERY_MS;
+    relay.sweepStale();
+    check('visuals/sweep: ...which keeps it while it is younger than a minute', budget.used() === png.length && relay.stats().sweeping);
+    now += IV.VISUAL_PUT_STALE_MS;
+    relay.sweepStale();
+    check('visuals/sweep: ⚠️ ...and frees it once it has been quiet a minute, with no other upload in the room, then stops', budget.used() === 0 && relay.stats().owners === 0 && !relay.stats().sweeping);
+    put(relay, a, 'top', png, ID_A);
+    relay.sweepStale();
+    check('visuals/sweep: a completed upload leaves no timer running', !relay.stats().sweeping && relay.stats().ready === 1);
+    put(relay, a, 'mesh', glb, ID_A, 1);
+    relay.dispose();
+    check('visuals/sweep: dispose stops it too', !relay.stats().sweeping && budget.used() === 0);
+    check('visuals/sweep: the timer runs often enough to keep the one-minute promise', IV.VISUAL_SWEEP_EVERY_MS <= IV.VISUAL_PUT_STALE_MS / 2);
+  }
   check('visuals/budget: the process budget is one counter per thread in one shared buffer — the sum is the process’s, a dead thread’s slot can be zeroed', (() => {
     const sab = SV.makeSharedVisualBudget();
     if (!sab) return false;
     SV.configureVisualBudget(sab, 2);
     const budget = SV.processVisualBudget(1000);
-    const ok1 = budget.reserve(600);
+    const ok1 = budget.reserve(600, 1);
     // "another thread" writes its own slot of the same buffer
     new Int32Array(sab)[5] += 300;
-    const full = SV.visualBytesInUse() === 900 && !budget.reserve(200) && budget.reserve(100);
-    budget.release(700);
+    const full = SV.visualBytesInUse() === 900 && !budget.reserve(200, 1) && budget.reserve(100, 1);
+    budget.release(700, 1);
     const seen = SV.visualBytesInUse() === 300;
     SV.resetVisualSlot(sab, 5);
     const zero = SV.visualBytesInUse() === 0;
-    SV.configureVisualBudget(new ArrayBuffer(4 * SV.VISUAL_BUDGET_SLOTS), 0); // back to a private counter
+    SV.configureVisualBudget(new ArrayBuffer(4), 0); // back to a private counter
     return ok1 && full && seen && zero;
   })());
 }
@@ -32671,7 +33085,7 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
       await asks(cli, tx, 'mesh');
       feed(cli, 'mesh', glbBytes({ tris: 2000, edit: (j) => { j.buffers[0].uri = 'https://example.invalid/x.bin'; } }));
       await sleepMs(30);
-      check('visuals/client: ⚠️ a mesh that names an external file is not handed to the renderers either', delivered.length === 0 && !BR.hasRelayedAsset(ID, 'mesh'));
+      check('visuals/client: ⚠️ a mesh that names an external file is not handed to the renderers either', delivered.length === 0 && !BR.hasRelayedAsset('o', ID, 'mesh'));
       cli.reset();
     }
     // a gap in the stream
@@ -32716,7 +33130,7 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
       await until(() => delivered.length === 1);
       cli.poke();
       await sleepMs(60);
-      check('visuals/client: two seats holding one robot id share the picture that arrived first (the second is not fetched to overwrite it)', delivered.length === 1 && tx.sent.filter((m) => m.t === 'visualGet' && m.owner === 'p').length <= 1);
+      check('visuals/client: two seats holding one robot id (only a broken or hostile room allows it): the id stays bound to the owner whose look arrived first, and the second is not fetched to overwrite it', delivered.length === 1 && tx.sent.filter((m) => m.t === 'visualGet' && m.owner === 'p').length <= 1);
       cli.reset();
     }
   }
@@ -32743,13 +33157,74 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
     const IA = await import('../src/render/importedAssets');
     BR.setRelayedAssetSink(null);
     IA.resetImportedAssetsForTests();
-    BR.registerRelayedAsset(ID, 'top', png);
-    check('visuals/client: ⚠️ by default a relayed asset is lent to the renderers’ registry (`registerImportedAssets`), where it wins over the device library', IA.importedAssetCacheSizes().registered === 1 && BR.hasRelayedAsset(ID, 'top'));
-    BR.registerRelayedAsset(ID, 'mesh', glb);
+    BR.registerRelayedAsset('o', ID, 'top', png);
+    check('visuals/client: ⚠️ by default a relayed asset is lent to the renderers’ registry (`registerImportedAssets`), where it wins over the device library', IA.importedAssetCacheSizes().registered === 1 && BR.hasRelayedAsset('o', ID, 'top'));
+    BR.registerRelayedAsset('o', ID, 'mesh', glb);
     const lent = await IA.importedMeshBlob(ID);
     check('visuals/client: ...a relayed mesh is what the 3D scene is handed for that id, byte for byte', !!lent && lent.type === 'model/gltf-binary' && same(new Uint8Array(await lent.arrayBuffer()), glb));
     BR.unregisterRelayedAssets([ID]);
-    check('visuals/client: ...and `unregisterImportedAssets` takes it back when the room is left', IA.importedAssetCacheSizes().registered === 0 && !BR.hasRelayedAsset(ID, 'top') && BR.relayedAssetIds().length === 0);
+    check('visuals/client: ...and `unregisterImportedAssets` takes it back when the room is left', IA.importedAssetCacheSizes().registered === 0 && !BR.hasRelayedAsset('o', ID, 'top') && BR.relayedAssetIds().length === 0);
+    IA.resetImportedAssetsForTests();
+    BR.setRelayedAssetSink(null);
+  }
+  // ---- AN ASSET IS (OWNER, ROBOT ID), AND A VIEWER NEVER TAKES A LOOK FOR ITS OWN ROBOT (review 2026-10-01) ----
+  {
+    BR.setRelayedAssetSink({ register: (id, assets) => { delivered.push({ id, assets }); }, unregister: (id) => { unregistered.push(id); } });
+    reset();
+    const p = (clientId: string, id: string): PROTO.LobbyPlayer => ({ clientId, name: clientId, alliance: 'red', startIndex: 0, ready: true, spec: impSpec(id), assists: { ...DEFAULT_ASSISTS } }) as PROTO.LobbyPlayer;
+    const feedFrom = (cli: IVC.ImportVisualsClient, owner: string, bytes: Uint8Array, id: string): void => {
+      for (let seq = 0; seq < IV.visualFrames(bytes.length); seq++) {
+        const sp = IV.visualSpan(bytes.length, seq);
+        cli.handle({ t: 'visualChunk', owner, id, kind: 'top', total: bytes.length, seq, data: IV.bytesToBase64(bytes, sp.start, sp.end) });
+      }
+    };
+    {
+      // the viewer's own seat holds ID, and another seat claims it too
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      cli.onWelcome('me');
+      cli.noteRoster('me', [p('me', ID), p('x', ID)]);
+      cli.handle({ t: 'visualReady', owner: 'x', id: ID, kind: 'top', bytes: 1 });
+      await sleepMs(60);
+      check('visuals/own: ⚠️ a viewer never asks for a look under its OWN robot’s id, whoever claims it', tx.count('visualGet') === 0 && delivered.length === 0);
+      cli.reset();
+    }
+    {
+      // this device's library already holds the robot (a shared copy, or one whose id another seat copied)
+      const tx = new FakeTx();
+      const cli = mkClient({ own: { top: async () => null, mesh: async () => null, has: async (id: string) => id === ID } });
+      cli.bind(tx);
+      cli.onWelcome('me');
+      cli.noteRoster('me', [p('me', ID2), p('o', ID)]);
+      cli.handle({ t: 'visualReady', owner: 'o', id: ID, kind: 'top', bytes: 1 });
+      await until(() => tx.count('visualGet') === 1);
+      feedFrom(cli, 'o', png, ID);
+      await sleepMs(60);
+      check('visuals/own: ⚠️ ...nor lends one for a robot id this device’s library holds (it draws its own copy)', delivered.length === 0 && cli.stateForTest().delivered.length === 0);
+      cli.reset();
+    }
+    // the renderers' registry: one lender per id
+    const IA = await import('../src/render/importedAssets');
+    BR.setRelayedAssetSink(null);
+    IA.resetImportedAssetsForTests();
+    const draft = new Blob([png as BlobPart], { type: 'image/png' });
+    IA.registerImportedAssets(ID, { top: draft }); // this device's own (the editor's draft)
+    check('visuals/own: ⚠️ a relayed look never replaces what this device lent for that id',
+      BR.registerRelayedAsset('o', ID, 'top', png) === false && BR.relayedAssetIds().length === 0 && IA.importedAssetCacheSizes().registered === 1);
+    IA.unregisterImportedAssets(ID);
+    check('visuals/own: ⚠️ the first owner’s look binds the id; a second owner’s for the same id is refused, by the bridge and by the registry',
+      BR.registerRelayedAsset('o', ID2, 'top', png) && !BR.registerRelayedAsset('p', ID2, 'top', png) && BR.hasRelayedAsset('o', ID2, 'top') && !BR.hasRelayedAsset('p', ID2, 'top')
+        && BR.relayedIdTakenByOther('p', ID2) && !BR.relayedIdTakenByOther('o', ID2) && !IA.registerImportedAssets(ID2, { top: draft }, 'relay:p'));
+    IA.unregisterImportedAssets(ID2, 'relay:p');
+    check('visuals/own: ...and only its own lender can take it back', IA.importedAssetCacheSizes().registered === 1);
+    BR.unregisterRelayedAssets([ID2]);
+    check('visuals/own: ...which leaving the room does', IA.importedAssetCacheSizes().registered === 0 && BR.relayedAssetIds().length === 0);
+    IA.registerImportedAssets(ID2, { top: draft }, 'relay:o');
+    check('visuals/own: this device may always replace a relayed look (the editor opening its own robot)', IA.registerImportedAssets(ID2, { top: draft }) === true);
+    IA.unregisterImportedAssets(ID2, 'relay:o');
+    check('visuals/own: ...after which the relay cannot take the device’s back', IA.importedAssetCacheSizes().registered === 1);
+    IA.unregisterImportedAssets(ID2);
     IA.resetImportedAssetsForTests();
     BR.setRelayedAssetSink(null);
   }

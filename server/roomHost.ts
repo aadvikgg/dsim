@@ -34,7 +34,7 @@ import { serverPhysics } from '../src/games/types';
 import { simModuleFor } from '../src/games/sim';
 import type { GameId, Physics } from '../src/types';
 import type { PendingMatch } from './matchTypes';
-import { hasImportCap, isImportedSpec, type ImportRoomState } from '../src/net/imported';
+import { hasImportCap, importIdOf, isImportedSpec, type ImportRoomState } from '../src/net/imported';
 import {
   CB_ACTIVE,
   CB_BEHAVIOUR,
@@ -92,6 +92,8 @@ export interface RoomHandle {
     backlog?: () => number,
     token?: string,
     trusted?: boolean,
+    /** the returning socket's capabilities, which replace the seat's (see `Room.reattach`) */
+    caps?: string[],
   ): number | null | Promise<number | null>;
   onMessage(id: string, msg: ClientMsg): void;
   applyPending(p: PendingMatch): void | Promise<void>;
@@ -205,7 +207,7 @@ function initialFacts(code: string, config: RoomConfig, capacity: number): RoomF
     holds: true,
     abandonable: true,
     spectators: 0,
-    imports: { hasImport: false, capless: false },
+    imports: { hasImport: false, capless: false, ids: [] },
   };
 }
 
@@ -218,10 +220,12 @@ export class RemoteRoom implements RoomHandle {
     kind: 'add' | 'spec' | 'reattach' | 'pending';
     uid?: string;
     id?: string;
-    /** an `add` that brings an imported robot, and any `add`/`spec` whose client lacks the cap —
-     *  counted by `importState` until the worker's mirror has them */
+    /** an `add` that brings an imported robot, and any `add`/`spec`/`reattach` whose client lacks
+     *  the cap — counted by `importState` until the worker's mirror has them */
     imp?: boolean;
     nocap?: boolean;
+    /** the imported robot's id an `add` brings, for the one-id-per-room rule */
+    iid?: string;
   }[] = [];
   private pending: PendingMatch | null = null;
   private tag = '';
@@ -353,13 +357,17 @@ export class RemoteRoom implements RoomHandle {
    * `Room.importState`, from the mirror. `allows` is answered here (config + the roster this thread
    * staged, as `stagedFor` is); the other two are the worker's last word PLUS the seats and
    * watchers posted since, for the reason `canJoin` counts an `add` in flight: two joins inside a
-   * millisecond must each see the other.
+   * millisecond must each see the other. `ids` likewise: the seats' robot ids plus those of the
+   * adds in flight. `except` is the room's own concern (a seat re-picking), never the door's.
    */
   importState(): ImportRoomState {
+    const ids = [...(this.facts.imports.ids ?? [])];
+    for (const u of this.unacked) if (u.iid) ids.push(u.iid);
     return {
       allows: this.config.kind === 'versus' && !this.pending,
       hasImport: this.facts.imports.hasImport || this.unacked.some((u) => u.imp),
       capless: this.facts.imports.capless || this.unacked.some((u) => u.nocap),
+      ids,
     };
   }
 
@@ -369,7 +377,7 @@ export class RemoteRoom implements RoomHandle {
     kind: 'add' | 'spec' | 'reattach' | 'pending',
     uid?: string,
     id?: string,
-    flags?: { imp?: boolean; nocap?: boolean },
+    flags?: { imp?: boolean; nocap?: boolean; iid?: string },
   ): number {
     const seq = ++this.seq;
     this.unacked.push({ seq, kind, uid, id, ...flags });
@@ -390,6 +398,7 @@ export class RemoteRoom implements RoomHandle {
     const seq = this.populate('add', client.userId, client.id, {
       imp: isImportedSpec(client.player.spec),
       nocap: !hasImportCap(client.caps),
+      iid: importIdOf(client.player.spec),
     });
     this.attached.add(sock);
     this.pool.post(this.slot, { k: 'add', rid: this.rid, seq, sock, client: dataOf(client) });
@@ -424,12 +433,14 @@ export class RemoteRoom implements RoomHandle {
     _backlog?: () => number,
     token?: string,
     trusted = false,
+    caps?: string[],
   ): Promise<number | null> {
     // the worker rebuilds all three senders around the socket key, so only `send` is needed
     // here, to find that key
     const sock = sockFor(send);
-    const seq = this.populate('reattach');
-    return this.request<boolean>((call) => ({ k: 'reattach', rid: this.rid, seq, call, id, sock, token, trusted })).then(
+    // a returning build without the import capability counts as one until the worker has it
+    const seq = this.populate('reattach', undefined, undefined, caps ? { nocap: !hasImportCap(caps) } : undefined);
+    return this.request<boolean>((call) => ({ k: 'reattach', rid: this.rid, seq, call, id, sock, token, trusted, caps })).then(
       (ok) => {
         if (!ok) return null;
         this.attached.add(sock);

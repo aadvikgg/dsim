@@ -14,7 +14,9 @@ import {
   workerPerf,
   type RoomHandle,
 } from './roomHost';
-import { IMPORT_REFUSED_RANKED, importAdmission, isImportedSpec, stripImported } from '../src/net/imported';
+import { IMPORT_REFUSED_RANKED, importAdmission, importIdOf, isImportedSpec, stripImported } from '../src/net/imported';
+import { visualSourceKey } from './importVisuals';
+import { clientIp } from './analytics';
 import { coerceCaps, decodeClientMsg, encodeMsg, BB3D_REFUSAL, DEFAULT_ROOM_CONFIG, physicsAllowed, RATED_FORMATS, SERVER_CAPS, type ClientMsg, type LiveRoom, type RoomConfig, type ServerMsg, type SiteStatus } from '../src/net/protocol';
 import { sanitizePlayer } from '../src/net/sanitize';
 import { stripUnentitledCosmetics } from '../src/cosmetics';
@@ -3305,6 +3307,8 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       const refusal = importAdmission(r.importState(), {
         imported: isImportedSpec(msg.player?.spec),
         caps: coerceCaps(msg.caps),
+        // two seats may not hold one robot id (its look is relayed and drawn by that id)
+        id: importIdOf(msg.player?.spec),
       });
       if (refusal) {
         send({ t: 'error', message: refusal });
@@ -3397,7 +3401,9 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       if (seat) {
         // TRUSTED: `seatFor` matched a VERIFIED user id off the signed auth token, which
         // proves more than the seat secret does. See the note in `Room.reattach`.
-        const reclaim = r.reattach(seat, send, sendRaw, backlog, undefined, true);
+        // the returning build's caps replace the seat's (an older build back in a room that
+        // holds an imported robot is refused there, as the door above refuses a new one)
+        const reclaim = r.reattach(seat, send, sendRaw, backlog, undefined, true, coerceCaps(msg.caps));
         // a room on a worker answers later; an in-process one answers now and keeps its timing
         const nc = reclaim instanceof Promise ? await reclaim : reclaim;
         if (nc !== null && (closed || room)) {
@@ -3536,6 +3542,8 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       caps: coerceCaps(msg.caps),
       // release channel: alpha rooms are segregated + never persisted (in-dev)
       channel: typeof msg.channel === 'string' ? msg.channel : undefined,
+      // who pays for this seat's imported-robot visuals: its account, else its address, hashed
+      budgetKey: visualSourceKey(user ? `u:${user.userId}` : `ip:${clientIp(req)}`),
     };
     if (user) {
       client.userId = user.userId;
@@ -3644,6 +3652,8 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       connected: true,
       disconnectAt: 0,
       caps: coerceCaps(msg.caps),
+      // a watcher only downloads visuals: its serve window is its address's
+      budgetKey: visualSourceKey(`ip:${clientIp(req)}`),
     };
     room = r; // route this socket's close → r.detach (drops the spectator)
     // HIDDEN OBSERVER: an admin may watch without moving the spectator count.
@@ -3742,7 +3752,8 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
           }
         }
         // hand over EVERY sender, not just `send` — see the note in `Room.reattach`
-        const res = r ? r.reattach(msg.clientId, send, sendRaw, backlog, msg.seatToken) : null;
+        // the returning build's caps replace the seat's (`Room.reattach`)
+        const res = r ? r.reattach(msg.clientId, send, sendRaw, backlog, msg.seatToken, false, coerceCaps(msg.caps)) : null;
         const clientId = msg.clientId;
         const settle = (nc: number | null): void => {
           if (r && nc !== null) {

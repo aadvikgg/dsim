@@ -29,7 +29,7 @@ import {
   type ServerMsg,
 } from '../src/net/protocol';
 import { DEFAULT_ASSISTS, DEFAULT_SPEC } from '../src/sim/spawn';
-import { IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_REFUSED_HERE, IMPORT_REFUSED_RANKED, IMPORT_ROOM_NEEDS_UPDATE } from '../src/net/imported';
+import { IMPORT_ID_TAKEN, IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_REFUSED_HERE, IMPORT_REFUSED_RANKED, IMPORT_ROOM_NEEDS_UPDATE } from '../src/net/imported';
 import * as IV from '../src/net/importVisuals';
 import { visualBytesInUse } from '../server/importVisuals';
 import { glbBytes, pngBytes } from './visualFixtures';
@@ -283,6 +283,17 @@ async function partA(): Promise<void> {
     await until(() => si.msgs('welcome').length > 0, 5000);
     await until(() => imp.lobbySummary().players === 1, 2000);
     check('A: ...and so does the mirror once the worker has applied it', imp.importState().hasImport && !imp.importState().capless);
+    check('A: ...and its robot id rides the mirror (one id per room)', (imp.importState().ids ?? []).includes(IMP.id));
+    const sd = fakeSocket();
+    const cd = clientOn(sd, 'd1', 'u-d', 'blue');
+    cd.player.spec = { ...cd.player.spec, imported: IMP } as typeof cd.player.spec;
+    imp.add(cd);
+    check('A: a second seat with the same robot id, in flight, already shows its id', (imp.importState().ids ?? []).filter((x) => x === IMP.id).length === 2);
+    await sleep(400);
+    check(
+      'A: the worker room refuses a second seat with the same robot id, with the sentence, and does not seat it',
+      sd.msgs('welcome').length === 0 && sd.msgs('error').some((m) => (m as { message?: string }).message === IMPORT_ID_TAKEN),
+    );
     const so = fakeSocket();
     const co = clientOn(so, 'o1', 'u-o', 'blue');
     co.caps = [];
@@ -751,8 +762,47 @@ async function scenarios(s: Server): Promise<void> {
     const G = await open();
     G.send({ t: 'join', room, config: versus, player: stdP('G', 'blue'), caps: CLIENT_CAPS });
     check(L('...while a build with it is seated'), !!(await G.until('welcome')));
+    const H = await open();
+    H.send({ t: 'join', room, config: versus, player: impP('H', 'blue'), caps: CLIENT_CAPS });
+    const he = await H.until('error');
+    check(L('...and a second imported robot with the SAME robot id is turned away at the door (one id per room)'), he?.message === IMPORT_ID_TAKEN, he?.message);
+    H.close();
+    // A HOSTILE UPDATE COSTS NOTHING (review 2026-10-01): 16 bands of 256 far-off points, 62 KB, cost
+    // 70 ms of the room's thread each. Sixty of them, then a rename: the rename must come straight back.
+    const far = Array.from({ length: 256 }, () => ({ x: 99, y: 0 }));
+    const hostile = { ...DEFAULT_SPEC, imported: { ...IMP, id: 'fedcba9876543210', bands: Array.from({ length: 16 }, () => ({ z0: 0, z1: 5, hull: far })) } };
+    const mark = G.log.length;
+    const t0 = Date.now();
+    for (let i = 0; i < 60; i++) G.send({ t: 'update', patch: { spec: hostile } });
+    G.send({ t: 'update', patch: { name: 'Gx' } });
+    const renamed = await G.until('roster', (m) => m.players.some((p) => p.name === 'Gx'), 10_000, mark);
+    const dt = Date.now() - t0;
+    check(L('⚠️ sixty hostile 62 KB updates do not stall the room: a rename right behind them comes back in under 1.5 s (it was over 4 s of one thread)'), !!renamed && dt < 1500, `${dt} ms`);
     P.close();
     G.close();
+  }
+  {
+    // A RETURNING SOCKET'S BUILD IS THE ONE THAT PLAYS (review 2026-10-01): a seat reclaimed by a
+    // build without the import cap reads as one from then on, on both server shapes
+    const room3 = newCode();
+    const K2 = await open();
+    K2.send({ t: 'join', room: room3, config: versus, player: stdP('K2', 'red'), caps: CLIENT_CAPS });
+    await K2.until('welcome');
+    const L2 = await open();
+    L2.send({ t: 'join', room: room3, config: versus, player: stdP('L2', 'blue'), caps: CLIENT_CAPS });
+    await L2.until('welcome');
+    await L2.until('roster', (m) => m.players.length === 2);
+    const K3 = await open();
+    K3.send({ t: 'rejoin', room: room3, clientId: K2.clientId, caps: ['strategy', 'seat'], seatToken: K2.seatToken });
+    const rj = await K3.until('rejoined');
+    check(L('a seat reclaimed by a build without the import cap is let back into a room with no import'), rj?.ok === true);
+    const mark = L2.log.length;
+    L2.send({ t: 'update', patch: { spec: { ...DEFAULT_SPEC, imported: IMP } } });
+    const le = await L2.until('error', () => true, 3000, mark);
+    check(L('⚠️ ...and the room now knows that build: an imported robot is not added beside it (the seat kept its join’s caps before)'), le?.message === IMPORT_MEMBER_NEEDS_UPDATE, le?.message);
+    K3.close();
+    K2.close();
+    L2.close();
   }
 
   await visuals(s);
