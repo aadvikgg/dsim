@@ -218,8 +218,14 @@ export const BALANCE_VERSION = 4; // 2: real-motor drivetrain retune (torque–s
  *      trimesh (`buildFlowerSolids3d`, `GROUP_CHASSIS`), so a chassis is no longer lifted onto the
  *      0.35-in lower lip or pushed into the tiles; the three plate trimeshes are one collider now,
  *      which moves Rapier's pair order. Elements meet the same surfaces as before.
+ * 5: SWERVE POD ORDER (2026-10-02, owner-approved). The traction loop in `updateRobot` read
+ *    `moduleAngles` (FL, FR, BL, BR) against `wheelLocals` (then FL, FR, BR, BL), so a swerve's two
+ *    rear wheels resisted contact slip along each other's pod axes. Both now come from
+ *    `WHEEL_CORNERS`. Only swerve robots in 2D contact move (DECODE, Chain Reaction, BIOBUZZ 2D);
+ *    every other drivetrain, and all of BIOBUZZ 3D, steps bit-identically. Everything stamped 4
+ *    plays as DRIFT.
  */
-export const SIM_VERSION = 4;
+export const SIM_VERSION = 5;
 
 /**
  * A BEHAVIOUR FIX SMALL ENOUGH NOT TO RETIRE EVERY REPLAY. `SIM_VERSION` refuses every older
@@ -1151,6 +1157,30 @@ export const SWERVE_MIN_WIDTH = 13.5;
 /** wheel centers sit this far INSIDE the chassis edge (typical FTC build);
  * the four wheel ground-contact points are what counts for base parking */
 export const WHEEL_INSET = 2.6;
+/**
+ * THE WHEEL ORDER: FL, FR, BL, BR, as corner signs in the robot frame (+x forward, +y left).
+ * Wheel i is `WHEEL_CORNERS[i]` everywhere a robot has a per-wheel array — in particular
+ * `RobotState.moduleAngles[i]` / `moduleTargets[i]` are the swerve pod at that corner. Every site
+ * that pairs a pod with a wheel position derives the position from this list: `wheelLocals`
+ * (the swerve IK/FK and the traction loop in `src/sim/robot.ts`), the three canvas `drawWheels`
+ * and BIOBUZZ 3D's `buildWheels`.
+ *
+ * ⚠️ Those sites used to write their corners out by hand, and `wheelLocals` walked the perimeter
+ * (FL, FR, BR, BL) while the IK and the sprites used this order — so the traction model resisted
+ * a swerve's two rear wheels along each other's pod axes (fixed in `SIM_VERSION` 5). Never index a
+ * pod against a hand-written corner list.
+ */
+export const WHEEL_CORNERS: readonly (readonly [1 | -1, 1 | -1])[] = [
+  [1, 1], // FL
+  [1, -1], // FR
+  [-1, 1], // BL
+  [-1, -1], // BR
+];
+/** `WHEEL_CORNERS` indices walked round the chassis (FL, FR, BR, BL). `wheelContacts` is a
+ * polygon and reads its points in this order; the traction loop sums its four forces in it, which
+ * is the order it always summed them in, so a robot without pods steps bit-identically across the
+ * `SIM_VERSION` 5 fix. Neither reorders which pod a wheel reads. */
+export const WHEEL_PERIMETER: readonly number[] = [0, 1, 3, 2];
 // ============================================================================
 // DRIVETRAIN & MOTOR BALANCE — TUNE HERE
 // ----------------------------------------------------------------------------

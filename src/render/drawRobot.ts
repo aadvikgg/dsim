@@ -1,7 +1,7 @@
 import type { Artifact, RobotState } from '../types';
 import * as C from '../config';
 import { footprintExtents } from '../sim/field';
-import { turretWorldPos } from '../sim/robot';
+import { turretWorldPos, wheelLocals } from '../sim/robot';
 import { rot } from '../math';
 import { accentFill, clampCosmetics } from '../cosmetics';
 
@@ -422,16 +422,8 @@ export function drawRobot(
  * pods steer to `moduleAngles`, X-drive omnis sit at ±45° (an X).
  */
 export function drawWheels(ctx: CanvasRenderingContext2D, r: RobotState, color: string, accent: string): void {
-  const hl = r.spec.length / 2;
-  const hw = r.spec.width / 2;
-  const wx = Math.max(hl - C.WHEEL_INSET, 1);
-  const wy = Math.max(hw - C.WHEEL_INSET, 1);
-  const corners = [
-    [wx, wy],
-    [wx, -wy],
-    [-wx, wy],
-    [-wx, -wy],
-  ] as const;
+  // [FL, FR, BL, BR] — `wheelLocals`, the list the sim steers `moduleAngles` against
+  const corners = wheelLocals(r.spec).map((w) => [w.x, w.y] as const);
   // the tyre's own fill DEFAULTS to the cosmetic accent (closure over `accent`); a call site
   // only overrides it for a non-tyre part (the swerve module housing below).
   const drawWheel = (px: number, py: number, ang: number, len = 4.4, wid = 2.2, fill = accent): void => {

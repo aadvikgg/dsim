@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Alliance, RobotSpec, RobotState, World } from '../../../types';
-import { chassisFill, COLORS, INTAKE_RAIL_T } from '../../../config';
+import { chassisFill, COLORS, INTAKE_RAIL_T, WHEEL_CORNERS } from '../../../config';
 import { accentFill, clampCosmetics } from '../../../cosmetics';
 import { starPoints } from '../../../render/drawRobot';
 import { robotsEnabled } from '../../../sim/match';
@@ -1216,28 +1216,30 @@ export function buildWheels(spec: RobotSpec, accent: string = TREAD, detail: BbW
   const dt = spec.drivetrain;
   const kind = wheelKindOf(dt);
   const part = BB_WHEEL_PARTS[kind];
+  if (dt === 'swerve') {
+    // ── ORDER MATTERS. The pods are built in `WHEEL_CORNERS` order (FL, FR, BL, BR) — the order
+    // `RobotState.moduleAngles` is in and every other renderer and the sim read it in. Two orders
+    // would put a pod's steer on the wrong corner, which is invisible driving straight and
+    // obvious in a spin.
+    //
+    // ⚠️ A POD DOES NOT LIVE IN THE WHEEL CHANNEL. It is inset `BB_POD_INSET` from BOTH
+    // frame faces, which is the only placement that keeps every corner of a SLEWING box
+    // inside the frame; `wheelY` (the channel between the two side plates) measured +0.88 in
+    // outside it at 45° of steer. `buildFrame` drops the inner side plate for swerve to make
+    // room, because a chassis on pods has no wheel channel to draw.
+    for (const [sx, sy] of WHEEL_CORNERS) {
+      const pod = buildSwervePod(accent, detail);
+      pod.name = `robot:pod:${out.pods.length}`;
+      pod.position.set(sx * (hl - BB_POD_INSET), sy * (hw - BB_POD_INSET), 0);
+      out.nodes.push(pod);
+      out.pods.push(pod);
+      const podWheel = pod.getObjectByName('bb-pod-wheel');
+      if (podWheel) out.spin.push({ node: podWheel, r: BB_POD_WHEEL_R });
+    }
+    return out;
+  }
   for (const x of axleXs(spec)) {
     for (const sy of [1, -1] as const) {
-      if (dt === 'swerve') {
-        // ── ORDER MATTERS. `axleXs` yields [+x, −x] and the inner loop [+y, −y], so the pods
-        // come out FL, FR, BL, BR — the corner order `RobotState.moduleAngles` is documented in
-        // and the order `drawWheels` reads it in. Two orders would put a pod's steer on the
-        // diagonally opposite corner, which is invisible driving straight and obvious in a spin.
-        //
-        // ⚠️ A POD DOES NOT LIVE IN THE WHEEL CHANNEL. It is inset `BB_POD_INSET` from BOTH
-        // frame faces, which is the only placement that keeps every corner of a SLEWING box
-        // inside the frame; `wheelY` (the channel between the two side plates) measured +0.88 in
-        // outside it at 45° of steer. `buildFrame` drops the inner side plate for swerve to make
-        // room, because a chassis on pods has no wheel channel to draw.
-        const pod = buildSwervePod(accent, detail);
-        pod.name = `robot:pod:${out.pods.length}`;
-        pod.position.set((Math.sign(x) || 1) * (hl - BB_POD_INSET), sy * (hw - BB_POD_INSET), 0);
-        out.nodes.push(pod);
-        out.pods.push(pod);
-        const podWheel = pod.getObjectByName('bb-pod-wheel');
-        if (podWheel) out.spin.push({ node: podWheel, r: BB_POD_WHEEL_R });
-        continue;
-      }
       /**
        * ⚠️ HANDEDNESS. `x * sy >= 0` is the MAIN diagonal — front-left and rear-right — and it is
        * the same expression the 2D sprite hatches its mecanum rollers by and the same one the

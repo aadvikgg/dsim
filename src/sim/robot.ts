@@ -233,12 +233,9 @@ export function updateRobot(
     const cw = targetOmega;
     const hx = Math.max(r.spec.length / 2 - C.WHEEL_INSET, 1);
     const hy = Math.max(r.spec.width / 2 - C.WHEEL_INSET, 1);
-    const pos: [number, number][] = [
-      [hx, hy],
-      [hx, -hy],
-      [-hx, hy],
-      [-hx, -hy],
-    ]; // FL, FR, BL, BR — matches drawRobot's wheel order
+    // pod i sits at wheel i — `WHEEL_CORNERS` order, the same list the traction loop and every
+    // renderer read
+    const pos = wheelLocals(r.spec);
     const maxStep = C.MODULE_SLEW_RATE * dt;
     const speedFrac = clamp(hyp(r.vel.x, r.vel.y) / dp.maxSpeed, 0, 1);
     let sumX = 0;
@@ -246,8 +243,8 @@ export function updateRobot(
     let sumT = 0;
     for (let i = 0; i < 4; i++) {
       // inverse kinematics: this module's desired velocity vector
-      const dvx = cvx - cw * pos[i][1];
-      const dvy = cvy + cw * pos[i][0];
+      const dvx = cvx - cw * pos[i].y;
+      const dvy = cvy + cw * pos[i].x;
       const spd = hyp(dvx, dvy);
       let driveSpd = 0;
       if (spd > 0.02 * dp.maxSpeed) {
@@ -293,7 +290,7 @@ export function updateRobot(
       const fy = driveSpd * dsin(r.moduleAngles[i]);
       sumX += fx;
       sumY += fy;
-      sumT += pos[i][0] * fy - pos[i][1] * fx; // moment about center
+      sumT += pos[i].x * fy - pos[i].y * fx; // moment about center
     }
     // forward kinematics of the four modules → the ACHIEVED chassis motion (equals
     // the command when perfect; the pod errors make it drift + yaw)
@@ -476,7 +473,10 @@ export function updateRobot(
   const slipW = r.slipW ?? 0;
   const sl = rot({ x: r.slipX ?? 0, y: r.slipY ?? 0 }, -r.heading);
   if (sl.x !== 0 || sl.y !== 0 || slipW !== 0) {
-    for (let i = 0; i < wheels.length; i++) {
+    // round the PERIMETER (`WHEEL_PERIMETER`): the order these forces have always been summed in,
+    // so every drivetrain without pods steps bit-identically across the SIM_VERSION 5 fix. `i`
+    // is still the `WHEEL_CORNERS` index, so wheel i reads pod i.
+    for (const i of C.WHEEL_PERIMETER) {
       const wl = wheels[i];
       // how fast THIS wheel is being dragged across itself, rotation included
       const sx = sl.x - slipW * wl.y;
@@ -538,6 +538,18 @@ export function updateRobot(
 }
 
 /**
+ * The four wheel ground-contact points in the ROBOT frame, in `WHEEL_CORNERS` order (FL, FR, BL,
+ * BR) — so `wheelLocals(spec)[i]` is where `moduleAngles[i]` steers. The swerve IK/FK, the
+ * traction loop and the canvas sprites all read it. `wheelContacts` puts the same points in world
+ * space, walked in `WHEEL_PERIMETER` order.
+ */
+export function wheelLocals(spec: RobotSpec): { x: number; y: number }[] {
+  const ix = Math.max(spec.length / 2 - C.WHEEL_INSET, 1);
+  const iy = Math.max(spec.width / 2 - C.WHEEL_INSET, 1);
+  return C.WHEEL_CORNERS.map(([sx, sy]) => ({ x: sx * ix, y: sy * iy }));
+}
+
+/**
  * The chassis's angular inertia about its own centre, for `m` = `shoveMass`.
  *
  * A rectangle's `m(L² + W²)/12`, over the CHASSIS rather than the footprint, and about the
@@ -546,22 +558,6 @@ export function updateRobot(
  * model's `maxTurn` (derived from the half-diagonal about that centre) stays the free-space
  * answer. `solveRobots` states the same mass properties on the body.
  */
-/**
- * The four wheel ground-contact points in the ROBOT frame — the same layout `wheelContacts`
- * puts in world space for BASE parking, kept here as locals because the traction model needs
- * the moment arms rather than the world positions. FL/FR/BR/BL, matching `moduleAngles`.
- */
-export function wheelLocals(spec: RobotSpec): { x: number; y: number }[] {
-  const ix = Math.max(spec.length / 2 - C.WHEEL_INSET, 1);
-  const iy = Math.max(spec.width / 2 - C.WHEEL_INSET, 1);
-  return [
-    { x: ix, y: iy },
-    { x: ix, y: -iy },
-    { x: -ix, y: -iy },
-    { x: -ix, y: iy },
-  ];
-}
-
 export function chassisInertia(m: number, spec: RobotSpec): number {
   return (m * (spec.length * spec.length + spec.width * spec.width)) / 12;
 }

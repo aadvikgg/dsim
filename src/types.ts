@@ -489,7 +489,7 @@ export interface RobotState {
   bbTurret2YawVel?: number;
   bbTurret2PitchVel?: number;
   /** SWERVE per-module steer angles (robot frame, rad), one per wheel in the
-   * corner order [FL, FR, BL, BR] (matching drawRobot's wheels). Each module has
+   * corner order [FL, FR, BL, BR] — `WHEEL_CORNERS`, so pod i is `wheelLocals(spec)[i]`. Each module has
    * its OWN imperfect steering loop, so their small INDEPENDENT angle errors don't
    * cancel — producing the real drift + yaw wobble when driving straight. The net
    * chassis motion is the forward-kinematics of the four modules. Unused by other
