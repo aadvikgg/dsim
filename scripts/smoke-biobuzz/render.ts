@@ -406,6 +406,7 @@ import { buildBiobuzzRobots, updateBiobuzzRobots } from '../../src/games/biobuzz
 import {
   IMPORTED_MESH_TEMPLATE_CAP,
   importedMeshKey,
+  importedMeshesSettled,
   importedMeshSlots,
   installImportedMeshForTests,
   onImportedMeshChange,
@@ -499,6 +500,29 @@ async function importedMeshProbe(): Promise<{ keys: string[]; told: number; spec
   return { keys, told, spec };
 }
 const IMPORT_PROBE = await importedMeshProbe();
+
+/**
+ * `importedMeshesSettled` — what the replay export awaits before its first frame (it draws every
+ * frame in one synchronous burst, so a parse in flight would leave the file on the placeholder).
+ * Read at module load for the same reason as the probe above: the await is the thing tested.
+ */
+async function importedSettleProbe(): Promise<{ afterMesh: string; afterNone: string; immediate: boolean }> {
+  const mk = (id: string): RobotSpec =>
+    coerceSpec({ ...BB_DEFAULT_SPEC, imported: { v: 1, id, hull: IMPORT_FIXTURE_HULL, heightIn: IMPORT_FIXTURE_HEIGHT } }, BB_DEFAULT_SPEC, 'biobuzz');
+  const withMesh = mk('1a2b3c4d5e6f7a8c');
+  const without = mk('1a2b3c4d5e6f7a8d');
+  registerImportedAssets('1a2b3c4d5e6f7a8c', { mesh: new Blob([buildBoxesGlb(IMPORT_FIXTURE_BOXES)], { type: 'model/gltf-binary' }) });
+  // NO earlier ask: the settle call itself must start the loads
+  await importedMeshesSettled([withMesh, without, BB_DEFAULT_SPEC]);
+  const afterMesh = importedMeshKey(withMesh);
+  const afterNone = importedMeshKey(without);
+  // a settled slot answers at once
+  let immediate = false;
+  void importedMeshesSettled([withMesh]).then(() => (immediate = true));
+  await new Promise<void>((r) => setTimeout(r, 0)); // one turn: no load, no parse
+  return { afterMesh, afterNone, immediate };
+}
+const IMPORT_SETTLE = await importedSettleProbe();
 
 function walkTs(dir: string): string[] {
   const out: string[] = [];
@@ -1818,6 +1842,11 @@ function importedRobotChecks(check: Check): void {
     const a = mk('a0a0a0a0a0a0a0a0', turretTube);
     const imp = a.imported!;
     check('imported 3D: the mesh half of the key is EMPTY for a standard robot', importedMeshKey(BB_DEFAULT_SPEC) === '');
+    check(
+      'imported 3D: importedMeshesSettled (the replay export’s wait) starts the loads itself and resolves only once the mesh is PARSED, or known absent; a settled one answers at once',
+      IMPORT_SETTLE.afterMesh.endsWith(':mesh') && IMPORT_SETTLE.afterNone.endsWith(':hull') && IMPORT_SETTLE.immediate,
+      JSON.stringify(IMPORT_SETTLE),
+    );
     check('imported 3D: an import without a mesh keys as the placeholder', importedMeshKey(a).endsWith(':hull'), importedMeshKey(a));
     const g = buildRobotGroup(a, 1, 'red', 'high');
     g.updateMatrixWorld(true);

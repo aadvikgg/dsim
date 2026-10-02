@@ -229,7 +229,8 @@ stays the flat 1".
 **G04**: a robot must begin completely in the Lab Area (tile floor OR already ascended on a
 corner Ring Stand). `CHAIN_START_POSES` are four named anchors — LAB·TOP, LAB·BOTTOM, RING
 STAND·TOP, RING STAND·BOTTOM — CANONICAL for BLUE and x-MIRRORED for RED (`chainStartPose`).
-The anchors are all legal by construction. Starting on a stand ARMS the auto-descent award
+The anchors are legal by construction for a standard chassis (an import's are fitted, see
+"AN IMPORTED ROBOT'S START" below). Starting on a stand ARMS the auto-descent award
 (`descentArmed`).
 
 **FREE PLACEMENT — `src/ui/ChainStartEditor.tsx`** (the CR twin of DECODE's
@@ -256,6 +257,28 @@ seam:
   ready-up / start gate for BOTH games (DECODE G304 via `activeStartLegal`, CR G04 via
   `chainStartLegal`). CR used to be waved through as "legal by construction" — free placement
   ended that.
+
+**AN IMPORTED ROBOT'S START** (integration review 2026-10-02). Its origin is the wheelbase centre,
+so its hull's box is OFF-CENTRE, and up to 18 in:
+- `chainStartExtents` returns the box's half-extents AND its centre offset (`ox`, `oy`; 0 for a
+  standard robot), and every rule (`chainStartLegal`, `chainSnapStart`, `chainEvalStart`) is
+  written against the box centre `pos + o`, never the origin. Half-extents "about the origin"
+  started a long nose 3 in outside the Lab, a long tail 3 in into the ring stand, and found no
+  legal pose at all for an 18-in hull 3 in off-centre.
+- ⚠️ **RED IS JUDGED ON ITS HULL FLIPPED LEFT FOR RIGHT.** Poses are canonical (blue) and red's is
+  the x-REFLECTION; a reflection is not a rotation, so red's real footprint is the reflected
+  canonical footprint of the y-flipped hull. Every start function takes the alliance (default
+  blue, which is all a standard robot ever needs) and `CHAIN_SIM.startLegal` passes it.
+- The anchors are fitted to the hull (`chainFitAnchor`, called by the spawn AND the editor, so the
+  robot starts where it is drawn). A STAND anchor stays one: if the fit at the anchor's heading
+  leaves ascend range, the quarter turns are tried for a legal fit still at the stand.
+- An 18 × 18 hull has no room for the 0.5-in margin (the reason the builder caps at 17): it is
+  never `chainStartLegal`, and the snap seats it FLUSH against the post rather than in it.
+- The editor draws the tested box where the rule puts it plus the hull inside it; a centred
+  `length × width` rectangle was neither. The heading handle sits past the hull's front
+  (`startHandleReach`), and the preview key carries the import.
+- A beam holds a no-clearance import at the hull's extent TOWARD the beam (`rotatedPolyBounds`
+  by side), not `max(half, front, rear)`, which teleported a short-tailed hull 6.4 in.
 
 **CR roles are TOP / BOTTOM** (which Lab corner), NOT DECODE's CLOSE / FAR. The shared
 `StartCat` slots carry them (close = TOP y≥0, far = BOTTOM y<0) via `chainAnchorCat` /

@@ -14,6 +14,7 @@ touching `src/robotImport/**`.
 | `geometry.ts` | `src/types` | main-safe, DOM-free |
 | `shareFile.ts` | nothing | main-safe, no three |
 | `library.ts` | `storageKeys`, IndexedDB `decodesim.robots` | main-safe, no three |
+| `libraryIds.ts` | types only | main-safe (the robot page and the lobby read it) |
 | `engineLoader.ts` | one dynamic `import()` | main-safe |
 | `engine/**` | three.js, loaders, meshopt, occt | **lazy**: `engine/importerEngine.ts` is the one entry |
 
@@ -185,7 +186,25 @@ The picture and mesh live on the owner's device, so a custom or LAN room relays 
 - **`meshLite`** is cached on the library record (`LibraryRobot.meshLite`, `meshLiteFor`, `putMeshLite`; the file key `<id>:meshLite`). `putRobot` drops it unless the save carries one, because the mesh it was cut from may have changed; `deleteRobot` removes it; `getRobot` returns it when present. It is never required.
 - **A viewer sees what the owner's device would**: the relayed blobs are lent to the renderers' registry, which prefers a lent blob over the library, and are taken back when the room is left or the viewer turns "Show other players’ imported robots" off. A lent blob carries its LENDER (`registerImportedAssets(id, assets, lender)`): `''` is this device (the editor's draft) and always wins; `relay:<owner>` is a room's, and never replaces another lender's look for that id.
 - **The relayed mesh must be what the exporter writes and nothing more.** The relay's GLB check (`validateMeshGlb`) is an allowlist sized to `exportGlbStored`'s output: no glTF extensions, no images or textures, only POSITION/NORMAL/TANGENT/COLOR_0/TEXCOORD_0-1 attributes, nodes with a mesh, children and a transform. If the bake ever writes something new (a material extension, quantised attributes), add it to `VISUAL_GLB_EXTENSIONS` or the key lists WITH a check of its fields, or every relayed mesh is refused and viewers see outlines.
-- **Robot ids are unique within a room.** A seat may not hold an id another seat holds (`IMPORT_ID_TAKEN`). An import of a SHARE FILE should therefore mint a new id (`duplicateRobot` does), or two teammates who loaded the same file cannot sit in one room until one duplicates it.
+- **A host that draws frames in one burst must wait for them.** The pictures and meshes load
+  lazily (a draw asks, a later task delivers), which a live view never notices and the replay
+  export did: it draws every frame before the browser gets a turn, so a file made from a viewer
+  that had not shown the import yet opened on its silhouette. The export awaits
+  `importedTopsSettled` (2D) or the scene's `assetsSettled` (3D, `importedMeshesSettled`),
+  raced against `IMPORT_ASSET_WAIT_MS`, before frame 0.
+- **Robot ids are unique within a room.** A seat may not hold an id another seat holds (`IMPORT_ID_TAKEN`). An import of a SHARE FILE should therefore mint a new id (`duplicateRobot` does), or two teammates who loaded the same file cannot sit in one room until one duplicates it. The one exception is the account's own active robot arriving on a second device (next section): one player holds one seat.
+
+## The active robot across devices (`libraryIds.ts`)
+
+The ACCOUNT syncs the active robot's SPEC (`settings.spec.imported`: id, hull, mechanisms) and never its model; the mesh and pictures live in each DEVICE's library under `ImportedRobot.id`. So device B receives device A's robot as a spec its library cannot answer for ("Model not on this device"), and B's fix is to import the share file A exported. The rule, all of it in `src/robotImport/libraryIds.ts` (types only, main-safe):
+
+1. **A record answers for an id** when it has that id, or failing that, when it was added from a share file that carried it (`sharedFrom`): `libraryEntryFor`. Everything that turns `spec.imported.id` into a library record reads it: the robot page (`Menu.tsx`), the lobby's picker, the library actions (`useImportedActions` takes the list), and the library's own `topFor`/`meshFor`/`meshLiteFor`/`putMeshLite` (`answeringId`), which is what the renderers and the room relay ask.
+2. **A share file whose robot IS the account's active robot keeps the active id** (`planShareAdd` → `adopt`). "Is" means the same descriptor whatever its id (`sameImportedRobot`), not the same file id: a teammate's copy of a file has its own id, and their second device must adopt THEIR id, which the file does not carry. The record's spec is the account's active spec (the file brings the model), so the add changes nothing that syncs. An older copy of it here under another id is retired.
+3. **Any other share file gets a fresh id per device**, or the replace / keep-both question when this device already has the file's robot. Unchanged since 6035eca6.
+
+⚠️ **Never let an add, an edit or a pick on one device change the active id behind the player's back.** Before this rule a share-file add always minted an id and made it active; the new id synced, A's own robot became "not on this device", re-importing on A moved it back, and the id ping-ponged between the devices. Smoke plays the two devices out (`imports/library ids`).
+
+Known edges, not handled: editing on one device changes the synced descriptor while the other device keeps the older model (it draws the old mesh on the new hull until re-shared); a copy saved under its own id BEFORE this rule is found by rule 1, but editing it saves under its own id, which then becomes active; and an OLDER CLIENT (no import code: main, and alpha until this branch merges) drops `spec.imported`, `lastStandardSpec` and imported loadouts on any settings save, because `coerceSettings` there rebuilds the spec field by field and `/api/user/settings` stores the blob verbatim. See HANDOFF for the proposed server-side mitigation.
 
 ## The importer UI (`src/robotImport/ui/`)
 

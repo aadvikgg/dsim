@@ -2102,6 +2102,18 @@ positions.
   `groundRoll3d`, so a POLLEN that lands on an import's top rolls off. The FULL predictor gives the
   LOCAL import the authority's compound and a REMOTE one the uncarved bands; the PERF lane holds a
   heavy import (16-vertex hull, three bands, side sweepers) to the standard budgets.
+- **The LIGHT predictor** clamps an import to the walls by its hull turned to the heading and
+  separates any pair with an import by `polySatGap` on the two footprint polygons. `robotExtents`
+  is a box with a SYMMETRIC flank, so an asymmetric import was drawn 5 in off a wall it was
+  pressed to (and 5.5 in off a robot), corrected on every snapshot. The IMPORT lane holds its
+  error to a standard robot's.
+- **G402's depth** (`bbIntrusion`) for an import is the deepest vertex of its FRAME — the hull
+  behind the mouths, `bbImportSolids().chassis`, the import's twin of the standard chassis box
+  without the sweeper — along the line normal. The centred `length/2 × width/2` box billed a hull
+  wholly on its own half (a 6-in tail read 2.5 in across) and let a long flank cross unseen.
+- **The Zenith robot file** writes the hull's box with the centre of rotation where the origin sits
+  in it (both axes), and the mouths `bbImportMouths` resolves (placed span, roller line), not the
+  whole edge of a symmetric box.
 
 **THE CHASSIS GOES TO 18 × 18** (owner, 2026-09-24: "why is max width/length 17 not 18?").
 `BB_MAX_LENGTH`/`BB_MAX_WIDTH` are `ROBOT_MAX_SIZE` (R102's cube); the 17 was a "working inch"

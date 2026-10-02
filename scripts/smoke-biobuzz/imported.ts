@@ -11,6 +11,9 @@ import { hiveCellTarget } from '../../src/games/biobuzz/elements';
 import { BB_PLACE_REACH, BB_POLLEN_R, bbLiftPlaceLocal, PREDICT_FULL_BUDGET_MS } from '../../src/games/biobuzz/config';
 import { polyFeature } from '../../src/sim/imported';
 import { BB_G402_CROSS_IN, bbIntrusion } from '../../src/games/biobuzz/penalties';
+import { bbImportMouths } from '../../src/games/biobuzz/importMech';
+import { biobuzzZenithRobot } from '../../src/games/biobuzz/auto';
+import { robotSchema } from '@horizon36596/zenith-schema';
 import { SIM_DT } from '../../src/config';
 import { rot } from '../../src/math';
 import type { ImportedRobot, RobotSpec, RobotState, Vec2, World } from '../../src/types';
@@ -181,6 +184,38 @@ export function importedChecks(check: Check): void {
       'import 3D LIGHT: ...and strafed into a parked robot it is separated by its hull, within a standard robot’s error',
       pushImp <= pushStd + 0.05 && pushImp < 1,
       `worst error import ${pushImp.toFixed(2)} in, standard ${pushStd.toFixed(2)} in`,
+    );
+  }
+
+  // ---- the Zenith robot file: an import's hull box where it is, and its PLACED mouths ----------
+  // (integration review 2026-10-02, finding 8). It wrote the hull's box with a symmetric flank
+  // and the origin in its middle, and a mouth across the whole edge of that box.
+  {
+    const ASYM: ImportedRobot = {
+      v: 1,
+      id: 'b4b4b4b4b4b4b4b4',
+      hull: [{ x: -8, y: -4 }, { x: 8, y: -4 }, { x: 8, y: 9 }, { x: -8, y: 9 }],
+      heightIn: 14,
+      mech: { intakes: [{ edge: 'front', from: -3, to: 5 }] },
+    };
+    const sp = imported({ imported: ASYM });
+    const file = biobuzzZenithRobot(sp) as {
+      footprint: { startIn: { lengthIn: number; widthIn: number }; centreOfRotationIn: { xIn: number; yIn: number } };
+      mouths: { side: string; offsetIn: { xIn: number; yIn: number }; widthIn: number; depthIn: number }[];
+    };
+    const parsed = robotSchema.safeParse(file);
+    const m = bbImportMouths(sp)[0];
+    const fm = file.mouths[0];
+    check(
+      'import: the Zenith robot file is the HULL’s box with the origin where it sits in it (16 × 13, the wheelbase 2.5 in off the middle), and it parses',
+      parsed.success && file.footprint.startIn.lengthIn === 16 && file.footprint.startIn.widthIn === 13 && file.footprint.centreOfRotationIn.xIn === 0 && file.footprint.centreOfRotationIn.yIn === -2.5,
+      JSON.stringify({ box: file.footprint.startIn, cor: file.footprint.centreOfRotationIn, ok: parsed.success }),
+    );
+    check(
+      'import: ...and its mouth is the PLACED one: on the placed span’s centre, its width, just inside the roller line',
+      file.mouths.length === 1 && fm.side === 'FRONT' && Math.abs(fm.offsetIn.yIn - m.vc) < 1e-4 && Math.abs(fm.widthIn - 2 * m.half) < 1e-4 &&
+        Math.abs(fm.offsetIn.xIn + fm.depthIn / 2 - m.uOut) < 1e-4 && m.vc !== 0,
+      JSON.stringify({ mouth: fm, vc: m.vc, half: m.half, uOut: m.uOut }),
     );
   }
 

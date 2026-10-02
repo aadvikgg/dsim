@@ -29,6 +29,7 @@ import { Marquee } from './Marquee';
 import { OptRow, ToggleRow } from './OptRow';
 import { BuiltinMechRows } from './builderMechs';
 import { useLibrary } from '../robotImport/ui/useLibrary';
+import { libraryEntryFor } from '../robotImport/libraryIds';
 import { ImportedPanel, ImportedRow, useImportedActions, useRobotNotice } from '../robotImport/ui/ImportedRobots';
 import { FootprintSvg } from './FootprintSvg';
 import { polyBounds as importBox } from '../sim/imported';
@@ -423,11 +424,13 @@ export function Menu({ settings, onChange, onImport }: Props) {
   // ---- IMPORTED ROBOTS (the CAD importer, `src/robotImport/`): this device's library for this
   // game, the actions on it, and the one-line notice the importer leaves after a save ----
   const library = useLibrary(settings.game);
-  const importActions = useImportedActions({ settings, applySpec });
+  const importActions = useImportedActions({ settings, applySpec, entries: library.entries });
   const notice = useRobotNotice();
   const importedId = spec.imported?.id ?? null;
-  const importedEntry = importedId ? (library.entries?.find((e) => e.id === importedId) ?? null) : null;
-  const importedThumb = importedId ? library.thumbs[importedId] : undefined;
+  // the record that answers for the active robot HERE: its own id, or a copy added from a share
+  // file that carried it (the account syncs the spec, not the model — `libraryIds.ts`)
+  const importedEntry = libraryEntryFor(library.entries, importedId);
+  const importedThumb = importedEntry ? library.thumbs[importedEntry.id] : undefined;
   // the shooter-specific build controls (intake preset, flywheel inertia, color
   // sorter) are DECODE concepts — hidden for the Chain Reaction shell, whose real
   // intakes/config arrive with its rules. The shared chassis controls
@@ -647,7 +650,7 @@ export function Menu({ settings, onChange, onImport }: Props) {
                 the "Import a robot" card alone. */}
             <ImportedRow
               view={library}
-              activeId={importedId}
+              activeId={importedEntry?.id ?? importedId}
               onPick={(e) => applySpec({ ...e.spec })}
               onDelete={importActions.requestDelete}
               onImport={() => onImport?.()}

@@ -34,6 +34,8 @@ import type { RobotSpec, RobotState, World } from '../../../types';
 import { bbFootprint, bbHopperCap, bbRampSwingProgress } from '../robot';
 import { bbIntakeKindOf } from '../mechs';
 import { BB_HALF_X, BB_HALF_Y, BB_RAMP_DEPLOY_S, BB_START_POSES } from '../config';
+import { bbImportMouths } from '../importMech';
+import { polyBounds } from '../../../sim/imported';
 
 /** `Constants.AutoConstants.SHOT_SETTLE_MS` on the robot: the wait after the last launch. */
 const SHOT_SETTLE_S = 0.25;
@@ -105,8 +107,29 @@ export function biobuzzZenithRobot(spec: RobotSpec): unknown {
       provenance: SIM(`intake mount "${mountRaw}", the mouth inside the intake's outer edge`),
     };
   };
-  const mouths =
-    mountRaw === 'frontback'
+  const r4 = (v: number): number => Math.round(v * 1e4) / 1e4;
+  /**
+   * AN IMPORTED ROBOT: the footprint is its HULL's box, where it is (the origin, which is where
+   * DSIM turns, is the wheelbase centre and need not be the box's middle on either axis), and the
+   * mouths are the ones the sim resolves on the hull (`bbImportMouths`: the placed span, off-centre
+   * when it was placed so, out to where the hull ends) rather than the whole edge of a symmetric box.
+   */
+  const imp = spec.imported;
+  const hb = imp ? polyBounds(imp.hull) : null;
+  const mouths = imp
+    ? bbImportMouths(spec).map((m) => {
+        const u = m.uOut - mouthDepth / 2;
+        const side = m.edge === 'front' ? 'FRONT' : m.edge === 'back' ? 'BACK' : m.edge === 'left' ? 'LEFT' : 'RIGHT';
+        return {
+          id: m.edge,
+          side,
+          offsetIn: { xIn: r4(m.n.x * u + m.p.x * m.vc), yIn: r4(m.n.y * u + m.p.y * m.vc) },
+          widthIn: r4(Math.max(1, 2 * m.half)),
+          depthIn: mouthDepth,
+          provenance: SIM(`imported robot: the intake placed on the CAD (mount "${mountRaw}"), the mouth inside its roller line`),
+        };
+      })
+    : mountRaw === 'frontback'
       ? [mouth('front', 'FRONT'), mouth('back', 'BACK')]
       : mountRaw === 'back'
         ? [mouth('back', 'BACK')]
@@ -114,11 +137,16 @@ export function biobuzzZenithRobot(spec: RobotSpec): unknown {
           ? [mouth('left', 'LEFT')]
           : [mouth('front', 'FRONT')];
   const pedro = 'CARRIED OVER: Horizon-36596/biobuzz Constants.DriveConstants (MEASURED 2026-08-30 on the robot), used unchanged on DSIM';
-  const box = {
-    lengthIn: Math.round((fp.front + fp.rear) * 1e4) / 1e4,
-    widthIn: Math.round(2 * fp.half * 1e4) / 1e4,
-    provenance: SIM('chassis plus intake reach (bbFootprint)'),
-  };
+  const box = hb
+    ? { lengthIn: r4(hb.maxX - hb.minX), widthIn: r4(hb.maxY - hb.minY), provenance: SIM('imported robot: the bounding box of its CAD footprint hull') }
+    : {
+        lengthIn: Math.round((fp.front + fp.rear) * 1e4) / 1e4,
+        widthIn: Math.round(2 * fp.half * 1e4) / 1e4,
+        provenance: SIM('chassis plus intake reach (bbFootprint)'),
+      };
+  const rotation = hb
+    ? { xIn: r4(-(hb.maxX + hb.minX) / 2), yIn: r4(-(hb.maxY + hb.minY) / 2), provenance: SIM('imported robot: its wheelbase centre inside the hull box') }
+    : { xIn: Math.round(((fp.rear - fp.front) / 2) * 1e4) / 1e4, yIn: 0, provenance: SIM('chassis centre inside the footprint') };
   return {
     formatVersion: 1,
     name: spec.name?.trim() ? spec.name.trim().slice(0, 60) : 'DSIM robot',
@@ -126,8 +154,9 @@ export function biobuzzZenithRobot(spec: RobotSpec): unknown {
     footprint: {
       startIn: box,
       expandedIn: box,
-      // the chassis centre, which is where DSIM turns, sits (rear - front) / 2 along the box
-      centreOfRotationIn: { xIn: Math.round(((fp.rear - fp.front) / 2) * 1e4) / 1e4, yIn: 0, provenance: SIM('chassis centre inside the footprint') },
+      // the chassis centre, which is where DSIM turns, sits (rear - front) / 2 along the box (an
+      // import's origin is wherever its wheelbase centre is inside the hull's box)
+      centreOfRotationIn: rotation,
     },
     kinematics: {
       maxForwardVelInPerS: valued(dp.maxSpeed, SIM('top speed (driveParams.maxSpeed)')),

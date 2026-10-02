@@ -1,7 +1,9 @@
 import type { Alliance, RobotState, World } from '../../types';
 import type { TutorialSpec, TutorialStep } from '../../tutorial/types';
 import { control, driveHint, say } from '../../tutorial/hints';
-import { baseZone, driverSide } from '../../sim/field';
+import { baseZone, driverSide, footprintExtents } from '../../sim/field';
+import { decodeImportMouth } from '../../sim/importedMech';
+import { BALL_RADIUS } from '../../config';
 import { robotInLaunchZone } from '../../sim/robot';
 import { wheelContacts } from '../../sim/physics';
 
@@ -64,15 +66,16 @@ function place(world: World, robotId: number, x: number, y: number, heading: num
  * reason BIOBUZZ's staging says so: the ball array is what a conservation check counts, and a
  * tutorial that made an artifact disappear would be the only thing in the repo that does.
  */
-function dropOneAhead(world: World, r: RobotState, ahead: number): void {
+function dropOneAhead(world: World, r: RobotState, ahead: number, lateral = 0): void {
   const ball = [...world.balls]
     .reverse()
     .find((b) => b.state.kind === 'held' && b.state.robot === r.id);
   if (!ball) return;
   ball.state = { kind: 'ground' };
   // straight out of the mouth, in the robot's own frame. `dcos`/`dsin` are not needed: the pose
-  // this is called from faces +y in the blue frame, so the offset is along y and mirrors with it.
-  ball.pos = { x: r.pos.x, y: r.pos.y + ahead };
+  // this is called from faces +y in the blue frame, so the offset is along y and mirrors with it,
+  // and the robot's LEFT (`lateral`, an import's mouth centre) is −x.
+  ball.pos = { x: r.pos.x - lateral, y: r.pos.y + ahead };
   ball.z = 0;
   ball.vel = { x: 0, y: 0 };
   ball.vz = 0;
@@ -112,7 +115,9 @@ const steps: TutorialStep[] = [
     stage: (w, id) => {
       place(w, id, 34, -22, Math.PI / 2);
       const r = me(w, id);
-      if (r) dropOneAhead(w, r, 14);
+      // 14 in clears every standard chassis; an IMPORT's front is its hull's, up to 18 in long and
+      // off-centre, so it is dropped a radius and 2 in past that, in line with its mouth
+      if (r) dropOneAhead(w, r, r.spec.imported ? footprintExtents(r.spec).front + BALL_RADIUS + 2 : 14, r.spec.imported ? decodeImportMouth(r.spec).yc : 0);
     },
     done: (w, id) => {
       const r = me(w, id);

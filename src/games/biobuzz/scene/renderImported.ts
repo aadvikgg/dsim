@@ -55,6 +55,8 @@ interface MeshSlot {
   users: number;
   /** LRU stamp */
   used: number;
+  /** resolves when the load is over (`state` is no longer 'loading'); never rejects */
+  settled: Promise<void>;
 }
 
 /** keyed `${id}@${importedMeshVersion(id)}` */
@@ -189,13 +191,23 @@ function ensureSlot(imp: ImportedRobot): MeshSlot {
   const k = slotKey(imp.id);
   let s = slots.get(k);
   if (!s) {
-    s = { id: imp.id, state: 'loading', root: null, users: 0, used: 0 };
+    s = { id: imp.id, state: 'loading', root: null, users: 0, used: 0, settled: Promise.resolve() };
     slots.set(k, s);
-    void load(imp.id, k, s);
+    s.settled = load(imp.id, k, s);
     evict();
   }
   s.used = ++stamp;
   return s;
+}
+
+/**
+ * Resolves once every import among `specs` has its mesh SETTLED — parsed, or known not to be on
+ * this device — starting any load not yet asked for (`GameScene.assetsSettled`). The replay export
+ * draws its frames in one synchronous burst, so a parse that lands mid-export used to leave the
+ * first frames on the placeholder (integration review 2026-10-02).
+ */
+export function importedMeshesSettled(specs: readonly RobotSpec[]): Promise<void> {
+  return Promise.all(specs.map((sp) => (sp.imported ? ensureSlot(sp.imported).settled : undefined))).then(() => undefined);
 }
 
 /**
@@ -257,7 +269,7 @@ export function installImportedMeshForTests(spec: RobotSpec, scene: THREE.Object
   const k = slotKey(imp.id);
   const old = slots.get(k);
   if (old?.root) disposeTemplate(old.root);
-  slots.set(k, { id: imp.id, state: 'ready', root: prepareImportedMesh(scene), users: old?.users ?? 0, used: ++stamp });
+  slots.set(k, { id: imp.id, state: 'ready', root: prepareImportedMesh(scene), users: old?.users ?? 0, used: ++stamp, settled: Promise.resolve() });
   notify(imp.id);
 }
 
