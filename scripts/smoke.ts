@@ -32070,8 +32070,9 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
   const api = rd(joinPath('src', 'net', 'api.ts'));
   check('visuals/pins: the capability check follows the server THIS room is on (a tab host: yes; a LAN address: its own presence; else the cloud)',
     /export function roomTakesImportVisuals\(\)[\s\S]{0,200}tabHosting\(\)[\s\S]{0,200}IMPORT_VISUALS_CAP/.test(api));
-  const gfx = rd(joinPath('src', 'ui', 'GraphicsSection.tsx'));
-  check('visuals/pins: the viewer opt-out is a Graphics row (per device) with the agreed label', /label="Show other players’ imported robots"/.test(gfx) && /setShowOthersImported/.test(gfx));
+  const netSec = rd(joinPath('src', 'ui', 'NetworkSection.tsx'));
+  check('visuals/pins: the viewer opt-out is a row in Network (per device, and shown for EVERY game: Graphics is hidden for a game with no 3D view) with the agreed label',
+    /label="Show other players’ imported robots"/.test(netSec) && /setShowOthersImported/.test(netSec) && !/ShowOthersImported/.test(rd(joinPath('src', 'ui', 'GraphicsSection.tsx'))));
   const keys = rd(joinPath('src', 'storageKeys.ts'));
   check('visuals/pins: the preference’s storage key is registered with the privacy table, and the library entry says what a room receives',
     /export const IMPORT_VISUALS_KEY = 'decodesim\.importVisuals'/.test(keys) && /key: IMPORT_VISUALS_KEY,/.test(keys) && /sent to the other people in that room, kept in memory only/.test(keys));
