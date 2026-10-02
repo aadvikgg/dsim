@@ -43,6 +43,7 @@ import { botLabel } from './MatchSetup';
 import type { RoomInvite } from '../net/api';
 import { FriendsPanel, type RoomInviteTarget } from './FriendsPanel';
 import { copyText } from './copyText';
+import { useLibrary } from '../robotImport/ui/useLibrary';
 
 interface Props {
   settings: GameSettings;
@@ -296,9 +297,14 @@ export function Lobby({
    * with one line saying so. `importOk` is null while the answer is on its way.
    */
   const importedActive = isImportedSpec(settings.spec);
+  // THE IMPORTED ROBOTS on this device, offered in "Your robot" beside the saved ones when the room
+  // takes them (the importer, lane 4). The server is asked as soon as there is one to offer, not
+  // only once one is active, so the cards can be shown before anybody picks one.
+  const importLibrary = useLibrary(settings.game);
+  const hasImports = (importLibrary.entries?.length ?? 0) > 0;
   const [importOk, setImportOk] = useState<boolean | null>(null);
   useEffect(() => {
-    if (!importedActive) return;
+    if (!importedActive && !hasImports) return;
     let alive = true;
     void roomTakesImportedRobots().then((ok) => {
       if (alive) setImportOk(ok);
@@ -306,7 +312,7 @@ export function Lobby({
     return () => {
       alive = false;
     };
-  }, [importedActive]);
+  }, [importedActive, hasImports]);
   const sendImport = importedActive && !isRecord && importOk === true;
   /** the spec this client puts on the wire: the active robot, or the standard one standing in for an import */
   const wireSpec = (s: GS): RobotSpec => (isImportedSpec(s.spec) && !sendImport ? standardRobotFor(s) : s.spec);
@@ -1549,6 +1555,27 @@ export function Lobby({
                   onPick={() => pickSpec({ ...r })}
                 />
               ))}
+              {/* imported robots, where this room can play them (never a record room) */}
+              {importOk === true && !isRecord
+                ? (importLibrary.entries ?? []).map((e) => (
+                    <RobotCard
+                      key={e.id}
+                      spec={e.spec}
+                      game={settings.game}
+                      on={mySpec.imported?.id === e.id}
+                      imported
+                      team={teamLine(e.spec)}
+                      thumb={
+                        importLibrary.thumbs[e.id] ? (
+                          <span className="ds-robot-card-thumb">
+                            <img className="ds-import-thumb" src={importLibrary.thumbs[e.id]} alt="" />
+                          </span>
+                        ) : undefined
+                      }
+                      onPick={() => pickSpec({ ...e.spec })}
+                    />
+                  ))
+                : null}
               <button className="ds-opt mini" onClick={() => setBuilding(true)}>
                 <span className="ot">Edit build</span>
               </button>

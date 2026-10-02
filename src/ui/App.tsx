@@ -2254,6 +2254,7 @@ export function App() {
       {screen === 'modes' && (
         <ModeSelect
           game={settings.game}
+          importedActive={!!settings.spec.imported}
           multiplayer={multiplayer}
           signedIn={signedIn}
           activeGame={activeGame ? { kind: activeGame.kind } : null}
