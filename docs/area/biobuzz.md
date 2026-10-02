@@ -2000,8 +2000,31 @@ to feed the mass floor (`4 · flywheelInertia`), and a new BIOBUZZ spec is seede
 The turret (5) and dumper (3.5) absorbed the pound the presets' old value added, so preset
 floors did not move.
 
+**THE FIXED LAUNCHER** (`bbMech.launcher.kind === 'fixed'`, 2026-10-02) is the kit robot's: the
+turret's own head with no slew ring, bolted at an EDGE cell (`turretLocal`), facing out of it (an
+import: `mech.shooterYawDeg`), at the build's `hoodDeg` (30–80, its own clamp; the dumper keeps
+70–85), at a setpoint (`RobotSpec.flywheel`, the shared wheel in `src/sim/flywheel.ts` — see
+`docs/area/decode.md`, "Fixed shooters"). It mirrors as `scoreMode: 'dumper'` (`bbScoreModeMirror`),
+spans no edge (a Box Tube may sit on the corner beside it), carries POLLEN only, weighs
+`BB_MASS_FIXED` 3.5, and is enveloped by the turret's cylinder in 3D.
+- **Nothing is solved.** It releases from the head's own muzzle (`bbFixedLocal` reads
+  `bbMuzzleLocal` at the hood angle) at the wheel's speed NOW, carrying `bbPointVel`. Stage 5b,
+  3D stage 11 and the shot path all ask `bbFixedShotEnters`; aim assist turns the chassis
+  (`bbFixedAimHeading`, `BB_FIXED_AIM_TOL` 0.04 — tighter than a dumper's, which re-solves) and
+  releases only a shot that lands. Out of band nothing is released; with aim assist off the shot
+  leaves and misses.
+- **One setpoint in this game**: both kit robots run one, and the pad has no free button (D-DOWN is
+  unbound on purpose), so `coerceBiobuzzSpec` folds a presets wheel to its first speed.
+- **The band** (`bbFixedBand`: the fire gate's own predicate at every inch on the mouth axis,
+  capped at the wall). Kit setpoint 2679 rpm, 96 mm ⇒ 212 in/s with the shared efficiency. At the
+  APPROX hood `BB_FIXED_HOOD_DEFAULT_DEG` 77° it scores from **26–46 in** (robot centre to cell
+  centre); at 70° from 37 in to the wall; under ~2450 rpm no arc reaches the 53.4-in opening. The AI
+  stands in the band (`ai/policy.ts` `dRange`).
+
 **THE PRESETS** are the StarterBot (`presets.ts`, the one real kit robot, still alone in front of
-the rule-off) and four demos in `config.ts`. Scored head-to-head against the StarterBot with HARD
+the rule-off) and four demos in `config.ts`. ⚠️ The StarterBot is a FIXED launcher since
+2026-10-02 (it was modelled as a front dumper); its 43.0 below was measured as the dumper and has
+not been re-measured. Scored head-to-head against the StarterBot with HARD
 bots, 3D, a full 150-s match: **Sniper 70.4 · Skimmer 68.0 · Forager 63.6 · Pollinator 55.0 ·
 StarterBot 43.0.**
 

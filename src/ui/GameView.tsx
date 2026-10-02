@@ -1286,7 +1286,9 @@ function Hud({
               {hud.flywheel && (
                 <span
                   className="sub-hud-item"
-                  role="status"
+                  // `img`, not `status`: READY / SPIN UP flips on every shot, and a live region
+                  // would read each flip aloud
+                  role="img"
                   aria-label={`Flywheel ${hud.flywheel.setpoint} rpm${hud.flywheel.presets > 1 ? `, speed ${hud.flywheel.preset + 1} of ${hud.flywheel.presets}` : ''}, ${hud.flywheel.ready ? 'ready' : 'spinning up'}.`}
                 >
                   <span className="sub-hud-lbl" aria-hidden="true">
