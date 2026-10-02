@@ -39,6 +39,9 @@ export interface GameAutoLibrary {
 /** twelve autos a game: several routines per start and alliance, well inside a quota */
 export const AUTO_LIBRARY_MAX = 12;
 
+/** Why Import and New in Zenith are off: the panel's words for the refusal Zenith's Save gets. */
+export const LIBRARY_FULL = `The library is full (${AUTO_LIBRARY_MAX}). Delete an auto to add another.`;
+
 const EMPTY: GameAutoLibrary = { entries: [], activeId: null, enabled: false };
 
 type Stored = Partial<Record<GameId, GameAutoLibrary>>;

@@ -301,8 +301,8 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-opt` | src/ui/shell.css:4472 | 68 |
-| `.ds-opt-add` | src/ui/shell.css:4558 | 2 |
+| `.ds-opt` | src/ui/shell.css:4472 | 72 |
+| `.ds-opt-add` | src/ui/shell.css:4558 | 4 |
 | `.ds-opt-del` | src/ui/shell.css:4527 | 2 |
 | `.ds-opt-slot` | src/ui/shell.css:4519 | 3 |
 
@@ -442,7 +442,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-hint` | src/ui/shell.css:2131 | 184 |
+| `.ds-hint` | src/ui/shell.css:2131 | 186 |
 | `.ds-hint-caption` | src/ui/shell.css:4197 | 1 |
 
 ## `ds-homestats` — 2

@@ -592,7 +592,12 @@ export function GameView({
     const mod = c?.zenithModule();
     const name = c?.getHud().auto?.name;
     if (!c || !mod || !name) return;
-    const error = mod.launchZenith({ settings, open: name, trace: c.autoTrace() ?? undefined });
+    const error = mod.launchZenith({
+      settings,
+      open: name,
+      trace: c.autoTrace() ?? undefined,
+      onLeftOut: (sentence) => sentence && c.logEvent(sentence),
+    });
     c.logEvent(error ?? 'Zenith is open in another window with this run over the plan.');
   };
 

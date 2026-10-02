@@ -23,7 +23,17 @@ import { CLIENT_CAPS, type ServerMsg } from '../../src/net/protocol';
 import { BB_DEFAULT_SPEC } from '../../src/games/biobuzz/robotConfig';
 import { DEFAULT_ASSISTS } from '../../src/sim/spawn';
 import { defaultSettings, practiceSetups, switchGame } from '../../src/settings';
-import { autoTooLarge } from '../../src/auto/library';
+import { AUTO_LIBRARY_MAX, LIBRARY_FULL, autoTooLarge, type AutoLibraryEntry, type GameAutoLibrary } from '../../src/auto/library';
+import {
+  hostLibraryView,
+  LIBRARY_FULL_SAVE,
+  leftOutSentence,
+  planHostSave,
+  readWaypoints,
+  samePose,
+  type HostLibraryView,
+  type HostSaveState,
+} from '../../src/auto/hostLibrary';
 import { autoHudLine, autoPreNotice } from '../../src/ui/autoHud';
 import type { GameAutoStatus } from '../../src/game';
 import { BB_STARTER_BOTS } from '../../src/games/biobuzz/presets';
@@ -777,6 +787,130 @@ export function autoChecks(check: Check): void {
       'AUTO library: an auto over the byte cap is refused with a sentence, exactly where the library would drop it',
       autoTooLarge(big) !== null && coerceZenithAuto({ auto: big }) === undefined && autoTooLarge(fits) === null && coerceZenithAuto({ auto: fits }) !== undefined,
       autoTooLarge(big) ?? 'accepted',
+    );
+  }
+
+  // ── Zenith's host session: the one waypoints file, a clash, and where a save goes ──────────────
+  {
+    // `zenith-host/1` carries ONE waypoints file, so DSIM merges its library's into it. Two autos
+    // with `start` at different poses cannot share it: the one not opened is left out (and said),
+    // and a save never moves a pose an auto already had.
+    const wp = (points: Record<string, { xIn: number; yIn: number; headingRad: number; provenance?: string }>): string =>
+      JSON.stringify({ formatVersion: 1, waypoints: points });
+    const autoText = (name: string, refs: string[]): string =>
+      JSON.stringify({
+        formatVersion: 3,
+        name,
+        alliance: 'BLUE',
+        start: { pose: { ref: refs[0] } },
+        steps: refs.slice(1).map((r, i) => ({ id: `s${i}`, kind: 'path', segments: [{ kind: 'line', from: 'current', to: { ref: r } }], heading: { mode: 'tangent' } })),
+      });
+    const entry = (id: string, name: string, refs: string[], waypoints?: string): AutoLibraryEntry => ({
+      id,
+      name,
+      auto: autoText(name, refs),
+      ...(waypoints ? { waypoints } : {}),
+      source: 'zenith',
+      savedAt: 0,
+    });
+    const library = (...entries: AutoLibraryEntry[]): GameAutoLibrary => ({ entries, activeId: null, enabled: false });
+    const START = { xIn: 61.6, yIn: 45, headingRad: Math.PI };
+    const PARK = { xIn: 40, yIn: 30, headingRad: Math.PI };
+    const OTHER_START = { xIn: 34, yIn: 63.17, headingRad: -Math.PI / 2 };
+    const points = (v: HostLibraryView): Record<string, unknown> => (v.waypoints?.waypoints ?? {}) as Record<string, unknown>;
+
+    const a = entry('a', 'a-auto', ['start'], wp({ start: START }));
+    const b = entry('b', 'b-auto', ['start', 'park'], wp({ start: START, park: PARK }));
+    const plain = hostLibraryView(library(b, a), a);
+    check(
+      'AUTO host: no clash sends every auto, and the one file holds every name',
+      Object.keys(plain.autos).sort().join() === 'a-auto,b-auto' &&
+        Object.keys(points(plain)).sort().join() === 'park,start' &&
+        plain.leftOut.length === 0 &&
+        leftOutSentence(plain.leftOut) === null,
+      JSON.stringify({ autos: Object.keys(plain.autos), points: Object.keys(points(plain)) }),
+    );
+    const noted = entry('n', 'noted', ['start'], wp({ start: { ...START, provenance: 'measured on the field' } }));
+    const same = hostLibraryView(library(noted, a), a);
+    check('AUTO host: the same name at the same pose is not a clash (a note may differ)', same.leftOut.length === 0 && 'noted' in same.autos);
+
+    const c = entry('c', 'c-auto', ['start'], wp({ start: OTHER_START }));
+    const clash = hostLibraryView(library(c, b, a), a);
+    const sentence = leftOutSentence(clash.leftOut) ?? '';
+    check(
+      'AUTO host: an auto whose `start` is elsewhere is left out, and the file keeps the opened auto’s pose',
+      !('c-auto' in clash.autos) && 'b-auto' in clash.autos && samePose(points(clash).start, START) && clash.leftOut[0]?.name === 'c-auto',
+      JSON.stringify(clash.leftOut),
+    );
+    check(
+      'AUTO host: ...and one sentence says which auto, which waypoint, against which auto, and how to edit it',
+      !sentence.includes('. ') && sentence.includes('c-auto') && sentence.includes('"start"') && sentence.includes('a-auto') && sentence.includes('Edit in Zenith'),
+      sentence,
+    );
+    const fromC = hostLibraryView(library(c, b, a), c);
+    check(
+      'AUTO host: Edit in Zenith on the left-out auto makes its file the base (the clashing ones are left out instead)',
+      'c-auto' in fromC.autos && !('a-auto' in fromC.autos) && !('b-auto' in fromC.autos) && samePose(points(fromC).start, OTHER_START),
+      JSON.stringify(fromC.leftOut.map((l) => l.name)),
+    );
+
+    // SAVES. The state is what the session builds from the view it sent.
+    const fresh = (v: HostLibraryView): HostSaveState => ({ own: new Set(Object.keys(v.autos)), alias: new Map(), sent: v.waypoints });
+    const lib = library(c, b, a);
+    // b is saved now using a name only a2's file has: its own poses kept, that one name added
+    const a2 = entry('a2', 'a2-auto', ['start', 'dock'], wp({ start: START, dock: { xIn: 50, yIn: 10, headingRad: 0 } }));
+    const lib2 = library(c, b, a2);
+    const bSave = planHostSave(lib2, fresh(hostLibraryView(lib2, a2)), 'b-auto', autoText('b-auto', ['start', 'park', 'dock']));
+    const bPoints = bSave.ok ? (readWaypoints(bSave.entry.waypoints)?.waypoints ?? {}) : {};
+    check(
+      'AUTO host save: an auto keeps its own poses and gains only the names it now uses from the merged file',
+      bSave.ok && bSave.target === 'b-auto' && bSave.entry.id === 'b' && samePose(bPoints.start, START) && samePose(bPoints.park, PARK) && 'dock' in bPoints && Object.keys(bPoints).length === 3,
+      JSON.stringify(bPoints),
+    );
+    // a session that showed ANOTHER pose under b's names: the save still stores b's own file
+    const skewed: HostSaveState = {
+      own: new Set(['b-auto']),
+      alias: new Map(),
+      sent: { formatVersion: 1, waypoints: { start: { xIn: 0, yIn: 0, headingRad: 0 }, park: { xIn: 1, yIn: 1, headingRad: 0 } } },
+    };
+    const bKeep = planHostSave(lib, skewed, 'b-auto', autoText('b-auto', ['start', 'park']));
+    check(
+      'AUTO host save: a save never replaces a pose the auto already had, whatever the session showed',
+      bKeep.ok && bKeep.entry.waypoints === b.waypoints,
+      bKeep.ok ? bKeep.entry.waypoints : bKeep.error,
+    );
+    // a left-out auto's name (any name the session never sent) is never written over
+    const stA = fresh(hostLibraryView(lib, a));
+    const cSave = planHostSave(lib, stA, 'c-auto', autoText('c-auto', ['start']));
+    check(
+      'AUTO host save: a save under a left-out auto’s name goes to a free name, and the left-out auto is untouched',
+      cSave.ok && cSave.target === 'c-auto-2' && cSave.entry.id === undefined && samePose(readWaypoints(cSave.entry.waypoints)?.waypoints?.start, START),
+      cSave.ok ? `${cSave.target} ${cSave.entry.waypoints}` : cSave.error,
+    );
+    // a new auto (no own file) stores the names it uses, from the file Zenith showed it
+    const nSave = planHostSave(lib, stA, 'new-auto', autoText('new-auto', ['start', 'park']));
+    check(
+      'AUTO host save: a new auto stores the waypoints it uses, from the file Zenith drew it against',
+      nSave.ok && nSave.target === 'new-auto' && samePose(readWaypoints(nSave.entry.waypoints)?.waypoints?.start, START) && samePose(readWaypoints(nSave.entry.waypoints)?.waypoints?.park, PARK),
+      nSave.ok ? nSave.entry.waypoints : nSave.error,
+    );
+    // ...and that file is one the real loader plays
+    if (nSave.ok && adapter) {
+      const seat = createAutoSeat(BIOBUZZ_SIM.createWorld('match', 5, [setup(0, 'blue', {}, 0)], undefined, '2d'), 0, { auto: nSave.entry.auto, waypoints: nSave.entry.waypoints }, adapter);
+      check('AUTO host save: ...and the stored pair loads', seat.loaded !== null, seat.status().error);
+    }
+    const full = library(...Array.from({ length: AUTO_LIBRARY_MAX }, (_, i) => entry(`f${i}`, `full-${i}`, ['start'], wp({ start: START }))));
+    const fullState = fresh(hostLibraryView(full, full.entries[0]));
+    const refused = planHostSave(full, fullState, 'new-auto', autoText('new-auto', ['start']));
+    const edited = planHostSave(full, fullState, 'full-3', autoText('full-3', ['start']));
+    check(
+      'AUTO host save: a NEW auto into a full library is refused with the sentence; an edit of one it holds is not',
+      !refused.ok && refused.error === LIBRARY_FULL_SAVE && edited.ok && edited.entry.id === 'f3',
+      !refused.ok ? refused.error : 'stored',
+    );
+    check(
+      'AUTO library: the panel’s full-library reason and the save refusal both name the cap',
+      LIBRARY_FULL.includes(`(${AUTO_LIBRARY_MAX})`) && LIBRARY_FULL_SAVE.includes(`(${AUTO_LIBRARY_MAX})`),
     );
   }
 
