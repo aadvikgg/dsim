@@ -19,29 +19,29 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-import` | src/ui/importer.css:18 | 24 |
-| `.ds-import-body` | src/ui/importer.css:35 | 1 |
-| `.ds-import-canvas` | src/ui/importer.css:85 | 2 |
-| `.ds-import-canvas-host` | src/ui/importer.css:81 | 1 |
-| `.ds-import-checks` | src/ui/importer.css:319 | 1 |
-| `.ds-import-drop` | src/ui/importer.css:135 | 3 |
-| `.ds-import-drop-acts` | src/ui/importer.css:151 | 1 |
-| `.ds-import-filerow` | src/ui/importer.css:159 | 1 |
-| `.ds-import-foot` | src/ui/importer.css:39 | 1 |
-| `.ds-import-handle` | src/ui/importer.css:250 | 1 |
+| `.ds-import` | src/ui/importer.css:18 | 25 |
+| `.ds-import-body` | src/ui/importer.css:40 | 1 |
+| `.ds-import-canvas` | src/ui/importer.css:90 | 2 |
+| `.ds-import-canvas-host` | src/ui/importer.css:86 | 1 |
+| `.ds-import-checks` | src/ui/importer.css:324 | 1 |
+| `.ds-import-drop` | src/ui/importer.css:140 | 3 |
+| `.ds-import-drop-acts` | src/ui/importer.css:156 | 1 |
+| `.ds-import-filerow` | src/ui/importer.css:164 | 1 |
+| `.ds-import-foot` | src/ui/importer.css:44 | 1 |
+| `.ds-import-handle` | src/ui/importer.css:255 | 1 |
 | `.ds-import-hero-img` | src/ui/shell.css:4966 | 1 |
-| `.ds-import-in` | src/ui/importer.css:22 | 1 |
-| `.ds-import-map` | src/ui/importer.css:185 | 4 |
-| `.ds-import-map-front` | src/ui/importer.css:225 | 1 |
-| `.ds-import-map-status` | src/ui/importer.css:239 | 1 |
-| `.ds-import-map-wrap` | src/ui/importer.css:96 | 1 |
-| `.ds-import-preview` | src/ui/importer.css:32 | 4 |
-| `.ds-import-preview-empty` | src/ui/importer.css:91 | 1 |
-| `.ds-import-preview-stage` | src/ui/importer.css:71 | 1 |
-| `.ds-import-preview-tools` | src/ui/importer.css:99 | 1 |
-| `.ds-import-steps` | src/ui/importer.css:29 | 1 |
-| `.ds-import-thumb` | src/ui/shell.css:4961 | 1 |
-| `.ds-import-turns` | src/ui/importer.css:167 | 1 |
+| `.ds-import-in` | src/ui/importer.css:27 | 1 |
+| `.ds-import-map` | src/ui/importer.css:190 | 4 |
+| `.ds-import-map-front` | src/ui/importer.css:230 | 1 |
+| `.ds-import-map-status` | src/ui/importer.css:244 | 1 |
+| `.ds-import-map-wrap` | src/ui/importer.css:101 | 1 |
+| `.ds-import-preview` | src/ui/importer.css:37 | 4 |
+| `.ds-import-preview-empty` | src/ui/importer.css:96 | 1 |
+| `.ds-import-preview-stage` | src/ui/importer.css:76 | 1 |
+| `.ds-import-preview-tools` | src/ui/importer.css:104 | 1 |
+| `.ds-import-steps` | src/ui/importer.css:34 | 1 |
+| `.ds-import-thumb` | src/ui/shell.css:4961 | 2 |
+| `.ds-import-turns` | src/ui/importer.css:172 | 1 |
 
 ## `ds-replay` — 16
 
@@ -328,7 +328,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-opt` | src/ui/importer.css:135 | 73 |
+| `.ds-opt` | src/ui/importer.css:140 | 73 |
 | `.ds-opt-add` | src/ui/importer.css:11 | 5 |
 | `.ds-opt-del` | src/ui/shell.css:4527 | 2 |
 | `.ds-opt-slot` | src/ui/shell.css:4519 | 3 |
@@ -346,9 +346,9 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-robot` | src/ui/shell.css:1457 | 9 |
-| `.ds-robot-card` | src/ui/shell.css:4894 | 4 |
-| `.ds-robot-card-thumb` | src/ui/shell.css:4904 | 3 |
+| `.ds-robot` | src/ui/shell.css:1457 | 10 |
+| `.ds-robot-card` | src/ui/shell.css:4894 | 5 |
+| `.ds-robot-card-thumb` | src/ui/shell.css:4904 | 4 |
 | `.ds-robot-sprite` | src/ui/shell.css:4985 | 4 |
 
 ## `ds-roleswap` — 4
@@ -463,7 +463,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 | class | declared | used |
 |---|---|---|
 | `.ds-head` | src/ui/shell.css:4228 | 15 |
-| `.ds-head-spacer` | src/ui/importer.css:358 | 12 |
+| `.ds-head-spacer` | src/ui/importer.css:363 | 12 |
 
 ## `ds-hint` — 2
 
@@ -580,7 +580,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-app` | src/ui/shell.css:385 | 8 |
+| `.ds-app` | src/ui/importer.css:22 | 8 |
 
 ## `ds-autoprev` — 1
 
@@ -934,7 +934,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-tab` | src/ui/importer.css:48 | 6 |
+| `.ds-tab` | src/ui/importer.css:53 | 6 |
 
 ## `ds-tabs` — 1
 
