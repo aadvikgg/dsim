@@ -38,6 +38,7 @@ import {
   bbLiftOf,
   bbResolveLiftMount,
   bbResolveMount2,
+  bbScoreModeMirror,
 } from './mechs';
 import {
   BB_INTAKE_KIND_BLURBS,
@@ -294,7 +295,7 @@ export function BiobuzzBuilder({ spec, setSpec, hideFrame = false }: BiobuzzBuil
   // sweeper on the next coercion (`coerceBbMech` reads `bbMech.intake` off exactly what is sent).
   function send(next: BbLauncherSpec, nextLift: BbLiftSpec | null, nextIntake: BbIntakeKind = intakeKind) {
     setSpec({
-      scoreMode: next.kind,
+      scoreMode: bbScoreModeMirror(next.kind),
       shooterMount: next.mount,
       bbMech: { launcher: next, lift: nextLift, intake: { kind: nextIntake } },
     });

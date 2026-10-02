@@ -81,6 +81,7 @@ import { COSMETIC_AXES, clampCosmetics, type Cosmetics } from '../cosmetics';
 import { butterflyTankRpmLimits, lengthLimits, massLimits, rpmLimits, widthLimits } from './drivetrain';
 import { heldSlotPos } from './physics';
 import { coerceImported, polyBounds } from './imported';
+import { coerceFlywheel, flySeed } from './flywheel';
 import { flywheelSpinTarget, loadPreStage, spikeMarkBalls, startPose } from './field';
 import { emptyScore } from './scoring';
 
@@ -496,6 +497,34 @@ export function coerceSpec(raw: unknown, base: RobotSpec = DEFAULT_SPEC, game?: 
   if (typeof sp.name === 'string' && sp.name.trim()) out.name = sp.name.slice(0, 24);
   if (typeof sp.teamName === 'string') out.teamName = sp.teamName.slice(0, 48);
   out.teamNumber = Math.round(clampFinite(sp.teamNumber, 0, 99999, base.teamNumber));
+
+  /**
+   * THE FIXED SHOOTER — DECODE's launcher aim, fixed hood and setpoint flywheel, and the setpoint
+   * flywheel BIOBUZZ's `fixed` launcher shares (`src/sim/flywheel.ts`).
+   *
+   * FROM THE RAW INPUT ONLY, NEVER FROM `base` — the `imported` rule above, for the same reason:
+   * absent means the turret with the adjustable hood and the solved speed every robot had before
+   * these existed, and a client switching back sends exactly that (JSON drops an absent field), so
+   * a fallback to `base` would keep a fixed launcher on the very update that removed it.
+   *
+   * Written only when PRESENT, so a spec without them is byte-for-byte what it was. Chain Reaction
+   * has none of the three. BIOBUZZ's hood lives on `bbMech.launcher.hoodDeg` and its arm below
+   * keeps the flywheel only on its `fixed` launcher. `game === undefined` is DECODE (`createWorld`
+   * passes it that way — see `coerceSetup`).
+   */
+  {
+    const fly = game === 'chain' ? undefined : coerceFlywheel(sp.flywheel);
+    if (fly) out.flywheel = fly;
+    else delete out.flywheel;
+    const decodeArm = game !== 'chain' && game !== 'biobuzz';
+    if (decodeArm && sp.launcher === 'fixed') out.launcher = 'fixed';
+    else delete out.launcher;
+    if (decodeArm && typeof sp.hoodDeg === 'number' && Number.isFinite(sp.hoodDeg)) {
+      out.hoodDeg = Math.round(clamp(sp.hoodDeg, C.DECODE_HOOD_MIN_DEG, C.DECODE_HOOD_MAX_DEG));
+    } else {
+      delete out.hoodDeg;
+    }
+  }
 
   /**
    * THE BIOBUZZ ARM, LAST — this game's own clamps, over a spec every shared pass above has
@@ -953,6 +982,8 @@ export function createWorld(mode: GameMode, seed: number, setups: RobotSetup[], 
     // preloaded artifacts are PHYSICAL held balls (the hopper mirrors their colors);
     // step()'s positionHeldBalls parks them at the storage slots
     const created = robots[robots.length - 1];
+    // a SETPOINT flywheel starts at its first setpoint; writes nothing for any other build
+    flySeed(created);
     created.hopper.forEach((color, slot) => {
       const side = slot >= 1 ? (slot === 1 ? -1 : 1) : 0; // triangle front row: opposite sides
       const lp = heldSlotPos(created.spec, slot, side);

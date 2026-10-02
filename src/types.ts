@@ -81,6 +81,34 @@ export interface RobotCommand {
    * that both halves of an alliance already know. Protocol bit 512 — the next one past `bbRamp`. Optional; absent reads false.
    */
   bbPass?: boolean;
+  /**
+   * DECODE + BIOBUZZ, a flywheel built with SPEED PRESETS (`RobotSpec.flywheel.mode === 'presets'`):
+   * step to the next preset setpoint, wrapping. EDGE-triggered and debounced like `driveMode`
+   * (`RobotState.flyPresetHeld`); ignored by every other build. Protocol bit 1024. Optional; absent
+   * reads false.
+   */
+  flyPreset?: boolean;
+}
+
+/**
+ * A FLYWHEEL WITH A SETPOINT (`src/sim/flywheel.ts`) — the speed half of a launcher that does not
+ * solve its own speed per shot. Absent on a spec = today's solved speed (`auto`).
+ *
+ *   • `fixed`   — one setpoint, `rpm[0]`, whatever the range.
+ *   • `presets` — up to three setpoints the driver steps through (`RobotCommand.flyPreset`).
+ *
+ * The artifact leaves at `FLY_EXIT_EFFICIENCY · π · wheelMm · rpm / 60` (in/s), where `rpm` is what
+ * the wheel is doing when the feeder runs, not the setpoint. `feedS` is the feeder's time per shot.
+ * Clamped in `coerceFlywheel`.
+ */
+export interface FlywheelSpec {
+  mode: 'fixed' | 'presets';
+  /** wheel setpoints, rpm: one for `fixed`, one to three for `presets` */
+  rpm: number[];
+  /** flywheel wheel diameter, mm */
+  wheelMm: number;
+  /** feeder time per shot, s */
+  feedS: number;
 }
 
 /** menu-configured driver assists */
@@ -282,6 +310,24 @@ export interface RobotSpec {
    * imports sees a legal rectangle robot. Sanitised by `coerceImported` (`src/sim/imported.ts`).
    */
   imported?: ImportedRobot;
+  /**
+   * DECODE: how the launcher is AIMED. Absent (or `'turret'`) is the turret every DECODE robot has
+   * always had; `'fixed'` is bolted to the chassis, firing along the chassis heading (an import:
+   * along `imported.mech.shooterYawDeg`), so the driver — or aim assist, while fire is held —
+   * turns the robot to aim. Only `'fixed'` is ever stored (`coerceSpec`).
+   */
+  launcher?: 'turret' | 'fixed';
+  /**
+   * DECODE: a FIXED HOOD, degrees above level (20..80). Absent = the adjustable hood that solves its
+   * own elevation per shot. BIOBUZZ keeps its hood on `bbMech.launcher.hoodDeg`.
+   */
+  hoodDeg?: number;
+  /**
+   * DECODE and BIOBUZZ: a flywheel run at a SETPOINT rather than at a speed solved per shot. Absent
+   * = solved (DECODE's `auto`). BIOBUZZ carries it only on the `fixed` launcher kind. See
+   * `FlywheelSpec`.
+   */
+  flywheel?: FlywheelSpec;
 }
 
 /**
@@ -328,6 +374,10 @@ export interface ImportedMech {
   /** the launcher: a turret's AXIS, or a turretless launcher's release LIP centre. `z` is the
    *  release height (a turret's at rest pitch). */
   shooter?: { x: number; y: number; z: number };
+  /** a TURRETLESS launcher's facing, degrees CCW from robot forward, wrapped to (−180, 180] and
+   *  rounded to whole degrees; kept only beside `shooter`. DECODE's fixed launcher fires along it
+   *  (absent = forward); BIOBUZZ's fixed launcher reads it when present, else its mount edge. */
+  shooterYawDeg?: number;
   /** BIOBUZZ double turret: the second (NECTAR) head, as `shooter`. */
   shooter2?: { x: number; y: number; z: number };
   /** intake mouths: which bounding-box edge, and the span along it (lateral coordinate for
@@ -615,6 +665,18 @@ export interface RobotState {
    * cleared on the next fresh press (`bbRampStep`), which is what lets a later, different swing
    * test again. Every other intake leaves this absent, same as the other `bbRamp*` fields. */
   bbRampBlocked?: boolean;
+  /**
+   * A SETPOINT FLYWHEEL's wheel speed right now, rpm (`src/sim/flywheel.ts`). Written ONLY for a
+   * build with `spec.flywheel`, so no other robot carries it on the wire or in its JSON. It ramps
+   * toward the setpoint, drops on every shot, and the feeder waits for it (`flyReady`).
+   */
+  flyRpm?: number;
+  /** a `presets` flywheel's selected setpoint index into `spec.flywheel.rpm`; absent reads 0. */
+  flyPreset?: number;
+  /** the `flyPreset` button's debounced edge latch (`debouncedPress`); presets builds only. */
+  flyPresetHeld?: boolean;
+  /** `world.time` the preset button went up while `flyPresetHeld` is still latched. */
+  flyPresetUpAt?: number;
   hopper: ArtifactColor[]; // FIFO, max 3
   fieldCentric: boolean;
   aimAssist: boolean;

@@ -22,6 +22,7 @@ import { robotPenetration, robotSolids, type RobotSolids } from './artifactSolid
 import { decodeColliders } from '../games/decode/colliders';
 import { classifierRect } from './field';
 import { intakeClaims, intakeSuction, updateRobot, updateRobotActions, type DriveWrench } from './robot';
+import { decodeFixedAimAssist } from './fixedShot';
 import { driveParams } from './drivetrain';
 import { checkGoalEntry, doorwayArtifact, gateColliderPos, updateBasins, updateGates, updateRails } from './goal';
 import { updateHumanPlayers } from './humanPlayer';
@@ -187,6 +188,17 @@ export function step(world: World, dt: number, commands: Map<number, RobotComman
         // If autoPathActive was true but no path data found in robot, deactivate
         r.autoPathActive = false;
       }
+    }
+    // A FIXED LAUNCHER'S FIRE BUTTON STEERS THE CHASSIS (aim assist, `decodeFixedAimAssist`), so the
+    // turn replaces the command before the drivetrain model sees it — into `rotate` AND the tank side
+    // drives, because a tank turns only from those (BIOBUZZ's stage 2 does the same). Null for every
+    // robot without a fixed launcher, which leaves the command untouched.
+    const aim = decodeFixedAimAssist(r, currentCmd, enabled);
+    if (aim !== null) {
+      const fwd = ((currentCmd.leftDrive ?? 0) + (currentCmd.rightDrive ?? 0)) / 2;
+      const room = 1 - Math.abs(aim);
+      const f = Math.max(-room, Math.min(room, fwd));
+      currentCmd = { ...currentCmd, rotate: aim, leftDrive: f - aim, rightDrive: f + aim };
     }
     actualCommands.set(r.id, currentCmd);
   }

@@ -43,6 +43,7 @@ import { bbIntakeMountOf } from './mounts';
 import { bbSnapStart } from './start';
 import { bbWallsTouched } from './score';
 import { biobuzzPhysics, emptyBiobuzzState, type BiobuzzState } from './state';
+import { flySeed } from '../../sim/flywheel';
 import { BB_HOOD_DEFAULT_DEG, BB_TURRET_PITCH_REST } from './config';
 import { bbIntakeKindOf, bbIsTurreted, bbLauncherOf } from './mechs';
 
@@ -767,7 +768,10 @@ export function createBiobuzzWorld(
   const allianceCount: Record<Alliance, number> = { red: 0, blue: 0 };
   for (const s of [...setups].sort((p, q) => p.id - q.id)) {
     const safe = coerceBiobuzzSetup(s);
-    robots.push(makeBiobuzzRobot(safe, allianceCount[safe.alliance]++, physics));
+    const made = makeBiobuzzRobot(safe, allianceCount[safe.alliance]++, physics);
+    // a FIXED launcher's setpoint wheel starts at its setpoint; nothing for any other build
+    flySeed(made);
+    robots.push(made);
   }
 
   const biobuzz = emptyBiobuzzState();

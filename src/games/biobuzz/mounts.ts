@@ -77,8 +77,13 @@ export type BbEdge = 'front' | 'back' | 'left' | 'right';
 
 /** BIOBUZZ launchers (owner ruling 2026-09-12): a SINGLE turret (POLLEN only), a DOUBLE turret
  * (two individual turrets — one POLLEN, one NECTAR) and a DUMPER (POLLEN + NECTAR). CR's `drum`
- * is gone; a stored one migrates to `dumper` (`bbFoldScoreMode`, `mechs.ts`). */
-export const BB_SCORE_MODES = ['turret', 'twinturret', 'dumper'] as const;
+ * is gone; a stored one migrates to `dumper` (`bbFoldScoreMode`, `mechs.ts`).
+ *
+ * `fixed` (2026-10-02) is the kit robot's launcher: one flywheel and a fixed hood bolted to a
+ * chassis EDGE, POLLEN only, aimed by turning the robot, at the speed its setpoint wheel
+ * (`RobotSpec.flywheel`) throws — it scores only from the distance that arc reaches. LAST in the
+ * list, so every index a stored spec or a picker used before it still names the same launcher. */
+export const BB_SCORE_MODES = ['turret', 'twinturret', 'dumper', 'fixed'] as const;
 export type BbScoreMode = (typeof BB_SCORE_MODES)[number];
 
 export const BB_DEFAULT_INTAKE_MOUNT: BbIntakeMount = 'front';

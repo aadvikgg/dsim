@@ -19,7 +19,12 @@ import {
   bbStorageMax,
   BB_HALF_X,
   BB_HALF_Y,
+  BB_FIXED_FLY_DEFAULT,
+  BB_FIXED_HOOD_DEFAULT_DEG,
+  BB_FIXED_HOOD_MAX_DEG,
+  BB_FIXED_HOOD_MIN_DEG,
 } from './config';
+import { coerceFlywheel } from '../../sim/flywheelSpec';
 import {
   BB_LIFT_KINDS,
   BB_LIFT_POSITIONS,
@@ -33,6 +38,7 @@ import {
   bbLiftOf,
   bbResolveLiftMount,
   bbResolveMount2,
+  bbScoreModeMirror,
 } from './mechs';
 import {
   BB_DEFAULT_INTAKE_MOUNT,
@@ -148,9 +154,28 @@ export function coerceBiobuzzSpec(raw: RobotSpec, base: RobotSpec = BB_DEFAULT_S
 
   const mech = coerceBbMech(raw);
   out.bbMech = mech;
-  out.scoreMode = mech.launcher.kind;
+  // A FIXED launcher mirrors as a DUMPER: the flat field is what an older peer or server reads,
+  // and a dumper on the same edge is the nearest hardware it can name (turretless, turns to aim).
+  // `ChainScoreMode` stays Chain Reaction's vocabulary that way, with no `fixed` in it.
+  out.scoreMode = bbScoreModeMirror(mech.launcher.kind);
   out.shooterMount = mech.launcher.mount;
   out.shooterRear = mech.launcher.mount === 'back';
+  /**
+   * THE SETPOINT FLYWHEEL — the FIXED launcher's speed, and only its. Every other launcher solves
+   * its own throw, so a `flywheel` left on a turret or a dumper (a build switched over in the
+   * builder, a hand-edited save) is dropped rather than carried as hardware the robot does not
+   * have. A fixed launcher without one gets the kit's (`BB_FIXED_FLY_DEFAULT`). The shared pass in
+   * `coerceSpec` has already shaped whatever arrived (`coerceFlywheel`); it is re-shaped here so a
+   * direct call cannot smuggle a malformed one, and re-shaping is idempotent.
+   */
+  if (mech.launcher.kind === 'fixed') {
+    out.flywheel = coerceFlywheel(raw.flywheel) ?? { ...BB_FIXED_FLY_DEFAULT, rpm: [...BB_FIXED_FLY_DEFAULT.rpm] };
+  } else {
+    delete out.flywheel;
+  }
+  // DECODE's launcher fields are not this game's (its hood is `bbMech.launcher.hoodDeg`)
+  delete out.launcher;
+  delete out.hoodDeg;
 
   // 1) INTAKE MOUNT. Resolved through `bbIntakeMountOf` so the legacy `intakeSide` boolean
   // still migrates, then checked for BUILDABILITY: a mount whose sweepers cannot fit the
@@ -301,7 +326,12 @@ function coerceBbMech(raw: RobotSpec): BbMechSpec {
     : BB_DEFAULT_SHOOTER_MOUNT) as BbMountPos;
   if (!isTurreted(kind)) mount = bbShooterEdgeOf({ shooterMount: mount });
   if (kind === 'twinturret') mount = bbFoldTwinMount(mount);
-  const hoodDeg = clampFinite(src.hoodDeg, BB_HOOD_MIN_DEG, BB_HOOD_MAX_DEG, BB_HOOD_DEFAULT_DEG);
+  // the FIXED launcher's hood is real and has its own travel (`BB_FIXED_HOOD_*`); every other
+  // kind keeps the dumper-era clamp it has always had, so a stored dumper or turret is untouched
+  const hoodDeg =
+    kind === 'fixed'
+      ? Math.round(clampFinite(src.hoodDeg, BB_FIXED_HOOD_MIN_DEG, BB_FIXED_HOOD_MAX_DEG, BB_FIXED_HOOD_DEFAULT_DEG))
+      : clampFinite(src.hoodDeg, BB_HOOD_MIN_DEG, BB_HOOD_MAX_DEG, BB_HOOD_DEFAULT_DEG);
   // Built without a `mount2` key for every kind but the double turret, so a stale one is dropped.
   const launcher: BbLauncherSpec =
     kind === 'twinturret'
