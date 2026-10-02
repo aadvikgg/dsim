@@ -1,3 +1,14 @@
+# HANDOFF — 2026-10-01a (robot import, branch `feat/robot-import`, IN PROGRESS)
+
+**State: on `feat/robot-import` only (semi-permanent feature branch off `alpha`, owner request). Not on `alpha` or `main`.** At `485ff5df`: `npm test` (shared 3145, BIOBUZZ 5384), `build`, `server:check`, `bundleaudit`, `docaudit`, `uiaudit` pass. Server code changed (lane 5), so nothing ships until the branch is merged and alpha is redeployed.
+
+- **Owner:** import a robot and simulate it accurately; offline practice and custom rooms only; feature rich, intuitive, easy.
+- **Design and contract:** `docs/robot-import-plan.md` (binding §3 data, §4 rules). Area guide `docs/area/robot-import.md`.
+- **Merged lanes:** 1 sim core (`src/sim/imported.ts`: `coerceImported`, convex-hull collider and hull-aware contact/fouls/start legality/wheels, gated on `spec.imported`; standard robots pinned byte-identical), 3 importer engine (`src/robotImport/`: GLB/glTF/STL/OBJ/3MF/PLY/STEP via lazy occt wasm, normalise/measure/bake, IndexedDB `decodesim.robots`, `.glb` share file, FTC motor/wheel catalogue), 5 wire/server gating (`src/net/imported.ts`: cap `robotImport`, refused in ranked/record/staged rooms and uploads, `REPLAY_FORMAT` 3 for replays with an import, `lastStandardSpec`).
+- **In flight, each in its own worktree with uncommitted or partial work** (a session ended mid-lane on 2026-10-01): lane 2 mechanisms (`.claude/worktrees/robot-import-lane2`), lane 4 importer UI (`.claude/worktrees/robot-import-lane4`), lane 6 rendering (`.claude/worktrees/agent-a7cc336ad9537db1b`, branch `robot-import-lane6`), lane 7 custom-room visuals relay (`.claude/worktrees/agent-a28d3f42cf152498e`, branch `robot-import-lane7`). Merge order: 2, 6, 4, 7.
+- **Not decided / owner:** a pre-existing swerve pod-order bug in the traction loop (lane 1 found it; fixing changes standard step output, so `SIM_VERSION`); whether imports ever reach ranked (no today).
+- **Not tested:** a real FTC robot CAD file (only synthetic fixtures).
+
 # HANDOFF — 2026-09-28b (BIOBUZZ robots: no z-fighting, no dressing through mechanisms)
 
 **State: pushed on `alpha`.** `npm test` (shared 2870, BIOBUZZ 5381), `build`, `server:check`, `bundleaudit` (scene baseline raised 221.06 → 226.59 KB for the keep-outs and the rest-pose search), `docaudit`, `uiaudit` pass. Client only (the 2D sprite's marks changed with the 3D ones; nothing the sim reads). Not on `main`.
