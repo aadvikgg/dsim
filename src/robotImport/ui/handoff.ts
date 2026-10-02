@@ -31,6 +31,11 @@ export function postRobotNotice(text: string): void {
   for (const fn of noticeListeners) fn();
 }
 
+/** the posted notice, without taking it (a render must not consume: StrictMode renders twice) */
+export function peekRobotNotice(): string | null {
+  return notice;
+}
+
 /** the posted notice, once */
 export function takeRobotNotice(): string | null {
   const n = notice;

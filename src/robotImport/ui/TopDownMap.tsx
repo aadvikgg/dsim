@@ -74,6 +74,10 @@ export function TopDownMap({
   const keysId = useId();
   const latest = useRef(handles);
   latest.current = handles;
+  /** where a handle was last MOVED TO, until the props catch up: two key presses inside one render
+   *  must add up, not both start from the same stale prop */
+  const moved = useRef<Record<string, Vec2>>({});
+  moved.current = {};
 
   const b = hull.length ? bbox(hull) : { minX: -9, maxX: 9, minY: -9, maxY: 9 };
   const span = Math.max(VIEW_MIN, b.maxX - b.minX + 4, b.maxY - b.minY + 4);
@@ -96,7 +100,15 @@ export function TopDownMap({
     if (h.axis === 'y') return { x: h.x, y: c.y };
     return c;
   };
-  const find = (key: string): MapHandle | undefined => latest.current.find((h) => h.key === key);
+  const find = (key: string): MapHandle | undefined => {
+    const h = latest.current.find((x) => x.key === key);
+    const m = moved.current[key];
+    return h && m ? { ...h, ...m } : h;
+  };
+  const emit = (key: string, p: Vec2, final: boolean): void => {
+    moved.current[key] = p;
+    onMove?.(key, p, final);
+  };
   /** screen nudge (dx right, dy up) → model: up = +x, right = −y */
   const nudged = (h: MapHandle, dx: number, dy: number): Vec2 => constrain(h, { x: h.x + dy, y: h.y - dx });
 
@@ -133,7 +145,7 @@ export function TopDownMap({
     const d = dir[e.key];
     if (!d) return;
     e.preventDefault();
-    onMove?.(h.key, nudged(h, d[0], d[1]), true);
+    emit(h.key, nudged(find(h.key) ?? h, d[0], d[1]), true);
   };
   const onClick = (h: MapHandle): void => {
     onSelect?.(h.key);
@@ -142,7 +154,7 @@ export function TopDownMap({
     grab.start(h.key, {
       nudge(dx, dy) {
         const cur = find(h.key);
-        if (cur) onMove?.(h.key, nudged(cur, dx, dy), false);
+        if (cur) emit(h.key, nudged(cur, dx, dy), false);
       },
       drop() {
         const cur = find(h.key);

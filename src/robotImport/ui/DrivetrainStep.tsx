@@ -90,7 +90,10 @@ export function DrivetrainStep({
           label={COPY.gearbox}
           value={m.ratio}
           mini
-          options={Object.entries(GOBILDA_RATIOS).map(([k, v]) => ({ v: k, t: `${v.freeRpm} rpm` }))}
+          // by ratio: the keys read like numbers, so object order put 1:1, 139:1 and 188:1 first
+          options={Object.entries(GOBILDA_RATIOS)
+            .sort((x, y) => x[1].ratio - y[1].ratio)
+            .map(([k, v]) => ({ v: k, t: `${v.freeRpm} rpm` }))}
           onPick={(ratio) => onDrive({ motor: { kind: 'gobilda', ratio } })}
         />
       ) : m.kind === 'revHdHex' ? (

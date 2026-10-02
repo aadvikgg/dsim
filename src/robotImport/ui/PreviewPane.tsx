@@ -26,7 +26,7 @@ export function PreviewPane({
   empty: ReactNode;
 }) {
   const host = useRef<HTMLDivElement>(null);
-  const canvas = useRef<HTMLCanvasElement>(null);
+  const canvasHost = useRef<HTMLDivElement>(null);
   const ctl = useRef<PreviewController | null>(null);
   const [failed, setFailed] = useState(false);
   const [view, setView] = useState<PreviewView>('iso');
@@ -34,17 +34,23 @@ export function PreviewPane({
   const ready = !!eng && !!state;
 
   useEffect(() => {
-    if (!ready || failed || !canvas.current || !host.current) return;
+    if (!ready || failed || !canvasHost.current || !host.current) return;
+    // A FRESH CANVAS PER CONTROLLER: `dispose()` ends with `forceContextLoss()`, and a canvas hands
+    // back the SAME (now lost) context forever after, so a re-run of this effect on a reused
+    // element (a remount, a hot reload) built a renderer on a dead context.
+    const el = document.createElement('canvas');
+    el.className = 'ds-import-canvas';
+    canvasHost.current.appendChild(el);
     let c: PreviewController;
     try {
-      c = eng.createPreview(canvas.current, { ...state, showCollision: collision });
+      c = eng.createPreview(el, { ...state, showCollision: collision });
     } catch (e) {
       console.warn('[import] preview could not start', e);
+      el.remove();
       setFailed(true);
       return;
     }
     ctl.current = c;
-    const el = canvas.current;
     const onLost = (ev: Event): void => {
       ev.preventDefault();
       setFailed(true);
@@ -62,6 +68,7 @@ export function PreviewPane({
       el.removeEventListener('webglcontextlost', onLost);
       ctl.current = null;
       c.dispose();
+      el.remove();
     };
     // the controller is made once per engine and model presence; `state` flows in below
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -80,7 +87,7 @@ export function PreviewPane({
   return (
     <aside className="ds-import-preview ds-panel" aria-label={COPY.cameraAria}>
       <div className="ds-import-preview-stage" ref={host}>
-        {!state ? empty : failed ? fallback : <canvas ref={canvas} className="ds-import-canvas" />}
+        {!state ? empty : failed ? fallback : <div className="ds-import-canvas-host" ref={canvasHost} />}
       </div>
       <div className="ds-import-preview-tools">
         <div className="ds-segs" role="group" aria-label={COPY.cameraAria}>

@@ -8,7 +8,7 @@ import { standardRobotFor } from '../../settings';
 import { bbox } from '../geometry';
 import { COPY, FORMAT_LABEL } from './copy';
 import { FootprintPicture } from './adapters';
-import { libraryChanged, onRobotNotice, postRobotNotice, takeRobotNotice } from './handoff';
+import { libraryChanged, onRobotNotice, peekRobotNotice, postRobotNotice, takeRobotNotice } from './handoff';
 import { ConfirmDialog, RenameDialog } from './LibraryDialogs';
 import { exportLibraryRobot } from './exportRobot';
 import type { LibraryView } from './useLibrary';
@@ -25,8 +25,13 @@ const NOTICE_MS = 4000;
 
 /** the notice the importer posted, shown once for NOTICE_MS */
 export function useRobotNotice(): string | null {
-  const [text, setText] = useState<string | null>(() => takeRobotNotice());
-  useEffect(() => onRobotNotice(() => setText(takeRobotNotice())), []);
+  // PEEK while rendering, TAKE in the effect: a render may run twice (StrictMode), an effect
+  // commits once, so the notice is not consumed by a render that is thrown away
+  const [text, setText] = useState<string | null>(() => peekRobotNotice());
+  useEffect(() => {
+    takeRobotNotice();
+    return onRobotNotice(() => setText(takeRobotNotice()));
+  }, []);
   useEffect(() => {
     if (!text) return;
     const t = window.setTimeout(() => setText(null), NOTICE_MS);

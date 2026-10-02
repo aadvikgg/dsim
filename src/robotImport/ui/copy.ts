@@ -114,8 +114,7 @@ export const COPY = {
   useDetected: 'Use detected wheels',
   grabPad: (dpad: string, a: string, b: string) => `Move with ${dpad} or the left stick. ${a} to drop, ${b} to cancel.`,
   grabKeys: 'Arrow keys move it. Hold Shift for small steps.',
-  handleAria: (label: string, x: number, y: number, z?: number) =>
-    `${label}, ${x.toFixed(1)} in forward, ${y.toFixed(1)} in left${z === undefined ? '' : `, ${z.toFixed(1)} in high`}`,
+  handleAria: (label: string, x: number, y: number, z?: number) => `${label}, ${where(x, y, z)}`,
 
   // ---- errors the UI adds (the engine's own come as ImportError messages) ----
   stepReader: 'Couldn’t load the STEP reader. Check your connection and try again, or export as GLB or STL.',
@@ -188,8 +187,7 @@ export const COPY = {
   width: 'Width',
   centre: 'Centre',
   resetPlacement: 'Reset placement',
-  placed: (label: string, x: number, y: number, z?: number) =>
-    `${label}: ${x.toFixed(1)} in forward, ${y.toFixed(1)} in left${z === undefined ? '' : `, ${z.toFixed(1)} in high`}`,
+  placed: (label: string, x: number, y: number, z?: number) => `${label}: ${where(x, y, z)}`,
   span: (label: string, w: number, c: number) => `${label}: ${w.toFixed(1)} in wide, centred ${c.toFixed(1)} in along the edge`,
   noHandles: 'Pick the mechanisms above to place them here.',
 
@@ -218,6 +216,13 @@ export const COPY = {
   hudBack: 'EDITOR',
   hudBackTitle: 'Back to the importer (Esc)',
 } as const;
+
+/** "4.5 in forward, 5.3 in right, 12.0 in high": signs as words, from the footprint's centre */
+export function where(x: number, y: number, z?: number): string {
+  const a = (v: number): string => Math.abs(v).toFixed(1);
+  const h = z === undefined ? '' : `, ${z.toFixed(1)} in high`;
+  return `${a(x)} in ${x < 0 ? 'back' : 'forward'}, ${a(y)} in ${y < 0 ? 'right' : 'left'}${h}`;
+}
 
 export const UNIT_LABEL: Record<LengthUnit, string> = { mm: 'mm', cm: 'cm', m: 'm', in: 'in', ft: 'ft' };
 

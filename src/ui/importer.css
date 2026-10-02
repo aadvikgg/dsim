@@ -17,23 +17,26 @@
    panel take different amounts of the page at the same window size (the hero's lesson). */
 .ds-import {
   container: ri / inline-size;
+}
+/* a container query cannot style its own container, so the grid is one level in */
+.ds-import-in {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-areas: 'steps' 'preview' 'body' 'foot';
   gap: var(--ds-s-4);
   align-items: start;
 }
-.ds-import > .ds-import-steps {
+.ds-import-in > .ds-import-steps {
   grid-area: steps;
 }
-.ds-import > .ds-import-preview {
+.ds-import-in > .ds-import-preview {
   grid-area: preview;
 }
-.ds-import > .ds-import-body {
+.ds-import-in > .ds-import-body {
   grid-area: body;
   min-width: 0;
 }
-.ds-import > .ds-import-foot {
+.ds-import-in > .ds-import-foot {
   grid-area: foot;
 }
 /* ---- the step rail: `.ds-tabs`, numbered, each with its check count ---- */
@@ -74,6 +77,10 @@
   display: grid;
   place-items: center;
 }
+.ds-import-canvas-host {
+  width: 100%;
+  height: 100%;
+}
 .ds-import-canvas {
   display: block;
   width: 100%;
@@ -96,11 +103,11 @@
 }
 
 @container ri (min-width: 860px) {
-  .ds-import {
+  .ds-import-in {
     grid-template-columns: minmax(0, 1fr) minmax(340px, 42%);
     grid-template-areas: 'steps preview' 'body preview' 'foot preview';
   }
-  .ds-import > .ds-import-preview {
+  .ds-import-in > .ds-import-preview {
     position: sticky;
     top: 84px; /* clears the sticky top bar, the same number `.ds-subnav` uses */
   }

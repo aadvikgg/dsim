@@ -135,7 +135,7 @@ export function ModelStep({
       <div className="ds-field">
         <span className="cap">
           {COPY.front}
-          <span>{turned ? COPY.frontTurned(turned) : COPY.frontDetected}</span>
+          <span>{turned ? COPY.frontTurned(turned) : doc.savedModel ? COPY.savedModel : COPY.frontDetected}</span>
         </span>
         <div className="ds-import-turns">
           <button type="button" className="ds-btn small" onClick={() => turn(1)}>

@@ -175,7 +175,6 @@ export function MechanismsStep({
 
   return (
     <>
-      <h3 className="ds-subh">{COPY.mechanisms}</h3>
       {Builder ? (
         <Builder spec={spec} onChange={onSpec} game={game} hideFrame />
       ) : (

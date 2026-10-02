@@ -65,6 +65,9 @@ export interface ImportEditorProps {
 
 /** focus to restore when the editor comes back from a test drive */
 let focusOnReturn: string | null = null;
+/** the engine module once loaded, so a remount (the way back from a test drive) has it on its
+ *  first render instead of flashing the empty Model step while `import()` resolves again */
+let engineCache: ImporterEngine | null = null;
 
 const STAGE_LABEL = (stage: LoadStage, file: string): string => {
   const p = COPY.phase[stage];
@@ -99,8 +102,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const [draft, setDraftState] = useState<LiveDraft | null>(() => liveDraft(key));
   const draftRef = useRef(draft);
   draftRef.current = draft;
-  const [eng, setEng] = useState<ImporterEngine | null>(null);
-  const engRef = useRef<ImporterEngine | null>(null);
+  const [eng, setEng] = useState<ImporterEngine | null>(engineCache);
+  const engRef = useRef<ImporterEngine | null>(engineCache);
   const [notFound, setNotFound] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [phase, setPhase] = useState<Phase | null>(null);
@@ -135,6 +138,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const ensureEngine = useCallback(async (): Promise<ImporterEngine> => {
     if (engRef.current) return engRef.current;
     const e = await loadImporterEngine();
+    engineCache = e;
     engRef.current = e;
     setEng(e);
     return e;
@@ -400,8 +404,10 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
     if (!id) return;
     const el = document.getElementById(id);
     if (!el) return;
-    pendingFocus.current = null;
     const target = el.matches(FOCUSABLE) ? el : (el.querySelector<HTMLElement>(FOCUSABLE) ?? el);
+    // a control that is still disabled (the checks not yet run) keeps the request for later
+    if ((target as HTMLButtonElement).disabled) return;
+    pendingFocus.current = null;
     target.focus();
     target.scrollIntoView({ block: 'nearest' });
   });
@@ -593,6 +599,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
       <h1 className="ds-h1">{title}</h1>
 
       <div className="ds-import">
+        <div className="ds-import-in">
         <nav className="ds-tabs ds-import-steps" aria-label={COPY.stepsAria} data-padnav-sections>
           {COPY.steps.map((label, i) => (
             <button
@@ -736,6 +743,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
               ) : null}
             </>
           )}
+        </div>
         </div>
       </div>
 
