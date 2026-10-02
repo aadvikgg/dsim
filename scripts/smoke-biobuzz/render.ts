@@ -414,6 +414,10 @@ import { IMPORTED_MESH_TO_ROBOT, registerImportedAssets } from '../../src/render
 import { coerceImported, importedWheels, polyBounds, polyPointDepth } from '../../src/sim/imported';
 import { coerceSpec } from '../../src/sim/spawn';
 import { buildBoxesGlb, IMPORT_FIXTURE_BOXES, IMPORT_FIXTURE_HEIGHT, IMPORT_FIXTURE_HULL } from './fixtures/importGlb';
+import { bbDumpZ, bbDumperFrame, bbImportLaunchLine, bbImportTurretAxleZ } from '../../src/games/biobuzz/importMech';
+import { bbLauncherOf as bbLauncherOfMech } from '../../src/games/biobuzz/mechs';
+import { BB_LAUNCH_LINE_FRAC as BB_LINE_FRAC } from '../../src/games/biobuzz/config';
+import { EDGE_PERP as BB_EDGE_PERP, edgeGeom as bbEdgeGeom } from '../../src/games/biobuzz/mounts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIOBUZZ_DIR = join(root, 'src', 'games', 'biobuzz');
@@ -1950,6 +1954,90 @@ function importedRobotChecks(check: Check): void {
     check(`imported 3D: at most ${IMPORTED_MESH_TEMPLATE_CAP} unworn templates stay resident, and the evicted ones are freed`,
       importedMeshSlots().length <= IMPORTED_MESH_TEMPLATE_CAP + 1 && freed[0] && !freed[freed.length - 1],
       `${importedMeshSlots().length} slots, freed ${freed.map((f) => (f ? 1 : 0)).join('')}`);
+
+    // ── THE MECHANISMS SIT WHERE THE SIM PUTS THEM (lane 2's accessors) ─────────────────────
+    // a PLACED import: an off-centre mouth, two placed heads at their own heights, a placed base
+    const placed = (id: string, bbMech: Record<string, unknown>, intakeMount = 'front') =>
+      mk(id, { bbMech, intakeMount }, {
+        mech: {
+          intakes: [{ edge: 'front', from: -2, to: 5 }],
+          shooter: { x: -3, y: 2.5, z: 11 },
+          shooter2: { x: -3, y: -3, z: 13 },
+          place: { x: -2, y: -1, z: 6 },
+        },
+      });
+    {
+      const ps = placed('f0f0f0f0f0f0f0f0', { launcher: { kind: 'twinturret', mount: 'left', mount2: 'right', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'back' }, intake: { kind: 'sweeper' } });
+      const gp = buildRobotGroup(ps, 1, 'red', 'high');
+      gp.updateMatrixWorld(true);
+      const m0 = bbMouths(ps)[0];
+      const f0 = bbMouthFrame(m0, ps.length / 2, ps.width / 2);
+      const intakeNode = gp.getObjectByName('robot:intake:front');
+      check('imported 3D placeholder: the intake is built on the sim\'s mouth (`bbMouths` + its face — off-centre, on the hull)',
+        !!intakeNode && Math.abs(intakeNode.position.x - f0.ox) < 1e-9 && Math.abs(intakeNode.position.y - f0.oy) < 1e-9 && Math.abs(f0.oy) > 0.5 &&
+          Math.abs(f0.rail - (m0.face! - m0.x0)) < 1e-9,
+        JSON.stringify({ at: intakeNode?.position.toArray(), f0 }));
+      const launcher = bbLauncherOfMech(ps, 45);
+      const turrets: THREE.Object3D[] = [];
+      gp.traverse((o) => {
+        if (o.name === 'bb-turret') turrets.push(o);
+      });
+      let worst = 0;
+      const wp = new THREE.Vector3();
+      [launcher.mount, launcher.mount2!].forEach((mount, which) => {
+        const w = which as 0 | 1;
+        const t = turrets[which];
+        const at = turretLocal(ps, mount);
+        const axleZ = bbImportTurretAxleZ(ps, w);
+        const mz = bbMuzzleLocal(BB_TURRET_PITCH_REST, w, axleZ);
+        const exit = t?.getObjectByName('bb-turret-exit');
+        if (!t || !exit) {
+          worst = Infinity;
+          return;
+        }
+        exit.getWorldPosition(wp);
+        // heading 0, head yaw 0: the muzzle is `back` BEHIND the axis along +x
+        worst = Math.max(worst, Math.abs(t.position.x - at.x), Math.abs(t.position.y - at.y), Math.abs(wp.x - (at.x - mz.back)), Math.abs(wp.y - at.y), Math.abs(wp.z - mz.z));
+      });
+      check('imported 3D placeholder: each turret stands at its placed head, and its drawn lip IS the sim\'s muzzle at that head\'s placed height',
+        turrets.length === 2 && worst < 1e-4, `worst ${worst}`);
+      // the MESH's aim sight: the hub on the sim's muzzle, at rest and elevated
+      installImportedMeshForTests(ps, new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), new THREE.MeshStandardMaterial()));
+      const gm2 = buildRobotGroup(ps, 1, 'red', 'high');
+      const hubs: THREE.Object3D[] = [];
+      gm2.traverse((o) => {
+        if (o.name === 'bb-import-aim-hub') hubs.push(o);
+      });
+      let sightWorst = 0;
+      for (const p of [BB_TURRET_PITCH_REST, 0.9]) {
+        for (const pitch of gm2.userData.turretPitches as THREE.Object3D[]) pitch.rotation.y = -p;
+        gm2.updateMatrixWorld(true);
+        [launcher.mount, launcher.mount2!].forEach((mount, which) => {
+          const w = which as 0 | 1;
+          const at = turretLocal(ps, mount);
+          const mz = bbMuzzleLocal(p, w, bbImportTurretAxleZ(ps, w));
+          hubs[which]?.getWorldPosition(wp);
+          sightWorst = Math.max(sightWorst, hubs[which] ? Math.hypot(wp.x - (at.x - mz.back), wp.y - at.y, wp.z - mz.z) : Infinity);
+        });
+      }
+      check('imported 3D mesh: the aim sight\'s hub IS the sim\'s muzzle (`bbMuzzleLocal` at the placed axle), at rest and elevated, for both heads',
+        hubs.length === 2 && sightWorst < 1e-4, `worst ${sightWorst}`);
+      disposeRobotGroup(gm2);
+      disposeRobotGroup(gp);
+      // the DUMPER on the sim's release line, at its lip height
+      const pd = placed('f1f1f1f1f1f1f1f1', { launcher: { kind: 'dumper', mount: 'front', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } }, 'back');
+      const gd = buildRobotGroup(pd, 1, 'red', 'high');
+      gd.updateMatrixWorld(true);
+      const dumper = gd.getObjectByName('robot:dumper');
+      const arm = gd.getObjectByName('bb-dump-arm');
+      const line = bbImportLaunchLine(pd, 'front', bbEdgeGeom(pd, 'front').span * BB_LINE_FRAC);
+      const df = bbDumperFrame(pd, 'front');
+      check('imported 3D placeholder: the dumper is built on the sim\'s release line, its shaft at the sim\'s lip height less the tray\'s own drop',
+        !!dumper && !!arm && Math.abs(dumper.position.y - BB_EDGE_PERP.front.y * df.lateral) < 1e-9 && Math.abs(df.lateral - line.origin.y) < 1e-9 &&
+          Math.abs(arm.position.z - (bbDumpZ(pd) - 2.3)) < 1e-9 && Math.abs(bbDumpZ(pd) - 11) < 1e-9,
+        JSON.stringify({ y: dumper?.position.y, line, z: arm?.position.z }));
+      disposeRobotGroup(gd);
+    }
 
     // ── THE PREVIEW keys and re-keys the same way (source checks: it has no DOM here) ────────
     const previewSrc = readFileSync(join(SCENE_DIR, 'renderPreview.ts'), 'utf8');

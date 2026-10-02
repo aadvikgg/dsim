@@ -1,4 +1,4 @@
-import type { Artifact, ImportedRobot, RobotState, Vec2, World } from '../../types';
+import type { Artifact, ImportedRobot, RobotSpec, RobotState, Vec2, World } from '../../types';
 import * as C from '../../config';
 import { drawDecal, ROBOT_TRIM, roundRect, tintColor } from '../../render/drawRobot';
 import {
@@ -34,8 +34,9 @@ import {
   CHAIN_CLAW_SLEW,
   CHAIN_CORNER_BODY_INSET,
 } from './config';
-import { catalystMouth, catalystRailHalf, catalystTrackTarget, chainIntakeMouths } from './state';
-import { EDGE_ANGLE, MOUNT_ANGLE, catalystDrawPos, catalystMountOf, catalystSwingOf, edgeGeom, intakeMouthFrame, isEdgePos, mountOrigin, shooterEdgeOf, turretLocal, turretRadius } from './mounts';
+import { catalystMouth, catalystOrigin, catalystRailHalf, catalystTrackTarget, chainIntakeMouths } from './state';
+import { chainImportLaunchLine } from './importMech';
+import { EDGE_ANGLE, EDGE_DIR, EDGE_PERP, MOUNT_ANGLE, catalystDrawPos, catalystMountOf, catalystSwingOf, edgeGeom, intakeMouthFrame, isEdgePos, mountOrigin, shooterEdgeOf, turretLocal, turretRadius, type ChainEdge } from './mounts';
 import { wrapAngle } from '../../math';
 import { beamRide } from './beams';
 
@@ -274,6 +275,25 @@ export function drawChainRobot(
 }
 
 /**
+ * WHERE A TURRETLESS LAUNCHER (drum, catapult) IS DRAWN on an import, in its firing edge's frame:
+ * the line the sim launches along (`chainImportLaunchLine`, asked with the same `span` `launchAt`
+ * asks it with) — `dist` out to its centre along the edge's normal, `lateral` across, `span` its
+ * half-length before `CHAIN_LAUNCH_LINE_FRAC`.
+ */
+export function launcherFrame(spec: RobotSpec, edge: ChainEdge): { dist: number; span: number; lateral: number } {
+  const g = edgeGeom(spec, edge);
+  if (!spec.imported) return { dist: g.dist, span: g.span, lateral: 0 };
+  const line = chainImportLaunchLine(spec, edge, g.span);
+  const n = EDGE_DIR[edge];
+  const p = EDGE_PERP[edge];
+  return {
+    dist: line.origin.x * n.x + line.origin.y * n.y,
+    span: line.half,
+    lateral: line.origin.x * p.x + line.origin.y * p.y,
+  };
+}
+
+/**
  * CHAIN REACTION'S SPRITE BODY FOR AN IMPORTED ROBOT (`render/drawImported.ts` has the rules), in
  * the robot frame the caller set up. The hull or the import's picture; then this game's layer
  * from its own accessors — the sweeper(s) at `chainIntakeMouths`, the drum/catapult at the
@@ -302,9 +322,10 @@ function drawImportedChain(
     drawChainIntake(ctx, r, intaking, accent);
     if (mode === 'drum' || mode === 'dumper') {
       const edge = shooterEdgeOf(r.spec);
-      const g = edgeGeom(r.spec, edge);
+      const g = launcherFrame(r.spec, edge);
       ctx.save();
       ctx.rotate(EDGE_ANGLE[edge]);
+      ctx.translate(0, g.lateral);
       if (mode === 'drum') drawDrum(ctx, g.dist, g.span, loaded);
       else drawCatapult(ctx, g.dist, g.span, loaded);
       ctx.restore();
@@ -711,7 +732,9 @@ function drawCatalystMech(ctx: CanvasRenderingContext2D, r: RobotState, accent: 
   // the front — where it stows. Drawing it at both ends would read as two arms, which is
   // exactly what it isn't.
   const pos = catalystDrawPos(catalystMountOf(r.spec), catalystSwingOf(r.spec));
-  const o = mountOrigin(r.spec, pos);
+  // an IMPORT's mechanism works from where the sim measures its reach (`catalystOrigin`: out of
+  // the hull from its placed base), not from its bounding box's cell
+  const o = r.spec.imported && pos !== 'center' ? catalystOrigin(r.spec, pos) : mountOrigin(r.spec, pos);
   // Is this robot actually holding a ring? The ring SPRITE is drawn in draw.ts, but the
   // mechanism needs to know too — an arm's jaws close on what they are carrying, and a claw
   // drawn permanently open is the one state that never happens in a match.

@@ -10,8 +10,10 @@ import {
   drawImportedFrontBack,
   drawImportedOutline,
   drawMouthState,
-  pullInsideHull,
+  frontArrowSpot,
 } from '../../render/drawImported';
+import { polyBounds, polyPointDepth } from '../../sim/imported';
+import { bbDumperFrame } from './importMech';
 import { accentFill, clampCosmetics } from '../../cosmetics';
 import {
   BB_END_BAR_T,
@@ -67,7 +69,6 @@ import {
   type BbMountPos,
   bbMouthFrame,
   bbShooterEdgeOf,
-  edgeGeom,
   turretLocal,
   turretRadius,
 } from './mounts';
@@ -247,10 +248,11 @@ export function drawBiobuzzRobot(
   // resolved position, rather than `r.spec.shooterMount` read cold.
   if (launcher.kind === 'dumper' && !pictured) {
     const edge = bbShooterEdgeOf({ shooterMount: launcher.mount });
-    const g = edgeGeom(r.spec, edge);
+    const g = dumperFrame(r.spec, edge);
     ctx.save();
     ctx.rotate(EDGE_ANGLE[edge]);
-    drawDumper(ctx, g.dist, g.span, loaded);
+    ctx.translate(0, g.lateral);
+    drawDumper(ctx, g.dist, g.span, loaded, g.room);
     ctx.restore();
   }
 
@@ -583,9 +585,14 @@ export function drawBiobuzzIntakeReach(ctx: CanvasRenderingContext2D, r: RobotSt
  * Drawn in the MOUNT's frame (the caller rotates): `dist` = distance out to that edge, `span`
  * = its half-length, so a flank mount spans the chassis LENGTH instead of its width.
  */
-function drawDumper(ctx: CanvasRenderingContext2D, dist: number, span: number, loaded: boolean): void {
+/** where the dumper is drawn — the sim's release line in its edge's frame (`bbDumperFrame`) */
+export const dumperFrame = bbDumperFrame;
+
+function drawDumper(ctx: CanvasRenderingContext2D, dist: number, span: number, loaded: boolean, room?: number): void {
   const half = span * BB_LAUNCH_LINE_FRAC;
-  const pivot = dist - 7.4; // the shaft it swings about, well inside the frame
+  // the shaft it swings about, well inside the frame — on an IMPORT, no deeper than the hull behind
+  // its placed lip (`bbDumperFrame`'s `room`)
+  const pivot = dist - (room === undefined ? 7.4 : Math.max(2, Math.min(7.4, room - 0.5)));
   const lip = dist - 0.9; // release lip at the launcher edge
 
   // TRAY floor — translucent, so it reads as something the load sits IN
@@ -992,11 +999,15 @@ export function bbHeldSlots(spec: RobotSpec, launcher: BbLauncherSpec, lift: BbL
     // the tube aims at the placement point, which moves with the footprint, i.e. the sweepers
     spec.intakeMount ?? '',
   ].join('|');
-  const hit = heldLayoutCache.get(key);
+  // an IMPORT's layout is searched on its HULL, so its whole descriptor is part of the key
+  const imp = spec.imported;
+  const fullKey = imp ? `${key}|${JSON.stringify(imp)}` : key;
+  const hit = heldLayoutCache.get(fullKey);
   if (hit) return hit;
 
   const hl = spec.length / 2;
   const hw = spec.width / 2;
+  const box = imp ? polyBounds(imp.hull) : { minX: -hl, maxX: hl, minY: -hw, maxY: hw };
   const circles: { x: number; y: number; r: number }[] = [];
   if (bbIsTurreted(launcher)) {
     const ring = turretRadius(spec) + 0.3;
@@ -1006,16 +1017,24 @@ export function bbHeldSlots(spec: RobotSpec, launcher: BbLauncherSpec, lift: BbL
   // the DECK ARROW's own keep-out, read off `bbFrontMarks` rather than typed: the arrow grew
   // when the front/back language landed (2026-09-22) and a stale literal here would have let a
   // held disc sit on top of the one mark that says which way the robot faces. The end BARS are
-  // not in this list — they are at the rails, where `hl - 1.2` already keeps a disc out.
-  const arrow = bbFrontMarks(spec).arrow;
-  if (arrow) circles.push({ x: (arrow.apex + arrow.base) / 2, y: arrow.cy, r: Math.max((arrow.apex - arrow.base) / 2, arrow.half) });
+  // not in this list — they are at the rails, where `hl - 1.2` already keeps a disc out. An
+  // IMPORT's arrow is `frontArrowSpot`'s, clear of the same rings.
+  if (imp) {
+    const a = frontArrowSpot(imp.hull, circles.map((o) => ({ ...o, r: o.r - 0.3 })));
+    circles.push({ x: a.x, y: a.y, r: Math.max(a.len / 2, a.half) });
+  } else {
+    const arrow = bbFrontMarks(spec).arrow;
+    if (arrow) circles.push({ x: (arrow.apex + arrow.base) / 2, y: arrow.cy, r: Math.max((arrow.apex - arrow.base) / 2, arrow.half) });
+  }
   // NOT the wheels: on a 13.5 in chassis with a centre turret there is no spot that clears both
   // the ring and all four wheels, and a disc over a tyre still reads — a disc over a ring does not.
   const tube = lift ? bbBoxTubeGlyph(spec, lift.mount, bbPlacePointLocal(spec)) : null;
 
   const clearance = (px: number, py: number): number => {
-    // inside the frame rail, hard
-    let c = Math.min(hl - 1.2 - HELD_R - Math.abs(px), hw - 1.2 - HELD_R - Math.abs(py)) * 4;
+    // inside the frame rail, hard — an import's frame is its hull
+    let c = imp
+      ? (polyPointDepth(imp.hull, { x: px, y: py }) - 1.2 - HELD_R) * 4
+      : Math.min(hl - 1.2 - HELD_R - Math.abs(px), hw - 1.2 - HELD_R - Math.abs(py)) * 4;
     for (const o of circles) c = Math.min(c, Math.hypot(px - o.x, py - o.y) - o.r - HELD_R);
     if (tube) {
       // distance to the tube's centre segment, less its half-width
@@ -1030,13 +1049,15 @@ export function bbHeldSlots(spec: RobotSpec, launcher: BbLauncherSpec, lift: BbL
   let best: Vec2[] = HELD_LAYOUTS[0].map((o) => ({ ...o }));
   let bestScore = -Infinity;
   const step = 0.5;
+  const midX = imp ? (box.minX + box.maxX) / 2 : 0;
+  const midY = imp ? (box.minY + box.maxY) / 2 : 0;
   HELD_LAYOUTS.forEach((layout, li) => {
-    for (let cx = -hl; cx <= hl + 1e-9; cx += step) {
-      for (let cy = -hw; cy <= hw + 1e-9; cy += step) {
+    for (let cx = box.minX; cx <= box.maxX + 1e-9; cx += step) {
+      for (let cy = box.minY; cy <= box.maxY + 1e-9; cy += step) {
         let score = Infinity;
         for (const o of layout) score = Math.min(score, clearance(cx + o.x, cy + o.y));
         // prefer the compact cluster, then a spot near the chassis middle, when clearances tie
-        score += (li === 0 ? 0.25 : 0) - 0.01 * Math.hypot(cx, cy);
+        score += (li === 0 ? 0.25 : 0) - 0.01 * Math.hypot(cx - midX, cy - midY);
         if (score > bestScore) {
           bestScore = score;
           best = layout.map((o) => ({ x: cx + o.x, y: cy + o.y }));
@@ -1045,7 +1066,7 @@ export function bbHeldSlots(spec: RobotSpec, launcher: BbLauncherSpec, lift: BbL
     }
   });
   if (heldLayoutCache.size > 256) heldLayoutCache.clear();
-  heldLayoutCache.set(key, best);
+  heldLayoutCache.set(fullKey, best);
   return best;
 }
 
@@ -1063,12 +1084,8 @@ function drawHeldElements(
 ): void {
   const n = Math.min(r.hopper.length, HELD_LAYOUTS[0].length);
   if (n === 0) return;
-  // an IMPORT's slots are searched on its bounding box like any build's, then each is pulled onto
-  // the deck the hull actually has — a pointed nose leaves the box's corners empty
-  const imp = r.spec.imported;
-  const slots = imp
-    ? bbHeldSlots(r.spec, launcher, lift).map((s) => pullInsideHull(imp, s, HELD_R + 0.3))
-    : bbHeldSlots(r.spec, launcher, lift);
+  // an IMPORT's slots are searched on its hull (`bbHeldSlots`), not its bounding box
+  const slots = bbHeldSlots(r.spec, launcher, lift);
   for (let i = 0; i < n; i++) {
     const c = r.hopper[i] as ArtifactColor;
     const s = slots[i];

@@ -974,14 +974,24 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
     `bbFamily`, so the physical-materials swap leaves them on their own PBR materials in both
     modes. On top: the two ROBOT SIGNS on the hull's flank-most edges and, for a turreted launcher,
     an AIM SIGHT (a hub and a slim rod, NOT a hoop — a floating ring read as a marker) on the same
-    `turretHeads`/`turretPitches` handles `sync` already poses. Nothing else of the generator: a
-    second intake or turret drawn through the CAD would be a second robot.
+    `turretHeads`/`turretPitches` handles `sync` already poses, built so the HUB IS THE SIM'S
+    MUZZLE: yaw node at `turretLocal`, an axle node `axleX` forward at `bbImportTurretAxleZ`, the
+    hub `pathR` above it, which is `bbMuzzleLocal(p, which, axleZ)` at every pitch. Nothing else
+    of the generator: a second intake or turret drawn through the CAD would be a second robot.
   - **Without it** (a remote player's robot, or the parse still running): a PLACEHOLDER — each prism
     (`bands`, else the hull to `heightIn`) SOLID from 0.5 in to the deck in the chassis fill, the
     envelope above the deck as an OPEN TOWER, wheels at `importedWheels`, the front bar on the
     forward-facing hull edge(s) and the deck arrow clear of the turrets, the signs, and the
     standard intake / launcher / Box Tube where the accessors put them (so their `userData`
     handles animate with no import branch in `sync`).
+  - ⚠️ **EVERY MECHANISM IS ON THE SIM'S GEOMETRY, NEVER THE BOUNDING BOX** (lane 6b, 2026-10-01).
+    The intake through `bbMouths` + `bbMouthFrame` (the mouth's own `face` and lateral centre); each
+    turret at its placed head, the standard assembly ridden up or down whole to
+    `bbImportTurretAxleZ` so its drawn lip is the muzzle; the dumper on `bbDumperFrame` (=
+    `bbImportLaunchLine`, asked with `launchLine`'s own arguments) at `bbDumpZ`, its tray no deeper
+    than the hull behind the lip; the Box Tube standing where the placer ray leaves the hull
+    (`bbBoxTubeFrame` → `importPlaceExit`). The RENDER lane pins node positions to those accessors
+    to 1e-4, and the 2D sprites are pinned the same way in the shared smoke.
   - ⚠️ **THE IMPORT'S HEIGHT IS READ IN `renderImported.ts`, NEVER IN `renderRobots.ts`** — the
     RENDER lane's "the generator reads no height at all" still holds. For a standard robot
     `heightIn` is a declared collider; for an import it is the measured top of real hardware, and a
