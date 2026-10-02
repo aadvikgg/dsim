@@ -161,7 +161,7 @@ function pushFacts(rid: number): void {
     holds: r.holdsCapacity(),
     abandonable: r.isAbandonable(),
     spectators: r.spectatorCount(),
-    imports: { hasImport: imp.hasImport, capless: imp.capless },
+    imports: { hasImport: imp.hasImport, capless: imp.capless, ids: [...(imp.ids ?? [])] },
   };
   const s = JSON.stringify(f);
   if (s === e.last) return;
@@ -313,7 +313,7 @@ function handle(op: Op): void {
     case 'reattach': {
       e.ack = op.seq;
       const s = senders(op.rid, op.sock);
-      const nc = r.reattach(op.id, s.send, s.sendRaw, s.backlog, op.token, op.trusted);
+      const nc = r.reattach(op.id, s.send, s.sendRaw, s.backlog, op.token, op.trusted, op.caps);
       if (nc !== null) connOf.set(op.sock, nc);
       reply(op.call, nc !== null);
       break;

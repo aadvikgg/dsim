@@ -36,7 +36,7 @@
  */
 import { Room, type Client } from '../../server/room';
 import { coerceCaps, decodeClientMsg, encodeMsg, type ClientMsg, type ServerMsg } from '../net/protocol';
-import { importAdmission, isImportedSpec } from '../net/imported';
+import { importAdmission, importIdOf, isImportedSpec } from '../net/imported';
 import { sanitizePlayer } from '../net/sanitize';
 import { initPhysics } from '../sim/physicsEngine';
 import { initPhysics3d } from '../games/biobuzz/sim3d/engine';
@@ -192,6 +192,7 @@ self.addEventListener('message', (e: MessageEvent) => {
     const refusal = importAdmission(room.importState(), {
       imported: isImportedSpec(m.player?.spec),
       caps: coerceCaps(m.caps),
+      id: importIdOf(m.player?.spec),
     });
     if (refusal) {
       post({ k: 'refused', id: m.id, message: refusal });

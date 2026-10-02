@@ -101,8 +101,9 @@ export function setImportedAssetSource(next: ImportedAssetSource | null): void {
 /** the id listeners are called with when EVERY id may have changed (the source was swapped) */
 export const ANY_ID = '*';
 
-/** in-memory blobs lent by their owner (the editor's draft, a relayed mesh) — never evicted */
-const registered = new Map<string, { top?: Blob; mesh?: Blob }>();
+/** in-memory blobs lent by their owner (the editor's draft, a relayed mesh) — never evicted.
+ *  `lender`: '' for this device (the editor), `relay:<owner>` for a room's relay */
+const registered = new Map<string, { top?: Blob; mesh?: Blob; lender: string }>();
 
 /**
  * Lend in-memory assets for `id` (an unsaved draft in the editor, a mesh received over a room's
@@ -110,11 +111,18 @@ const registered = new Map<string, { top?: Blob; mesh?: Blob }>();
  * leaves it. Readers are told, and the cached decode of anything replaced is dropped (its URL
  * revoked), so a replaced draft redraws with the new picture.
  *
+ * ⚠️ ONE LENDER PER ID. `lender` is '' for this device and `relay:<owner>` for a room's relay
+ * (`importedAssetsBridge.ts`). A relayed asset never replaces what another lender lent for that id
+ * (this device's draft, or another seat's look) and is refused (`false`); this device may replace
+ * anything. Taking assets back is the lender's own (`unregisterImportedAssets(id, lender)`).
+ *
  * NOT capped: the owner holds them and must call `unregisterImportedAssets` when it is done (the
  * editor on Save/Discard, the relay on leaving the room).
  */
-export function registerImportedAssets(id: string, assets: { top?: Blob | null; mesh?: Blob | null }): void {
-  const cur = { ...(registered.get(id) ?? {}) };
+export function registerImportedAssets(id: string, assets: { top?: Blob | null; mesh?: Blob | null }, lender = ''): boolean {
+  const had = registered.get(id);
+  if (had && had.lender !== lender && lender !== '') return false;
+  const cur = { ...(had && had.lender === lender ? had : {}), lender };
   if (assets.top !== undefined) {
     if (assets.top) cur.top = assets.top;
     else delete cur.top;
@@ -127,14 +135,15 @@ export function registerImportedAssets(id: string, assets: { top?: Blob | null; 
   else registered.delete(id);
   dropCached(id);
   // the MESH version moves only when the mesh may have: a draft whose picture was re-rendered
-  // must not make the 3D scene re-parse a GLB it already has
-  bump(id, assets.mesh !== undefined);
+  // must not make the 3D scene re-parse a GLB it already has (a lender change moves it too)
+  bump(id, assets.mesh !== undefined || (!!had && had.lender !== lender && !!had.mesh));
+  return true;
 }
 
-/** forget everything lent for `id` (see `registerImportedAssets`) */
-export function unregisterImportedAssets(id: string): void {
+/** forget everything `lender` lent for `id` (see `registerImportedAssets`); another lender's stays */
+export function unregisterImportedAssets(id: string, lender = ''): void {
   const cur = registered.get(id);
-  if (!cur) return;
+  if (!cur || cur.lender !== lender) return;
   registered.delete(id);
   dropCached(id);
   bump(id, cur.mesh !== undefined);
