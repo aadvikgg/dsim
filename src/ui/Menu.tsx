@@ -32,7 +32,7 @@ import { useLibrary } from '../robotImport/ui/useLibrary';
 import { ImportedPanel, ImportedRow, useImportedActions, useRobotNotice } from '../robotImport/ui/ImportedRobots';
 import { FootprintPicture } from '../robotImport/ui/adapters';
 import { handOffFiles } from '../robotImport/ui/handoff';
-import { COPY as IMPORT_COPY } from '../robotImport/ui/copy';
+import { PAGE_COPY as IMPORT_COPY } from '../robotImport/ui/pageCopy';
 import { rangeFill } from './rangeFill';
 import { starPoints } from '../render/drawRobot';
 

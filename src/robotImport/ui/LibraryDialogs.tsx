@@ -1,6 +1,6 @@
 import { useId, useState, type ReactNode } from 'react';
 import { useDialog } from '../../ui/useDialog';
-import { COPY } from './copy';
+import { PAGE_COPY as COPY } from './pageCopy';
 
 /**
  * The importer's dialogs: rename, and the confirms (delete, discard, replace-or-keep-both). One

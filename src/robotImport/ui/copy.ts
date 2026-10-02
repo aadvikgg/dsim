@@ -8,41 +8,12 @@
  * they come; this file is what the UI adds around them.
  */
 import type { LengthUnit, UpAxis } from '../types';
+import { FORMAT_LABEL, PAGE_COPY } from './pageCopy';
+
+export { FORMAT_LABEL };
 
 export const COPY = {
-  // ---- Configure ▸ Robot ----
-  rowCap: 'Imported robots',
-  addTitle: 'Import a robot',
-  addFormats: 'GLB, STEP, STL, OBJ, 3MF or PLY',
-  resumeTitle: 'Resume import',
-  resumeSub: (file: string) => `${file} · not saved`,
-  badge: 'Imported',
-  deleteAria: (name: string) => `Delete ${name}`,
-  added: (name: string) => `Added ${name}.`,
-  saved: (name: string) => `Saved ${name}.`,
-  panelTitle: 'Imported robot',
-  panelEdit: 'Edit in the importer',
-  factFile: 'File',
-  factFootprint: 'Footprint',
-  factFootprintVal: (l: string, w: string, n: number) => `${l} × ${w} in, ${n} sides`,
-  factHeight: 'Height',
-  factTriangles: 'Triangles',
-  rename: 'Rename',
-  duplicate: 'Duplicate',
-  exportFile: 'Export file',
-  del: 'Delete',
-  missingBig: 'Model not on this device',
-  missingText: 'It drives as its footprint here. Import its exported file to see the model.',
-  missingAction: 'Import the file',
-  renameTitle: 'Rename robot',
-  robotName: 'Robot name',
-  cancel: 'Cancel',
-  deleteTitle: (name: string) => `Delete ${name}?`,
-  deleteBody: 'It’s removed from this device. Export it first to keep a copy.',
-  deleteFallback: (name: string) => `You’ll drive ${name} instead.`,
-  standardOnly: 'Uses your last standard robot',
-  exportFailed: (name: string) => `Couldn’t export ${name}. Try again.`,
-
+  ...PAGE_COPY,
   // ---- the editor ----
   back: '← Robot',
   titleNew: 'Import a robot',
@@ -123,10 +94,6 @@ export const COPY = {
   setUpFor: (season: string) => `Set it up for ${season}`,
   newer: 'Couldn’t read the DSIM setup in this file. A newer DSIM made it. Reload the page, or set it up again.',
   setUpAgain: 'Set it up again',
-  dupTitle: (name: string) => `${name} is already on this device`,
-  dupBody: 'Replace it, or keep both?',
-  keepBoth: 'Keep both',
-  replaceIt: 'Replace',
   chooseAnother: 'Choose another file',
   tryAgain: 'Try again',
   previewOff: 'Couldn’t start the 3D preview on this device. Showing the footprint.',
@@ -237,12 +204,3 @@ export function sizeLabel(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-export const FORMAT_LABEL: Record<string, string> = {
-  glb: 'GLB',
-  gltf: 'glTF',
-  stl: 'STL',
-  obj: 'OBJ',
-  '3mf': '3MF',
-  ply: 'PLY',
-  step: 'STEP',
-};

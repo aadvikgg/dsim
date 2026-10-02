@@ -17,7 +17,39 @@ import type { GameId } from '../../games/types';
 import { intakeMountOf } from '../../games/chain/mounts';
 import { bbIntakeMountOf } from '../../games/biobuzz/mounts';
 import { bbLiftOf } from '../../games/biobuzz/mechs';
-import { bbox, insetDepth } from '../geometry';
+// NOT `../geometry`: this file is in the MAIN chunk (the robot page draws the footprint), and
+// geometry.ts is shared with the lazy engine, so importing any of it moved the whole module (the
+// measurement code included) into main. The two helpers it needs are a few lines each.
+
+/** the box of a point set */
+export function bbox(points: readonly Vec2[]): { minX: number; maxX: number; minY: number; maxY: number } {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return { minX, maxX, minY, maxY };
+}
+
+/** how far `p` is inside a CCW convex polygon (negative: outside) */
+function insetDepth(p: Vec2, poly: readonly Vec2[]): number {
+  if (poly.length < 3) return -Infinity;
+  let d = Infinity;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len === 0) continue;
+    const s = ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)) / len;
+    if (s < d) d = s;
+  }
+  return d;
+}
 
 // ---- lane 6: assets ------------------------------------------------------------------------
 

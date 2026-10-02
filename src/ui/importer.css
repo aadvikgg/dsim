@@ -128,7 +128,7 @@
 
 /* ---- the drop box: a `.ds-opt-add` tile with a floor height, so empty, reading and failed
    are the same size ---- */
-.ds-opt.ds-opt-add.ds-import-drop {
+.ds-import .ds-opt.ds-opt-add.ds-import-drop {
   min-height: 200px;
   align-items: center;
   justify-content: center;
@@ -165,7 +165,7 @@
   flex-wrap: wrap;
   gap: var(--ds-s-2);
 }
-.ds-facts dd.warn {
+.ds-import .ds-facts dd.warn {
   color: var(--ds-warn);
 }
 
