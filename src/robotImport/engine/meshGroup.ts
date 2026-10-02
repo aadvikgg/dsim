@@ -4,19 +4,9 @@
  */
 import * as THREE from 'three';
 import type { MeshPart } from '../geometry';
-import { creasedNormals } from './meshOps';
 
-/** the crease angle every importer normal is computed at, degrees */
-export const CREASE_DEG = 40;
-
-/** give every indexed part creased normals (new arrays; parts that have them are kept) */
-export function creaseParts(parts: readonly MeshPart[]): MeshPart[] {
-  return parts.map((p) => {
-    if (p.normals || !p.indices) return p;
-    const c = creasedNormals(p.positions, p.indices, CREASE_DEG);
-    return { positions: c.positions, indices: c.indices, normals: c.normals, color: p.color, name: p.name };
-  });
-}
+// three-free, so the import worker creases without three.js; re-exported for the bake and preview
+export { CREASE_DEG, creaseParts } from './meshOps';
 
 /** one BufferGeometry: position, normal, and the narrowest index type that fits */
 export function geometryOf(p: MeshPart): THREE.BufferGeometry {

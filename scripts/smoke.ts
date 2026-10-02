@@ -31428,6 +31428,294 @@ function impPlayCheck(g: GameId): void {
   }
 }
 
+/**
+ * ROBOT IMPORT AT REAL-CAD SCALE (lane 9; `docs/area/robot-import.md`, "Workers and the two-half
+ * measurement"). Parsing, welding and simplifying moved into a worker and the measurement split in
+ * two cached halves, and every one of those moves is held here to the SAME OUTPUT, bit for bit:
+ * the two halves against `measureParts`, the model frame a worker's matrix rebuilds against the one
+ * measured on, the streamed STL reader against three's loader, the weld without its three arrays
+ * against the weld with them, and the fast `partsFromObject` against `Vector3.applyMatrix4`. Node has
+ * no `Worker`, so the engine's main-thread fallbacks run here, which is the same code the workers run.
+ */
+{
+  const geo = await import('../src/robotImport/geometry');
+  const synth = await import('./robot-import/synthRobot');
+  const { Measurer } = await import('../src/robotImport/engine/measureSession');
+  const { weld } = await import('../src/robotImport/engine/meshOps');
+  const { simplifyParts } = await import('../src/robotImport/engine/simplify');
+  const parse = await import('../src/robotImport/engine/parse');
+  const { importModel } = await import('../src/robotImport/engine/importSession');
+  const { loadModel } = await import('../src/robotImport/engine/load');
+  const { simplifyModel } = await import('../src/robotImport/engine/prepare');
+  const THREE = await import('three');
+  const { STLLoader } = await import('three/examples/jsm/loaders/STLLoader.js');
+  const sameBits = (a: ArrayBufferView | null | undefined, b: ArrayBufferView | null | undefined): boolean => {
+    if (!a || !b) return !a && !b;
+    if (a.byteLength !== b.byteLength) return false;
+    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+    return true;
+  };
+  type P = import('../src/robotImport/geometry').MeshPart;
+  const samePart = (a: P[], b: P[]): boolean =>
+    a.length === b.length && a.every((p, i) => sameBits(p.positions, b[i].positions) && sameBits(p.indices, b[i].indices) && sameBits(p.normals ?? null, b[i].normals ?? null) && JSON.stringify(p.color) === JSON.stringify(b[i].color));
+
+  // ---- the two halves, and the cache over them ----------------------------------------------------
+  {
+    const parts = synth.synthParts(synth.synthRobot(), synth.FRAMES.cadMm) as P[];
+    const prepared = { name: 'synth.stl', format: 'stl' as const, bytes: 0, fileUnit: null, parts, trisIn: geo.triangleCount(parts), notes: [], trisOut: geo.triangleCount(parts), simplifyError: 0 };
+    const base = geo.defaultImportSetup();
+    const setups = [
+      base,
+      { ...base, units: 'in' as const },
+      { ...base, up: '+y' as const },
+      { ...base, yaw: 3 as const },
+      { ...base, hullMaxVerts: 6 },
+      { ...base, bands: false },
+      { ...base, wheels: [{ x: 5, y: 5.25 }, { x: 5, y: -5.25 }, { x: -6, y: 5.25 }, { x: -6, y: -5.25 }] },
+    ];
+    const meas = new Measurer(prepared);
+    const bad = setups.filter((s) => {
+      const ref = geo.measureParts(parts, s, { format: 'stl' });
+      const got = meas.normalise(s);
+      return JSON.stringify(ref.measurement) !== JSON.stringify({ ...got.measurement }) || !samePart(ref.modelParts, got.modelParts);
+    });
+    check('robot import (scale): the cached two-half measurement IS measureParts, field for field and float for float, over units, up, yaw, hull cap, bands and manual wheels', bad.length === 0, bad.map((s) => JSON.stringify(s).slice(0, 80)).join(' | '));
+    const a = meas.normalise(base);
+    const driven = meas.normalise({ ...base, drive: { ...base.drive, massLb: 41 } });
+    const dragged = meas.normalise({ ...base, wheels: [{ x: 5.25, y: 5.5 }, { x: 5.25, y: -5.5 }, { x: -5.5, y: 5.5 }, { x: -5.5, y: -5.5 }] });
+    check(
+      'robot import (scale): a wheel drag re-runs only the light half (same model-frame arrays, new origin); a drivetrain edit returns the very same measurement',
+      dragged.modelParts === a.modelParts && dragged.measurement.origin.x !== a.measurement.origin.x && driven === a && meas.ready({ ...base, wheels: null }) && !meas.ready({ ...base, units: 'cm' }),
+    );
+    // the model frame a worker's `sourceToModel` rebuilds is the one the worker measured on
+    const frames = [base, { ...base, yaw: 1 as const }, { ...base, up: '-x' as const, units: 'cm' as const }];
+    const rebuildBad = frames.filter((s) => {
+      const { oriented, modelParts } = geo.orientParts(parts, s, { format: 'stl' });
+      return !samePart(modelParts, geo.toModelFrame(parts, oriented.sourceToModel));
+    });
+    check('robot import (scale): toModelFrame(sourceToModel) rebuilds the measured model frame bit for bit (the main thread trusts a worker’s matrix)', rebuildBad.length === 0);
+    const o = geo.orientParts(parts, base, { format: 'stl' }).oriented;
+    check('robot import (scale): an OrientedMeasure survives a structured clone (it is what the measure worker posts)', JSON.stringify(structuredClone(o)) === JSON.stringify(o) && geo.finishMeasure(structuredClone(o), base).hull.length === geo.finishMeasure(o, base).hull.length);
+  }
+
+  // ---- the weld, without its three arrays ------------------------------------------------------
+  {
+    // the weld as it was: quantised coordinates kept in three Int32Arrays
+    const weldRef = (part: P, eps: number): { positions: Float32Array; indices: Uint32Array } => {
+      const src = part.positions;
+      const n = src.length / 3;
+      const inv = 1 / eps;
+      let cap = 1;
+      while (cap < n * 2) cap <<= 1;
+      const table = new Int32Array(cap).fill(-1);
+      const qx = new Int32Array(n);
+      const qy = new Int32Array(n);
+      const qz = new Int32Array(n);
+      const remap = new Uint32Array(n);
+      const out = new Float32Array(src.length);
+      let count = 0;
+      for (let i = 0; i < n; i++) {
+        const x = Math.round(src[3 * i] * inv);
+        const y = Math.round(src[3 * i + 1] * inv);
+        const z = Math.round(src[3 * i + 2] * inv);
+        let h = (Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) & (cap - 1);
+        for (;;) {
+          const slot = table[h];
+          if (slot < 0) {
+            table[h] = count;
+            qx[count] = x;
+            qy[count] = y;
+            qz[count] = z;
+            out.set([src[3 * i], src[3 * i + 1], src[3 * i + 2]], 3 * count);
+            remap[i] = count++;
+            break;
+          }
+          if (qx[slot] === x && qy[slot] === y && qz[slot] === z) {
+            remap[i] = slot;
+            break;
+          }
+          h = (h + 1) & (cap - 1);
+        }
+      }
+      const tris: number[] = [];
+      for (let k = 0; k + 2 < n; k += 3) {
+        const a = remap[k];
+        const b = remap[k + 1];
+        const c = remap[k + 2];
+        if (a !== b && b !== c && a !== c) tris.push(a, b, c);
+      }
+      return { positions: out.slice(0, count * 3), indices: Uint32Array.from(tris) };
+    };
+    // near-duplicates, exact duplicates, −0, NaN, and coordinates 4000 extents from the origin
+    // (past int32 once quantised: the case the `| 0` exists for)
+    const pts: number[] = [];
+    let s = 7;
+    const rnd = (): number => ((s = (Math.imul(s, 1103515245) + 12345) >>> 0) / 2 ** 32);
+    for (let t = 0; t < 3000; t++) {
+      for (let k = 0; k < 3; k++) {
+        const far = t % 50 === 7 ? 20000 : 0;
+        const base = Math.floor(rnd() * 40) / 8 + far;
+        pts.push(base + (t % 3 === 0 ? 1e-7 : 0), t % 11 === 0 ? -0 : Math.floor(rnd() * 40) / 8, t % 97 === 5 && k === 1 ? NaN : Math.floor(rnd() * 40) / 8);
+      }
+    }
+    const part: P = { positions: new Float32Array(pts), indices: null, color: [1, 1, 1], name: 'w' };
+    const eps = 5 * 1e-6;
+    const got = weld(part, eps);
+    const ref = weldRef(part, eps);
+    check('robot import (scale): the weld without its quantised-coordinate arrays welds exactly as it did (duplicates, −0, NaN, and coordinates 4000 extents from the origin, past int32 once quantised)', sameBits(got.positions, ref.positions) && sameBits(got.indices, ref.indices), `${got.positions.length / 3} vs ${ref.positions.length / 3} vertices`);
+  }
+
+  // ---- the streamed STL reader against three's loader ------------------------------------------
+  {
+    const writeStl = (tris: number[][][]): Uint8Array => {
+      const buf = new ArrayBuffer(84 + tris.length * 50);
+      const dv = new DataView(buf);
+      dv.setUint32(80, tris.length, true);
+      tris.forEach((t, i) => t.forEach((v, j) => v.forEach((c, k) => dv.setFloat32(84 + i * 50 + 12 + j * 12 + k * 4, c, true))));
+      return new Uint8Array(buf);
+    };
+    const viaLoader = (bytes: Uint8Array): P[] => {
+      const geo3 = new STLLoader().parse(bytes.slice().buffer);
+      const mesh = new THREE.Mesh(geo3, new THREE.MeshStandardMaterial({ color: new THREE.Color().setRGB(...parse.DEFAULT_LINEAR) }));
+      return parse.partsFromObject(mesh, true);
+    };
+    const fixture = new Uint8Array(readFileSync(joinPath('scripts', 'fixtures', 'robot-import', 'robot.stl')));
+    // the fixture, plus a mesh with shared corners, −0, a degenerate and a NaN vertex
+    const odd = writeStl([
+      [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+      [[1, 0, 0], [1, 1, 0], [0, 1, 0]],
+      [[-0, 0, 0], [0, -0, 1], [1, 0, 1]],
+      [[2, 2, 2], [2, 2, 2], [3, 2, 2]],
+      [[5, NaN, 5], [5, 5, 5], [6, 5, 5]],
+      [[5, NaN, 5], [5, 5, 5], [6, 6, 5]],
+    ]);
+    let allSame = true;
+    const notes: string[] = [];
+    for (const [label, bytes] of [['fixture', fixture], ['odd', odd]] as const) {
+      const streamed = await parse.parseBinaryStlWelded(new File([bytes], 'x.stl'));
+      if (!streamed) {
+        allSame = false;
+        notes.push(`${label}: not streamed`);
+        continue;
+      }
+      const ref = viaLoader(bytes);
+      const a = await simplifyParts([streamed], 100_000);
+      const b = await simplifyParts(ref, 100_000);
+      if (!samePart(a.parts, b.parts) || a.trisIn !== b.trisIn) {
+        allSame = false;
+        notes.push(`${label}: ${a.trisIn}/${b.trisIn} tris, ${a.parts[0]?.positions.length}/${b.parts[0]?.positions.length}`);
+      }
+    }
+    check('robot import (scale): a binary STL read in slices and welded as it streams prepares to the same arrays as three’s STLLoader would (fixture, and −0, a degenerate and NaN vertices)', allSame, notes.join('; '));
+    const colour = writeStl([[[0, 0, 0], [1, 0, 0], [0, 1, 0]]]);
+    colour.set(new TextEncoder().encode('COLOR='), 10);
+    const short = fixture.slice(0, fixture.length - 50);
+    check(
+      'robot import (scale): a colour STL, or one whose length disagrees with its count, is left to three’s loader (the streamed reader says no)',
+      (await parse.parseBinaryStlWelded(new File([colour], 'c.stl'))) === null && (await parse.parseBinaryStlWelded(new File([short], 's.stl'))) === null,
+    );
+  }
+
+  // ---- partsFromObject's direct read against Vector3.applyMatrix4 ------------------------------
+  {
+    const g = new THREE.BufferGeometry();
+    const pos = new Float32Array(300);
+    for (let i = 0; i < pos.length; i++) pos[i] = Math.sin(i * 12.9898) * 43.758 + (i % 7 === 0 ? -0 : 0);
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setIndex(Array.from({ length: 99 }, (_, i) => (i * 7) % 100));
+    const root = new THREE.Group();
+    const a = new THREE.Mesh(g, new THREE.MeshStandardMaterial());
+    a.position.set(0.3, -2, 7.25);
+    a.rotation.set(0.4, -1.1, 2.3);
+    a.scale.set(1, -1.5, 2); // mirrored
+    const inst = new THREE.InstancedMesh(g, new THREE.MeshStandardMaterial(), 2);
+    inst.setMatrixAt(1, new THREE.Matrix4().makeRotationZ(0.7).setPosition(3, 1, -1));
+    root.add(a, inst);
+    root.updateMatrixWorld(true);
+    const parts = parse.partsFromObject(root, false);
+    // the reference: Vector3.applyMatrix4 per vertex, as the loader always did
+    const refPos = (m: InstanceType<typeof THREE.Matrix4>): Float32Array => {
+      const out = new Float32Array(pos.length);
+      const v = new THREE.Vector3();
+      for (let i = 0; i < pos.length / 3; i++) {
+        v.set(pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]).applyMatrix4(m);
+        out.set([v.x, v.y, v.z], 3 * i);
+      }
+      return out;
+    };
+    const m1 = new THREE.Matrix4();
+    inst.getMatrixAt(1, m1);
+    const want = [refPos(a.matrixWorld), refPos(inst.matrixWorld.clone().multiply(new THREE.Matrix4())), refPos(inst.matrixWorld.clone().multiply(m1))];
+    const flipped = parts[0].indices![1] === g.index!.getX(2) && parts[0].indices![2] === g.index!.getX(1);
+    check(
+      'robot import (scale): partsFromObject reading the array directly gives Vector3.applyMatrix4’s floats exactly (a mirrored mesh, an instanced one), and still flips a mirrored winding',
+      parts.length === 3 && parts.every((p, i) => sameBits(p.positions, want[i])) && flipped,
+    );
+  }
+
+  // ---- the stated tolerance: measured on the SIMPLIFIED mesh, against the full model -------------
+  {
+    // the stress robot's smallest level (472k triangles: goBILDA channel full of holes, mecanum
+    // rollers, screws and nuts, a chain), as an STL-style loader would hand it over, simplified to
+    // the editor's 100k budget. The engine measures the simplified mesh; the full one is the truth.
+    const stress = await import('./robot-import/stress');
+    const { mergeByColour } = await import('../src/robotImport/engine/meshOps');
+    const raw = stress.flatParts(stress.buildRobot(stress.LEVELS.s)) as P[];
+    const loaded = { name: 'stress.stl', format: 'stl' as const, bytes: 0, fileUnit: null, parts: mergeByColour(raw), trisIn: geo.triangleCount(raw), notes: [] };
+    const prepared = await simplifyModel(loaded, 100_000);
+    const setup = geo.defaultImportSetup();
+    const simp = new Measurer(prepared).normalise(setup).measurement;
+    const full = geo.measureParts(loaded.parts, setup, { format: 'stl' }).measurement;
+    const ds = geo.buildDescriptor({ id: '0123456789abcdef', measurement: simp });
+    const df = geo.buildDescriptor({ id: '0123456789abcdef', measurement: full });
+    // the farthest any vertex of `a` lies outside convex polygon `b`
+    const outside = (a: { x: number; y: number }[], b: { x: number; y: number }[]): number =>
+      Math.max(0, ...a.map((p) => -geo.insetDepth(p, b)));
+    const hullErr = Math.max(outside(df.hull, ds.hull), outside(ds.hull, df.hull));
+    const wheelErr = ds.wheels && df.wheels ? Math.max(...ds.wheels.map((w, i) => Math.hypot(w.x - df.wheels![i].x, w.y - df.wheels![i].y))) : Infinity;
+    const sizeErr = Math.max(Math.abs(simp.size.length - full.size.length), Math.abs(simp.size.width - full.size.width), Math.abs(simp.size.height - full.size.height));
+    check(
+      `robot import (scale): measuring the 100k-triangle simplification of a 472k CAD robot stays within the stated tolerance of measuring all of it — units and up the same, hull ≤ 1/16 in, wheels ≤ 0.15 in, size ≤ 0.02 in, the same band count`,
+      simp.units === full.units && simp.up === full.up && hullErr <= 1 / 16 && wheelErr <= 0.15 && sizeErr <= 0.02 && (ds.bands?.length ?? 0) === (df.bands?.length ?? 0) && prepared.trisOut <= 100_000,
+      `hull ${hullErr.toFixed(4)} wheels ${wheelErr.toFixed(4)} size ${sizeErr.toFixed(4)} bands ${ds.bands?.length}/${df.bands?.length} tris ${prepared.trisOut}`,
+    );
+  }
+
+  // ---- the editor's import entry, and its seams -------------------------------------------------
+  {
+    const stl = new File([readFileSync(joinPath('scripts', 'fixtures', 'robot-import', 'robot.stl'))], 'robot.stl');
+    const viaSession = await importModel([stl], { budget: 100_000 });
+    const viaMain = await simplifyModel(await loadModel([stl]), 100_000);
+    check('robot import (scale): importModel (no Worker here: its main-thread fallback) prepares the same model as loadModel + simplifyModel', samePart(viaSession.parts, viaMain.parts) && viaSession.trisIn === viaMain.trisIn);
+    const ac = new AbortController();
+    ac.abort();
+    let name = '';
+    try {
+      await importModel([stl], { budget: 100_000, signal: ac.signal });
+    } catch (e) {
+      name = e instanceof Error ? e.name : '';
+    }
+    check('robot import (scale): a cancelled import rejects with an AbortError (which the editor shows nothing for)', name === 'AbortError');
+    const src = (f: string): string => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+    const ed = src('src/robotImport/ui/ImportEditor.tsx');
+    check(
+      'robot import (scale): the editor reads a dropped file through importModel and measures through prepareMeasure, and Cancel aborts the import (terminating its workers)',
+      /e\.importModel\(files,/.test(ed) && /e\.prepareMeasure\(prepared, setup\)/.test(ed) && !/e\.loadModel\(files, \(stage\)/.test(ed) && /onCancel=\{\(\) => \{[^}]*importAbort\.current\?\.abort\(\)/.test(ed),
+    );
+    // the worker modules touch no DOM: their whole graph must run where there is none
+    const workerSide = ['importWorker.ts', 'measureWorker.ts', 'parse.ts', 'prepare.ts', 'simplify.ts', 'meshOps.ts', 'bakeMesh.ts', 'meshGroup.ts', 'importError.ts'].map((f) => joinPath('src', 'robotImport', 'engine', f));
+    const domUsers = workerSide.filter((f) => /\b(document|window|localStorage|indexedDB)\b/.test(src(f).replace(/^\s*(\/\/|\*|\/\*).*$/gm, '')));
+    check('robot import (scale): what the import and measure workers run uses no DOM (no document, window, storage)', domUsers.length === 0, domUsers.join(', '));
+    const spawns = ['importSession.ts', 'measureSession.ts', 'stepReader.ts'].map((f) => src(joinPath('src', 'robotImport', 'engine', f)));
+    check(
+      'robot import (scale): each worker is made with `new Worker(new URL(…, import.meta.url), { type: \'module\' })`, the form Vite bundles as its own chunk',
+      /new Worker\(new URL\('\.\/importWorker\.ts', import\.meta\.url\), \{ type: 'module' \}\)/.test(spawns[0]) && /new Worker\(new URL\('\.\/measureWorker\.ts', import\.meta\.url\), \{ type: 'module' \}\)/.test(spawns[1]) && /new Worker\(new URL\('\.\/stepWorker\.ts', import\.meta\.url\), \{ type: 'module' \}\)/.test(spawns[2]),
+    );
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // IMPORTED ROBOTS: MECHANISMS (`src/sim/importedMech.ts`, each game's `importMech.ts` /
 // `importChecks.ts`; `docs/area/physics.md` "Imported robots: mechanisms"). Mouths carved from the

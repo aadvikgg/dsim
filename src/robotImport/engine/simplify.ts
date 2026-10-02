@@ -41,11 +41,23 @@ function extentOf(parts: readonly MeshPart[]): number {
  * keeps a shape); `simplify` runs first with a bounded error, and where it stalls short of the
  * target (thousands of disconnected fasteners do that) `simplifySloppy` finishes the job.
  */
-export async function simplifyParts(parts: readonly MeshPart[], budget: number): Promise<SimplifyReport> {
+export async function simplifyParts(parts: readonly MeshPart[], budget: number, onProgress?: (frac: number) => void): Promise<SimplifyReport> {
   await MeshoptSimplifier.ready;
   const trisIn = triangleCount(parts);
   const eps = extentOf(parts) * 1e-6;
-  const welded = parts.map((p) => ({ part: p, ...weld(p, eps) }));
+  // progress: welding is the first quarter, the first simplify pass the rest (later passes, when
+  // the budget overshoots, are small)
+  let doneTris = 0;
+  const tick = (tris: number, from: number, span: number): void => {
+    doneTris += tris;
+    onProgress?.(from + (span * doneTris) / Math.max(1, trisIn));
+  };
+  const welded = parts.map((p) => {
+    const w = { part: p, ...weld(p, eps) };
+    tick(triangleCount([p]), 0, 0.25);
+    return w;
+  });
+  doneTris = 0;
   const weldedTris = welded.reduce((s, w) => s + w.indices.length / 3, 0);
   const out: MeshPart[] = [];
   let error = 0;
@@ -78,6 +90,7 @@ export async function simplifyParts(parts: readonly MeshPart[], budget: number):
           }
         }
       }
+      if (pass === 0) tick(n, 0.25, 0.75);
       if (idx.length < 3) continue;
       next.push({ positions: w.positions, indices: idx, part: w.part });
     }

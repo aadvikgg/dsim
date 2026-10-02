@@ -5,9 +5,9 @@ import { coerceSpec } from '../../sim/spawn';
 import { seasonFor } from '../../seasons';
 import { FOCUSABLE } from '../../ui/PadNavLayer';
 import { loadImporterEngine, type ImporterEngine } from '../engineLoader';
-import type { NormalisedModel, PreparedModel } from '../engine/importerEngine';
+import type { ImportProgress, NormalisedModel, PreparedModel } from '../engine/importerEngine';
 import type { LoadStage } from '../engine/load';
-import { defaultImportSetup, transformParts } from '../geometry';
+import { defaultImportSetup, orientKey, transformParts } from '../geometry';
 import { getRobot, listRobots, newRobotId, putRobot } from '../library';
 import { readShareFile, type SharePayload } from '../shareFile';
 import { STORED_MESH_TO_ROBOT, type ImportSetup, type LibraryRobot } from '../types';
@@ -74,6 +74,13 @@ const STAGE_LABEL = (stage: LoadStage, file: string): string => {
   return typeof p === 'function' ? p(file) : p;
 };
 
+/** the drop box's line for an import stage reported by the engine (worker or not) */
+const progressLabel = (p: ImportProgress, file: string): string =>
+  p.stage === 'simplify' ? COPY.phase.simplify((p.tris ?? 0).toLocaleString('en-US')) : p.stage === 'measure' ? COPY.phase.measure : STAGE_LABEL(p.stage, file);
+
+/** a measurement still running after this long says so; a shorter one would only flicker */
+const MEASURING_NOTICE_MS = 300;
+
 function freshDoc(settings: GameSettings, key: string, editId: string | null): EditorDoc {
   const base: RobotSpec = { ...settings.spec };
   delete base.imported;
@@ -118,6 +125,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
     { kind: 'discard' } | { kind: 'dup'; name: string; replace: () => void; keepBoth: () => void } | null
   >(null);
   const gen = useRef(0);
+  /** the import in flight: aborting it terminates its workers (Cancel, a new drop) */
+  const importAbort = useRef<AbortController | null>(null);
   const pendingFocus = useRef<string | null>(null);
 
   const setDraft = useCallback((d: LiveDraft | null) => {
@@ -150,6 +159,10 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const readModel = useCallback(
     async (files: File[], opts: { setup?: Partial<ImportSetup>; savedModel?: boolean; spec?: RobotSpec; keepSource?: EditorDoc['source'] } = {}) => {
       const my = ++gen.current;
+      // one import at a time: a new drop stops the last one's workers
+      importAbort.current?.abort();
+      const abort = new AbortController();
+      importAbort.current = abort;
       const name = files[0]?.name ?? '';
       setError(null);
       setActionError(null);
@@ -166,22 +179,27 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         return;
       }
       try {
-        const model = await e.loadModel(files, (stage) => {
-          if (my === gen.current) setPhase({ title: name, label: STAGE_LABEL(stage, name) });
+        // read, weld and simplify in the import worker; the main thread only paints the progress
+        const prepared = await e.importModel(files, {
+          budget: draftRef.current?.doc.setup.triBudget ?? defaultImportSetup().triBudget,
+          signal: abort.signal,
+          onProgress: (p) => {
+            if (my === gen.current) setPhase({ title: name, label: progressLabel(p, name), frac: p.frac });
+          },
         });
         if (my !== gen.current) return;
-        setPhase({ title: name, label: COPY.phase.simplify(model.trisIn.toLocaleString('en-US')) });
-        // a frame for the label to paint before the synchronous part of simplification
-        await new Promise((r) => setTimeout(r, 30));
+        setPhase({ title: name, label: COPY.phase.measure });
         const cur = draftRef.current;
         const baseDoc = cur?.doc ?? freshDoc(settings, key, editId);
-        const prepared = await e.simplifyModel(model, baseDoc.setup.triBudget);
-        if (my !== gen.current) return;
-        setPhase({ title: name, label: COPY.phase.measure });
-        await new Promise((r) => setTimeout(r, 30));
         const setup: ImportSetup = { ...baseDoc.setup, units: 'auto', up: 'auto', yaw: 0, wheels: null, ...opts.setup };
+        // the first measurement in the measure worker; `normalise` then answers from its cache
+        await e.prepareMeasure(prepared, setup);
+        if (my !== gen.current) {
+          e.releaseModel(prepared);
+          return;
+        }
         const n = e.normalise(prepared, setup);
-        if (my !== gen.current) return;
+        const model = prepared;
         const spec = opts.spec ?? baseDoc.spec;
         const doc: EditorDoc = {
           ...baseDoc,
@@ -202,10 +220,12 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
           savedModel: !!opts.savedModel,
           updated: Date.now(),
         };
+        const replaced = draftRef.current?.model;
+        if (replaced && replaced !== prepared) e.releaseModel(replaced as PreparedModel);
         setDraft({ doc, model: prepared, modelStored: false, baked: null });
         setPhase(null);
       } catch (err) {
-        if (my !== gen.current) return;
+        if (my !== gen.current || (err instanceof Error && err.name === 'AbortError')) return;
         console.warn('[import] read failed', err);
         setPhase(null);
         const msg = err instanceof Error && err.name === 'ImportError' ? err.message : `Couldn’t read ${name}. Export it again and retry.`;
@@ -379,8 +399,28 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   // ---- derived -------------------------------------------------------------------------------
   const doc = draft?.doc ?? null;
   const model = draft?.model ?? null;
-  const normalised: NormalisedModel | null = useMemo(() => {
-    if (!eng || !model || !doc) return null;
+  // MEASURING, IN TWO HALVES (`measureSession.ts`). A units, up-axis or turn change needs a new
+  // orientation, measured in the measure worker; until it lands the editor keeps showing the last
+  // measurement of this model and holds anything that would act on it. Every other edit (a wheel,
+  // the drivetrain, a mechanism) finds its orientation cached and costs the light half only.
+  const okey = doc ? orientKey(doc.setup) : '';
+  const ready = !!(eng && model && doc) && eng.measureReady(model as PreparedModel, doc.setup);
+  const [, setMeasured] = useState(0);
+  useEffect(() => {
+    if (!eng || !model || !doc || ready) return;
+    let live = true;
+    eng.prepareMeasure(model as PreparedModel, doc.setup).then(
+      () => live && setMeasured((t) => t + 1),
+      (err) => console.warn('[import] measure failed', err),
+    );
+    return () => {
+      live = false;
+    };
+    // once per orientation: a wheel or drivetrain edit has the same key and is never `ready: false`
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eng, model, okey, ready]);
+  const fresh: NormalisedModel | null = useMemo(() => {
+    if (!eng || !model || !doc || !ready) return null;
     try {
       return eng.normalise(model as PreparedModel, doc.setup);
     } catch (err) {
@@ -388,7 +428,18 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
       return null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eng, model, doc?.setup]);
+  }, [eng, model, doc?.setup, ready]);
+  const lastMeasured = useRef<{ model: unknown; n: NormalisedModel } | null>(null);
+  if (fresh) lastMeasured.current = { model, n: fresh };
+  const normalised = fresh ?? (lastMeasured.current?.model === model ? lastMeasured.current.n : null);
+  /** a new orientation is being measured; what is shown is the last one */
+  const measuring = !!model && !fresh;
+  const [measuringLong, setMeasuringLong] = useState(false);
+  useEffect(() => {
+    if (!measuring) return setMeasuringLong(false);
+    const t = window.setTimeout(() => setMeasuringLong(true), MEASURING_NOTICE_MS);
+    return () => window.clearTimeout(t);
+  }, [measuring]);
   const m = normalised?.measurement ?? null;
   const built = useMemo(() => (doc && m ? buildSpec(doc, m) : null), [doc, m]);
   const defs = useMemo(() => (built ? mechHandlesFor(game, built.spec) : []), [built, game]);
@@ -397,11 +448,12 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const numbers = useMemo(() => (built ? driveNumbers(built, game) : null), [built, game]);
 
   // placements default in once there is a footprint, and again when a mechanism appears
+  // (never from a measurement of the orientation being replaced: the placements would land on it)
   useEffect(() => {
-    if (!doc || !m || !built || m.hull.length < 3) return;
+    if (!doc || !m || !built || m.hull.length < 3 || measuring) return;
     const next = defaultMechFor(game, built.spec, m.origin, doc.mech);
     if (JSON.stringify(next) !== JSON.stringify(doc.mech)) update((d) => ({ ...d, mech: next }));
-  }, [doc, m, built, game, update]);
+  }, [doc, m, built, game, update, measuring]);
 
   // focus after a "Fix", a step change, or a return from the test drive
   useEffect(() => {
@@ -434,7 +486,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const ensureBaked = async (): Promise<NonNullable<LiveDraft['baked']> | null> => {
     const cur = draftRef.current;
     const e = engRef.current;
-    if (!cur || !e || !normalised || !built?.spec.imported) return null;
+    if (!cur || !e || !normalised || measuring || !built?.spec.imported) return null;
     const stamp = JSON.stringify([cur.doc.setup, cur.doc.mech, built.spec.imported]);
     if (cur.baked?.stamp === stamp) return cur.baked;
     const r = await e.bake({ modelParts: normalised.modelParts, origin: normalised.measurement.origin, descriptor: built.spec.imported });
@@ -480,6 +532,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         return;
       }
       await dropDraft(key);
+      if (cur.model) engRef.current?.releaseModel(cur.model);
       // the draft's lent pictures go, and the renderers read the library's copy from now on
       unregisterImportedAssets(cur.doc.id);
       invalidateImportedAssets(cur.doc.id);
@@ -513,8 +566,11 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const discard = async (): Promise<void> => {
     setDialog(null);
     gen.current++;
+    importAbort.current?.abort();
     const id = draftRef.current?.doc.id;
+    const dropped = draftRef.current?.model;
     await dropDraft(key);
+    if (dropped) engRef.current?.releaseModel(dropped);
     if (id) unregisterImportedAssets(id);
     onBack();
   };
@@ -523,7 +579,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const baseWheels = m ? (m.wheelsUsed ?? (m.hull.length >= 3 ? rectangleWheels(m.hull) : null)) : null;
   const shownWheels = wheelDrag ?? baseWheels;
   const onWheel = (i: number, p: Vec2, final: boolean): void => {
-    if (!m || !baseWheels) return;
+    // not while a new orientation is measured: the wheels shown are in the frame it replaces
+    if (!m || !baseWheels || measuring) return;
     const next = moveWheel(baseWheels, i, p, mirror, m.hull);
     if (!final) return setWheelDrag(next);
     setWheelDrag(null);
@@ -662,10 +719,14 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
           <div className="ds-panel-h">
             {step === 3 && hasModel ? (
               <h2 className={`ds-panel-title notice${blocked ? ' error' : ''}`} role="status">
-                {actionError ?? (busy ? COPY.working : reviewSummary(items))}
+                {actionError ?? (busy ? COPY.working : measuring ? COPY.phase.measure : reviewSummary(items))}
               </h2>
             ) : (
-              <h2 className="ds-panel-title">{actionError ?? COPY.steps[step]}</h2>
+              // a measurement past `MEASURING_NOTICE_MS` takes the title's place, as a status does on
+              // the Controls screen: the slot keeps its line, so nothing below it moves
+              <h2 className={`ds-panel-title${measuringLong ? ' notice' : ''}`} role={measuringLong ? 'status' : undefined}>
+                {actionError ?? (measuringLong ? COPY.phase.measure : COPY.steps[step])}
+              </h2>
             )}
           </div>
           <div className="ds-panel-body stack">
@@ -673,7 +734,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
               <ModelStep
                 doc={doc}
                 m={m}
-                phase={phase}
+                // a restored draft's model is measured before the step can show it
+                phase={phase ?? (model && !normalised ? { title: doc.source?.name ?? doc.sourceName ?? '', label: COPY.phase.measure } : null)}
                 error={error}
                 wheels={shownWheels}
                 selectedWheel={selWheel}
@@ -681,6 +743,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
                 onFiles={(f) => void onFiles(f)}
                 onCancel={() => {
                   gen.current++;
+                  // terminates the import's workers: the CPU stops with the bar
+                  importAbort.current?.abort();
                   setPhase(null);
                 }}
                 onSetup={(patch) =>
@@ -732,14 +796,14 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
             </button>
           ) : (
             <>
-              <button type="button" className="ds-btn" disabled={blocked || busy} aria-describedby={why ? 'ri-why' : undefined} onClick={exportIt}>
+              <button type="button" className="ds-btn" disabled={blocked || busy || measuring} aria-describedby={why ? 'ri-why' : undefined} onClick={exportIt}>
                 {COPY.exportFile}
               </button>
               <button
                 type="button"
                 id="ri-testdrive"
                 className="ds-btn"
-                disabled={blocked || busy}
+                disabled={blocked || busy || measuring}
                 aria-describedby={why ? 'ri-why' : undefined}
                 onClick={testDrive}
               >
@@ -748,7 +812,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
               <button
                 type="button"
                 className="ds-btn primary"
-                disabled={blocked || busy}
+                disabled={blocked || busy || measuring}
                 aria-describedby={why ? 'ri-why' : undefined}
                 onClick={save}
               >

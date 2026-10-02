@@ -32,6 +32,11 @@ touching `src/robotImport/**`.
   `importerEngine-*.js` and the STEP files by filename. Until a screen imports the loader, a
   production build drops the engine; `npm run bundleaudit:importer` builds with the loader as an
   extra entry and audits that.
+- **The engine runs two more workers** (see "Workers" below): `importWorker.ts` and
+  `measureWorker.ts`, each its own chunk (route `importworker`, by filename, with the import worker's
+  lazy `meshoptDecoder-*.js`). A worker is made only as `new Worker(new URL('./x.ts',
+  import.meta.url), { type: 'module' })` inside `engine/` (a smoke check pins the form), and what it
+  runs touches no DOM (another check).
 
 ## Frames — every number is in exactly one of these
 
@@ -78,8 +83,17 @@ touching `src/robotImport/**`.
   optimum (a 64-gon circle cut to 16: 0.26 in, against 0.17 for even spacing). Then quantised to
   1/64 in and re-hulled so `coerceImported` leaves it unchanged.
 - **Measured on the simplified mesh.** The engine simplifies once per file, in the source frame
-  (simplification commutes with rotation and uniform scale), and `normalise` re-measures the
-  ≤ 150k-triangle result on every editor change in tens of milliseconds.
+  (simplification commutes with rotation and uniform scale), and measures the ≤ 150k-triangle
+  result. Against measuring every triangle of the stress robots (0.5, 1.5 and 3.9 M), that costs at
+  most 0.07 in of hull, 0.13 in of wheel centre and 0.01 in of height, with the same units, up axis
+  and band count (`stressbench.ts --full`); `npm test` holds the 0.5 M robot to 1/16 in, 0.15 in and
+  0.02 in.
+- **Two halves, cached** (`measureSession.ts`). `orientParts` (units and up detection, the model
+  frame, the raw hull, floor contacts and wheels, bands) depends only on the units, up axis, yaw and
+  band switch; `finishMeasure` (the hull cap, manual wheels, the origin, the band shift, the checks)
+  on the rest. `measureParts` is the one composed with the other, and the engine keeps one
+  orientation per key, so a wheel drag or a drivetrain edit re-runs only the finish (under a
+  millisecond) and the model-frame arrays keep their identity (the preview does not rebuild).
 - **Colours are linear RGB** everywhere (`MeshPart.color`, three's working space, glTF's
   `baseColorFactor`). occt already returns linear: converting its colours again darkens them.
 - **Height bands** (BIOBUZZ 3D): triangles are clipped into 0.5 in slices, each slice hulled, and
@@ -97,6 +111,70 @@ touching `src/robotImport/**`.
 - The drivetrain numbers shown are `driveParams`/`pushForce` of the spec that will be saved. The
   equivalent rpm is motor free rpm ÷ gearbox ÷ external ratio × (wheel mm / 104), because the sim
   models wheel rpm at a 104 mm wheel (`SPEED_PER_RPM`). Catalogue sources are cited in `drive.ts`.
+
+## Workers: nothing that scales with the triangle count runs on the main thread
+
+A real FTC export is 1–5 M triangles (every screw thread, chain link and gear tooth). Measured
+before this rule, a 3.9 M-triangle STL froze the editor for one 3.6 s task and a units click cost
+110–200 ms. So, in the editor:
+
+| work | where |
+|---|---|
+| parse GLB, glTF, STL, OBJ+MTL, PLY; merge by colour; weld; simplify; crease | `importWorker.ts`, one per import, terminated when it answers |
+| STEP: occt | `stepWorker.ts`, then its parts go to the import worker for the rest |
+| 3MF: three's loader | **main thread** (it needs `DOMParser`, which no worker has); the rest in the import worker |
+| a new orientation (units, up axis, turn) | `measureWorker.ts`, one per model in the editor, holding a copy of the prepared model |
+| the light half of a measurement, the model-frame arrays | main thread, from the worker's small `OrientedMeasure` (`toModelFrame` rebuilds the arrays bit for bit) |
+| the bake's GLB export and its refits | the import worker (`bakeMesh.ts`); the two pictures need WebGL and stay, with `compileAsync` first |
+
+- **Identical outputs.** Every move is the same code in another thread, and `npm test` holds each to
+  the old result bit for bit: the halves against `measureParts`, `toModelFrame` against the arrays
+  measured on, the streamed STL reader against three's loader, the weld without its three
+  quantised arrays against the weld with them, the direct `partsFromObject` read against
+  `Vector3.applyMatrix4`. Arrays cross TRANSFERRED; a buffer listed twice is a `DataCloneError`, so
+  `partBuffers` dedupes.
+- **The streamed STL reader** (`parseBinaryStlWelded`) reads a binary STL in 3.2 MB slices and merges
+  bit-identical vertices as it goes, so a 184 MB file never sits in memory un-indexed; an ASCII STL,
+  a colour STL or one whose length disagrees with its count goes to three's loader.
+- **Cancel terminates** the import's workers (occt and meshopt cannot be interrupted from inside);
+  the promise rejects with an `AbortError`, which the editor shows nothing for. A new drop cancels the
+  last one. Measured, the core goes idle within 0.25–2 s of the click.
+- **While a new orientation is measured** the editor shows the last measurement of this model and
+  holds what would act on it (default placements, a wheel drag, Save, Test drive, Export); past
+  300 ms the panel title says "Measuring…".
+- **Fallbacks.** No `Worker`, or a worker script that does not load: the same steps on the main
+  thread (`load.ts`, `normalise` computing the orientation itself). `npm test` runs those paths,
+  which is the same code the workers run. A stored mesh, a share file and the dev harness use the
+  main-thread `loadModel` on purpose (≤ 4 MB).
+- **Memory.** The renderer's peak on the 3.9 M STL went from 1021 MB to 763 MB; what is left is
+  meshopt's working set for a 3.9 M-triangle part, in the import worker, returned when it is
+  terminated. The main thread holds the prepared model (≤ 150k triangles) and up to six
+  orientations of it; two models keep a measure worker (`KEEP_MODELS`), the oldest is released.
+
+Measured 2026-10-02 (`scripts/robot-import/stressprobe.cjs`, production build, offscreen Electron,
+software GL, Ryzen 9 7950X; the stress robots from `scripts/robot-import/stress.ts`):
+
+| model (file MB) | import: longest task, ms | import: blocked total, ms | first frame, ms | peak renderer MB | Units/Up/Turn: longest task / settled, ms | wheel nudge: longest / settled, ms | drivetrain pick, ms | Save: longest task, ms |
+|---|---|---|---|---|---|---|---|---|
+| 0.47 M GLB (5.7) | 237 → 0 | 435 → 0 | 752 → 625 | 323 → 260 | 159/198 → 0/198 | 104/131 → 0/32 | 72 → 0 | 0 → 0 |
+| 0.47 M GLB flat (14.2) | 236 → 0 | 433 → 0 | 777 → 606 | 340 → 327 | 178/213 → 0/167 | 96/115 → 0/31 | 70 → 0 | 0 → 0 |
+| 0.47 M STL (22.5) | 324 → 0 | 570 → 0 | 811 → 798 | 362 → 267 | 109/131 → 0/165 | 121/143 → 0/34 | 77 → 0 | 120 → 0 |
+| 0.47 M STEP (8.6) | 108 → 0 | 182 → 0 | 7616 → 7363 | 952 → 965 | 68/90 → 0/115 | 53/66 → 0/33 | 0 → 0 | 0 → 0 |
+| 1.55 M GLB (8.1) | 897 → 0 | 1157 → 0 | 1606 → 1260 | 477 → 434 | 172/197 → 0/180 | 111/132 → 0/32 | 74 → 0 | 104 → 0 |
+| 1.55 M GLB flat (34.7) | 875 → 0 | 1161 → 0 | 1681 → 1326 | 508 → 510 | 198/233 → 0/233 | 83/115 → 0/34 | 87 → 0 | 94 → 0 |
+| 1.55 M STL (74) | 1281 → 50 | 1532 → 50 | 1893 → 1944 | 549 → 430 | 127/150 → 0/183 | 135/164 → 0/33 | 73 → 0 | 103 → 0 |
+| 3.85 M GLB (12.4) | 2326 → 0 | 2577 → 0 | 3311 → 2660 | 795 → 811 | 168/198 → 0/197 | 110/128 → 0/34 | 79 → 0 | 118 → 0 |
+| 3.85 M GLB flat (79.7) | 2747 → 50 | 3008 → 50 | 3969 → 3347 | 791 → 934 | 137/165 → 0/197 | 104/132 → 0/34 | 71 → 0 | 97 → 0 |
+| 3.85 M STL (183.8) | 3569 → 0 | 3843 → 0 | 4408 → 4389 | 1021 → 763 | 120/143 → 0/197 | 152/179 → 0/33 | 79 → 0 | 91 → 0 |
+
+Before → after, per stage (long tasks are the browser's, 50 ms and over). The import's work all left
+the main thread: what remains is two 50 ms tasks at the first frame, and the measure worker's
+answer, 115–230 ms after a Units, Up or Turn click, with nothing blocked meanwhile. A wheel nudge
+or a drivetrain pick re-runs only the light half. A Save no longer blocks either. Cancel: before,
+the click waited behind the frozen page (up to the longest task, 3.6 s) and a STEP read ran to its
+end; now it is handled at once and the workers are terminated (the core is idle within 0.25–2 s,
+the time this Electron takes to stop even a bare busy-loop worker). Memory: the streamed STL reader
+cut the STL peaks by a quarter; a GLB's peak is about what it was (18 % higher on the 80 MB flat\none: the worker holds the buffers the main thread did), and a STEP's is occt's.
 
 ## Relayed to a room (VISUALS RELAY)
 
@@ -159,7 +237,8 @@ pattern, or `import` reads as a section name). Four steps: Model, Drivetrain, Me
 - `npm test` runs the DOM-free half (a block at the end of `scripts/smoke.ts`): the catalogue,
   hull/reduction/wheels/bands, units and up axis in every orientation, HANDEDNESS (the synthetic
   robot carries a flag on its left side only), the descriptor's contract shape, the frame
-  matrices, and the share file's byte layout.
+  matrices, and the share file's byte layout. The `robot import (scale)` block after it holds the
+  worker moves to the old outputs bit for bit, and the simplified measurement to its tolerance.
 - `scripts/robot-import/harness/` is a throwaway Vite page (`npx vite scripts/robot-import/harness
   --port 5191`) that runs every fixture format through the real engine in a browser, re-imports
   each baked GLB to check the stored frame round-trips, and writes the outputs to
@@ -181,6 +260,12 @@ pattern, or `import` reads as a section name). Four steps: Model, Drivetrain, Me
   first frame 524 ms, longest task 142 ms (budget 200); re-opening a saved import 147 ms the
   first time, 24 ms warm; ten editor trips: heap flat after GC, no "Too many active WebGL
   contexts".
-  ⚠️ **Past ~250k triangles the longest task breaks 200 ms**: 368k gave 307 ms, nearly all of it
-  `simplifyModel` (meshopt on the main thread). Moving the simplifier into a worker, as the STEP
-  reader already is, is the fix if big exports turn out to be common.
+  Past ~250k triangles the longest task broke 200 ms (368k gave 307 ms, nearly all `simplifyModel`);
+  that is what moved into the import worker (see "Workers").
+- **At real-CAD scale**: `npx tsx scripts/robot-import/stress.ts` writes the stress robots (0.5, 1.5
+  and 3.9 M triangles as shared-mesh GLB, flat GLB and binary STL, and an analytic STEP) to
+  `%TEMP%/dsim-robot-stress` (30–190 MB each, never committed). `scripts/robot-import/stressprobe.cjs`
+  drives the real editor with them against a production build (import timeline, long tasks, renderer
+  memory, each Model-step edit, a preview zoom, Save, Cancel with the CPU after it), and
+  `scripts/robot-import/stressbench.ts` times the engine's stages in Node and, with `--full`, the
+  accuracy of measuring the simplified mesh against the full one.
