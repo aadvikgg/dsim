@@ -959,6 +959,43 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
   `t`. Looking at a robot close up also found the TURRET and the BOX TUBE built INSIDE the chassis
   box, `specKey` missing `drivetrain`, and a discarded group never disposed — all three were the
   MATCH's bugs and all three are fixed there.
+- **IMPORTED ROBOTS IN 3D** (`docs/robot-import-plan.md` §1, 2026-10-01). Still ONE generator and
+  ONE key: `buildRobotGroup` branches on `spec.imported` into `buildImportedRobot` (same file), which
+  composes `scene/renderImported.ts`'s parts with this file's own sign, intake, turret and Box Tube
+  builders. `renderImported.ts` imports nothing from `renderRobots.ts`, so the dependency runs one
+  way.
+  - **With the mesh on this device** (the owner's robot, or a GLB lent to `render/importedAssets.ts`):
+    the stored GLB is parsed ONCE per id by the scene's own `GLTFLoader` (`renderElementsGlb.ts`'s
+    `loader()`, meshopt attached), kept as a reference-counted TEMPLATE (LRU of
+    `IMPORTED_MESH_TEMPLATE_CAP`) and cloned per robot; `disposeRobotGroup` skips everything a
+    template owns (`isImportShared`) and hands the reference back. The root node carries the
+    importer's `STORED_MESH_TO_ROBOT` (glTF metres, +Y up, +Z front → robot inches, +z up). Every
+    material's emissive is zeroed at parse (a robot part never glows), and the meshes carry NO
+    `bbFamily`, so the physical-materials swap leaves them on their own PBR materials in both
+    modes. On top: the two ROBOT SIGNS on the hull's flank-most edges and, for a turreted launcher,
+    an AIM SIGHT (a hub and a slim rod, NOT a hoop — a floating ring read as a marker) on the same
+    `turretHeads`/`turretPitches` handles `sync` already poses. Nothing else of the generator: a
+    second intake or turret drawn through the CAD would be a second robot.
+  - **Without it** (a remote player's robot, or the parse still running): a PLACEHOLDER — each prism
+    (`bands`, else the hull to `heightIn`) SOLID from 0.5 in to the deck in the chassis fill, the
+    envelope above the deck as an OPEN TOWER, wheels at `importedWheels`, the front bar on the
+    forward-facing hull edge(s) and the deck arrow clear of the turrets, the signs, and the
+    standard intake / launcher / Box Tube where the accessors put them (so their `userData`
+    handles animate with no import branch in `sync`).
+  - ⚠️ **THE IMPORT'S HEIGHT IS READ IN `renderImported.ts`, NEVER IN `renderRobots.ts`** — the
+    RENDER lane's "the generator reads no height at all" still holds. For a standard robot
+    `heightIn` is a declared collider; for an import it is the measured top of real hardware, and a
+    placeholder that stopped at the deck would hide half the robot a remote driver is about to hit.
+  - **THE KEY.** `bbSpecKey` appends the descriptor's digest (id + FNV-1a of its JSON) for an import
+    only, so a standard key is byte-identical. The MESH STATE (`importedMeshKey`:
+    `id@meshVersion:hull|mesh`, which also starts the load) is per device, like the wheel tier:
+    `sync` folds it into its local key and the preview into `setSpec`'s, and the preview also
+    re-keys itself on `onImportedMeshChange`, because the parse lands between two React renders.
+    The placeholder swaps for the mesh on the first frame after the parse.
+  - RENDER lane: `importedRobotChecks` (placeholder bounds = hull/bands and inside the hull, the
+    key, the real GLTFLoader path from a byte-built GLB `fixtures/importGlb.ts`, the swap in `sync`,
+    disposal, the template cap). Pictures: `scripts/robot-import/render/` (an offscreen Electron
+    capture of a REAL importer bake through every renderer, both themes).
 - ⚠️ **WHICH END IS THE FRONT IS ONE LANGUAGE, DRAWN IN BOTH RENDERERS** (owner, 2026-09-22:
   "somehow make it clearer fundamentally which side is front and which is back in game. This is
   especially confusing in a symmetric robot in 3D"). `bbFrontMarks` (`parts.ts`) is the geometry
