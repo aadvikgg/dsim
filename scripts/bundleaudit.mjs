@@ -66,6 +66,19 @@
  *                `import('./renderPost')` and fetched only when one of them is on. It imports
  *                three.js from the scene chunk rather than carrying it, so it has none of the
  *                `scene` markers and would otherwise land in `other`. Matched by FILENAME.
+ *   importer   — THE ROBOT IMPORTER ENGINE (`docs/robot-import-plan.md` §4, `docs/area/robot-import.md`):
+ *                `importerEngine-*.js`, the lazy three.js zone `src/robotImport/engine/` behind
+ *                `engineLoader.ts`'s one dynamic import — the loaders (glTF, STL, OBJ+MTL, 3MF with
+ *                fflate, PLY), meshopt's simplifier with its inlined wasm, GLTFExporter, the bake and
+ *                the preview. Matched by FILENAME. ⚠️ IT IMPORTS three.js, and so does the scene, so
+ *                once both are reachable Rollup HOISTS three (with the GLTFLoader, the meshopt decoder
+ *                and BufferGeometryUtils they share) into a shared chunk. That chunk keeps the
+ *                `WebGLRenderer` marker and is billed to `scene` below — a 3D player downloads it
+ *                either way — which is why `renderScene-*.js` is routed by FILENAME too: without
+ *                three inside it, its own bytes carry no `scene` marker.
+ *   step       — STEP support: `stepWorker-*.js` (the worker, with occt-import-js's 97 KB glue
+ *                inlined) and `occt-import-js-*.wasm` (OpenCascade, ~7.6 MB raw). Fetched only when
+ *                a STEP file is dropped. Matched by FILENAME.
  *   other      — everything else. In practice this is empty: `@dimforge/rapier2d-compat` is a
  *                STATIC import (`src/sim/physicsEngine.ts`), so the 2D physics engine lives
  *                inside `main` already and always has (that is existing, unchanged behavior,
@@ -80,7 +93,9 @@ import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { join } from 'node:path';
 
-const DIST = 'dist';
+// `BUNDLE_DIST` points the audit at another build: `scripts/robot-import/bundle.mjs` builds one
+// with the importer reachable, before the editor that will reach it exists.
+const DIST = process.env.BUNDLE_DIST || 'dist';
 const ASSETS = join(DIST, 'assets');
 
 if (!existsSync(ASSETS)) {
@@ -165,6 +180,16 @@ function routeFor(file, buf) {
   // names it after `renderSurfaces.ts`, its `renderSurface*.ts` helpers are merged into it (only
   // it imports them), and it imports three.js from `renderScene-*.js` rather than containing it.
   if (/^renderSurfaces-[^/]*\.js$/.test(base)) return 'surfaces';
+  // THE ROBOT IMPORTER, by FILENAME (see the route table). `engineLoader-*.js` exists only in the
+  // measurement build, where the loader is an entry of its own; in the app it is inlined.
+  if (/^(importerEngine|engineLoader)-[^/]*\.js$/.test(base)) return 'importer';
+  if (/^(stepWorker|stepReader)-[^/]*\.js$/.test(base) || /^occt-import-js[^/]*\.wasm$/.test(base)) return 'step';
+  // Vite's preload helper is split out only when a SECOND entry shares it (the measurement
+  // build); in the app it is part of the entry chunk, so it is billed there
+  if (/^preload-helper-[^/]*\.js$/.test(base)) return 'main';
+  // the scene's own chunk, by FILENAME: once three.js is hoisted into a chunk shared with the
+  // importer, `renderScene-*.js` no longer carries the `WebGLRenderer` marker itself
+  if (/^renderScene-[^/]*\.js$/.test(base)) return 'scene';
   // filename-first for a standalone `.wasm` asset (cheap, and a real one would be named after
   // its source module, e.g. `rapier_wasm3d_bg-<hash>.wasm`), then a content scan for both .js
   // and .wasm alike — content is what actually decided this in the measured build, where the
@@ -499,6 +524,20 @@ const BASELINE = {
   // scope controls, and the analytics page's sponsor report and imported-history section. Admin
   // only, so no player downloads it.
   admin: { gzip: 29.75 * 1000 },
+  // 2026-10-01: NEW, the robot importer (lane 3 of `docs/robot-import-plan.md`). MEASURED with
+  // `npm run bundleaudit:importer` (the app plus `engineLoader.ts` as an entry, because no screen
+  // imports the loader yet; a plain production build reports both routes absent). The engine
+  // chunk is 61.61 (loaders for six formats, meshopt's simplifier with its inlined wasm,
+  // GLTFExporter, OrbitControls, the bake and the preview) plus the 0.27 loader.
+  // What it does to `scene`: three.js, GLTFLoader, the meshopt decoder and BufferGeometryUtils
+  // move into a chunk the two zones share (178.86, routed `scene` by its marker) and
+  // `renderScene-*.js` drops to 49.67, so the route measures 228.53 against 226.55 without the
+  // importer: +1.98 of import/export glue and two separately compressed files, inside tolerance.
+  importer: { gzip: 61.88 * 1000 },
+  // 2026-10-01: NEW. `occt-import-js-*.wasm` 3110.91 (OpenCascade, 7.6 MB raw), `stepWorker-*.js`
+  // 21.95 (the worker with occt's glue) and `stepReader-*.js` 0.42. Fetched only when a STEP file is
+  // dropped; every other import, and every player who never imports a robot, pays nothing.
+  step: { gzip: 3133.28 * 1000 },
   other: { gzip: 1 * 1000 },
 };
 

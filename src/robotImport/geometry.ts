@@ -1,0 +1,1289 @@
+/**
+ * ROBOT IMPORT — the measuring half of the importer. DOM-free and three-free, so it runs in the
+ * main chunk, in `npm test`, and inside the lazy engine alike.
+ *
+ * Everything here works on plain typed arrays (`MeshPart`) and reports in the frames named in
+ * `docs/area/robot-import.md`: SOURCE (the file's own units and axes), MODEL (inches, +x front,
+ * +y left, +z up, floor at z = 0, x/y origin at the footprint's box centre) and ROBOT-LOCAL (the
+ * model frame shifted so the origin is the wheelbase centre, plan §3.1).
+ *
+ * Deterministic on purpose: sorted inputs, first-wins tie breaks, no randomness. The same file
+ * measured twice gives the same descriptor, which is what lets a stored `ImportSetup` re-open the
+ * editor on exactly the robot that was saved.
+ */
+import type { ImportedBand, ImportedEdge, ImportedMech, ImportedRobot, Vec2 } from '../types';
+import {
+  INCHES_PER_UNIT,
+  LENGTH_UNITS,
+  TOP_IMAGE_PX,
+  UP_AXES,
+  type ImportCheck,
+  type ImportMeasurement,
+  type ImportSetup,
+  type LengthUnit,
+  type ModelFormat,
+  type QuarterTurns,
+  type UpAxis,
+  type WheelDetection,
+} from './types';
+
+/** the 18-in cube, inches */
+export const ROBOT_MAX_IN = 18;
+/** every descriptor number is a multiple of this (plan §3.1) */
+export const HULL_QUANTUM = 1 / 64;
+export const MAX_HULL_VERTS = 16;
+export const MAX_BAND_VERTS = 12;
+export const MAX_BANDS = 3;
+/** the triangle budget a fresh setup starts on (the hard cap is `MAX_TRIANGLES`, 150k): plenty
+ *  for a robot that fills a tenth of the screen, and it keeps the stored GLB well under 4 MB */
+export const DEFAULT_TRI_BUDGET = 100_000;
+/** the extent an FTC robot's largest side is scored against when guessing units */
+const TYPICAL_ROBOT_IN = 15;
+/** the format's own unit gets this much head start in log space (about a factor of 1.4) */
+const UNIT_PRIOR_BONUS = 0.35;
+/** floor-contact slab for wheel detection, inches; widened once if it finds too few wheels */
+const WHEEL_SLABS_IN = [0.15, 0.5] as const;
+/** single-linkage distance for floor contacts, inches: one wheel's patch, never two wheels */
+const CONTACT_LINK_IN = 1.0;
+/** a contact cluster longer than this is an intake or a skid, not a wheel */
+const WHEEL_MAX_PATCH_IN = 3.5;
+/** up-axis detection slabs, inches: support points, and flat downward faces */
+const UP_SUPPORT_SLAB_IN = 0.5;
+const UP_FLAT_SLAB_IN = 0.25;
+const UP_PRIOR_BONUS = 0.25;
+/** band slicing step, inches */
+const BAND_SLICE_IN = 0.5;
+/** emit bands only when they save this fraction of the single prism's volume */
+const BAND_MIN_SAVING = 0.05;
+
+// ---- plain geometry ------------------------------------------------------------------------
+
+/** a mesh with its world transform already applied, SOURCE units and axes */
+export interface MeshPart {
+  /** xyz triples */
+  positions: Float32Array;
+  /** triangle corner indices; null = non-indexed (every three vertices are a triangle) */
+  indices: Uint32Array | null;
+  /** per-vertex unit normals, when computed (the engine creases them after simplifying) */
+  normals?: Float32Array | null;
+  /** base colour, LINEAR RGB 0..1 (three.js's working colour space, glTF's baseColorFactor) */
+  color: [number, number, number];
+  name: string;
+}
+
+export function triangleCount(parts: readonly MeshPart[]): number {
+  let n = 0;
+  for (const p of parts) n += Math.floor((p.indices ? p.indices.length : p.positions.length / 3) / 3);
+  return n;
+}
+
+/** quantise to 1/64 in; `+ 0` folds −0 into 0 so JSON round trips deep-equal */
+export function q64(v: number): number {
+  return Math.round(v / HULL_QUANTUM) * HULL_QUANTUM + 0;
+}
+
+const cross3 = (ox: number, oy: number, ax: number, ay: number, bx: number, by: number): number =>
+  (ax - ox) * (by - oy) - (ay - oy) * (bx - ox);
+
+/**
+ * Convex hull of points given as a flat [x0, y0, x1, y1, …] array. Akl–Toussaint prefilter (the
+ * octagon of eight extremes discards the interior, which is nearly every vertex of a CAD robot),
+ * then Andrew's monotone chain. CCW, no collinear or repeated vertices, starting at the lowest x
+ * (then lowest y). Fewer than three distinct non-collinear points return what is left.
+ */
+export function hullOfXY(xy: ArrayLike<number>, count = Math.floor(xy.length / 2)): Vec2[] {
+  if (count === 0) return [];
+  // the eight extremes, first occurrence wins
+  const ext = [0, 0, 0, 0, 0, 0, 0, 0];
+  const key = (i: number, k: number): number => {
+    const x = xy[2 * i];
+    const y = xy[2 * i + 1];
+    switch (k) {
+      case 0: return -x;
+      case 1: return x;
+      case 2: return -y;
+      case 3: return y;
+      case 4: return -(x + y);
+      case 5: return x + y;
+      case 6: return -(x - y);
+      default: return x - y;
+    }
+  };
+  for (let i = 1; i < count; i++) {
+    for (let k = 0; k < 8; k++) if (key(i, k) > key(ext[k], k)) ext[k] = i;
+  }
+  let candidates: number[];
+  if (count > 64) {
+    const octPts: number[] = [];
+    for (const i of ext) octPts.push(xy[2 * i], xy[2 * i + 1]);
+    const oct = monotoneChain(octPts, 8);
+    if (oct.length >= 3) {
+      candidates = [];
+      const eps = 1e-9;
+      for (let i = 0; i < count; i++) {
+        const x = xy[2 * i];
+        const y = xy[2 * i + 1];
+        let inside = true;
+        for (let e = 0; e < oct.length; e++) {
+          const a = oct[e];
+          const b = oct[(e + 1) % oct.length];
+          if (cross3(a.x, a.y, b.x, b.y, x, y) <= eps) {
+            inside = false;
+            break;
+          }
+        }
+        if (!inside) candidates.push(i);
+      }
+    } else {
+      candidates = Array.from({ length: count }, (_, i) => i);
+    }
+  } else {
+    candidates = Array.from({ length: count }, (_, i) => i);
+  }
+  const pts: number[] = [];
+  for (const i of candidates) pts.push(xy[2 * i], xy[2 * i + 1]);
+  return monotoneChain(pts, candidates.length);
+}
+
+function monotoneChain(flat: number[], n: number): Vec2[] {
+  const idx = Array.from({ length: n }, (_, i) => i);
+  idx.sort((a, b) => flat[2 * a] - flat[2 * b] || flat[2 * a + 1] - flat[2 * b + 1]);
+  // drop exact duplicates
+  const p: Vec2[] = [];
+  for (const i of idx) {
+    const x = flat[2 * i];
+    const y = flat[2 * i + 1];
+    const last = p[p.length - 1];
+    if (!last || last.x !== x || last.y !== y) p.push({ x, y });
+  }
+  if (p.length < 3) return p;
+  const lower: Vec2[] = [];
+  for (const pt of p) {
+    while (lower.length >= 2 && cross3(lower[lower.length - 2].x, lower[lower.length - 2].y, lower[lower.length - 1].x, lower[lower.length - 1].y, pt.x, pt.y) <= 0) lower.pop();
+    lower.push(pt);
+  }
+  const upper: Vec2[] = [];
+  for (let i = p.length - 1; i >= 0; i--) {
+    const pt = p[i];
+    while (upper.length >= 2 && cross3(upper[upper.length - 2].x, upper[upper.length - 2].y, upper[upper.length - 1].x, upper[upper.length - 1].y, pt.x, pt.y) <= 0) upper.pop();
+    upper.push(pt);
+  }
+  lower.pop();
+  upper.pop();
+  const out = lower.concat(upper);
+  return out.length >= 3 ? out : p.slice(0, Math.min(p.length, 2));
+}
+
+/** convex hull of a point list (same rules as `hullOfXY`) */
+export function convexHull(points: readonly Vec2[]): Vec2[] {
+  const flat: number[] = [];
+  for (const p of points) if (Number.isFinite(p.x) && Number.isFinite(p.y)) flat.push(p.x, p.y);
+  return hullOfXY(flat);
+}
+
+/** signed area, positive for CCW */
+export function polygonArea(poly: readonly Vec2[]): number {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i];
+    const r = poly[(i + 1) % poly.length];
+    a += p.x * r.y - r.x * p.y;
+  }
+  return a / 2;
+}
+
+export function bbox(points: readonly Vec2[]): { minX: number; maxX: number; minY: number; maxY: number } {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return { minX, maxX, minY, maxY };
+}
+
+function distToSegment(p: Vec2, a: Vec2, b: Vec2): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const l2 = dx * dx + dy * dy;
+  let t = l2 > 0 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const ex = a.x + t * dx - p.x;
+  const ey = a.y + t * dy - p.y;
+  return Math.sqrt(ex * ex + ey * ey);
+}
+
+/**
+ * How far INSIDE a CCW convex polygon a point is (negative = outside, by roughly that much).
+ * The minimum over edges of the signed distance to the edge's line.
+ */
+export function insetDepth(p: Vec2, poly: readonly Vec2[]): number {
+  if (poly.length < 3) return -Infinity;
+  let d = Infinity;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len === 0) continue;
+    const s = cross3(a.x, a.y, b.x, b.y, p.x, p.y) / len;
+    if (s < d) d = s;
+  }
+  return d;
+}
+
+/** the nearest point of a CCW convex polygon (the point itself when inside) */
+export function clampIntoConvex(p: Vec2, poly: readonly Vec2[]): Vec2 {
+  if (poly.length < 3 || insetDepth(p, poly) >= 0) return { x: p.x, y: p.y };
+  let best = { x: poly[0].x, y: poly[0].y };
+  let bestD = Infinity;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
+    let t = l2 > 0 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const c = { x: a.x + t * dx, y: a.y + t * dy };
+    const d = Math.hypot(c.x - p.x, c.y - p.y);
+    if (d < bestD) {
+      bestD = d;
+      best = c;
+    }
+  }
+  return best;
+}
+
+/** distance from a point to a polygon's boundary (0 on it) */
+function distToBoundary(p: Vec2, poly: readonly Vec2[]): number {
+  let d = Infinity;
+  for (let i = 0; i < poly.length; i++) d = Math.min(d, distToSegment(p, poly[i], poly[(i + 1) % poly.length]));
+  return d;
+}
+
+/** greedy removal of the cheapest vertex — fast, but only a local optimum; the pre-pass */
+function greedyReduce(hull: readonly Vec2[], cap: number): Vec2[] {
+  const n = hull.length;
+  const prev = Array.from({ length: n }, (_, i) => (i + n - 1) % n);
+  const next = Array.from({ length: n }, (_, i) => (i + 1) % n);
+  const alive = new Array<boolean>(n).fill(true);
+  const spanDev = (a: number, b: number): number => {
+    let d = 0;
+    for (let k = (a + 1) % n; k !== b; k = (k + 1) % n) d = Math.max(d, distToSegment(hull[k], hull[a], hull[b]));
+    return d;
+  };
+  const cost = Array.from({ length: n }, (_, i) => spanDev(prev[i], next[i]));
+  for (let left = n; left > cap; left--) {
+    let best = -1;
+    for (let i = 0; i < n; i++) if (alive[i] && (best < 0 || cost[i] < cost[best])) best = i;
+    alive[best] = false;
+    const a = prev[best];
+    const b = next[best];
+    next[a] = b;
+    prev[b] = a;
+    cost[a] = spanDev(prev[a], next[a]);
+    cost[b] = spanDev(prev[b], next[b]);
+  }
+  return hull.filter((_, i) => alive[i]);
+}
+
+/** above this many hull vertices the greedy pass thins first, so the exact search stays cheap */
+const REDUCE_EXACT_MAX = 192;
+
+/**
+ * Reduce a CCW convex hull to at most `maxVerts` vertices, minimising the largest deviation.
+ * The result is an INNER approximation — a subset of the hull's vertices, so still convex — and
+ * `deviation` is the largest distance from any input vertex to it, measured, not bounded.
+ *
+ * MIN-MAX, NOT GREEDY. Removing the cheapest vertex one at a time gets stuck: a 64-gon circle cut
+ * to 16 comes out with one gap of 5 and one of 3 (0.26 in) where even spacing gives 0.17, and no
+ * single-vertex move fixes it. So: binary-search the tolerance ε; for each ε precompute every
+ * vertex's farthest reach (the last vertex whose chord keeps all skipped vertices within ε), and
+ * walk the reaches from every start; the fewest steps that close the loop is the vertex count ε
+ * needs. A hull longer than `REDUCE_EXACT_MAX` is thinned greedily first (its deviation then is
+ * a few thousandths of an inch).
+ */
+export function reduceHull(hull: readonly Vec2[], maxVerts: number): { hull: Vec2[]; deviation: number } {
+  const cap = Math.max(3, Math.floor(maxVerts));
+  if (hull.length <= cap) return { hull: hull.map((p) => ({ x: p.x, y: p.y })), deviation: 0 };
+  const H = hull.length > REDUCE_EXACT_MAX ? greedyReduce(hull, REDUCE_EXACT_MAX) : hull.slice();
+  const n = H.length;
+  // dev[i][s] = deviation of the chord i → i+s (s = 1..n-1) over the vertices it skips
+  const devFrom = (i: number, maxS: number): Float64Array => {
+    const out = new Float64Array(maxS + 1);
+    for (let s = 2; s <= maxS; s++) {
+      const j = (i + s) % n;
+      let d = 0;
+      for (let k = 1; k < s; k++) d = Math.max(d, distToSegment(H[(i + k) % n], H[i], H[j]));
+      out[s] = d;
+    }
+    return out;
+  };
+  const maxSpan = Math.min(n - 1, Math.ceil(n / cap) * 3 + 2);
+  const dev = Array.from({ length: n }, (_, i) => devFrom(i, maxSpan));
+  // how many vertices tolerance eps needs, and from which start
+  const solve = (eps: number): { count: number; start: number } => {
+    const reach = new Int32Array(n);
+    for (let i = 0; i < n; i++) {
+      let s = 1;
+      while (s < maxSpan && dev[i][s + 1] <= eps) s++;
+      reach[i] = s;
+    }
+    let best = { count: Infinity, start: 0 };
+    for (let st = 0; st < n; st++) {
+      let at = 0;
+      let count = 0;
+      while (at < n && count < best.count) {
+        const cur = (st + at) % n;
+        const left = n - at;
+        // close the loop as soon as the start is within reach
+        if (left <= maxSpan && dev[cur][left] <= eps) {
+          at = n;
+        } else {
+          at += reach[cur];
+        }
+        count++;
+      }
+      if (at >= n && count < best.count) best = { count, start: st };
+    }
+    return best;
+  };
+  let lo = 0;
+  let hi = 0;
+  for (let i = 0; i < n; i++) for (let s = 2; s <= maxSpan; s++) hi = Math.max(hi, dev[i][s]);
+  if (solve(hi).count > cap) {
+    // the chord window was too short to reach `cap` (a very uneven hull): fall back to greedy
+    const g = greedyReduce(H, cap);
+    let deviation = 0;
+    for (const p of hull) deviation = Math.max(deviation, distToBoundary(p, g));
+    return { hull: g, deviation };
+  }
+  for (let iter = 0; iter < 48 && hi - lo > 1e-7; iter++) {
+    const mid = (lo + hi) / 2;
+    if (solve(mid).count <= cap) hi = mid;
+    else lo = mid;
+  }
+  const { start } = solve(hi);
+  const idx: number[] = [];
+  {
+    const reach = new Int32Array(n);
+    for (let i = 0; i < n; i++) {
+      let s = 1;
+      while (s < maxSpan && dev[i][s + 1] <= hi) s++;
+      reach[i] = s;
+    }
+    let at = 0;
+    while (at < n) {
+      const cur = (start + at) % n;
+      idx.push(cur);
+      const left = n - at;
+      at = left <= maxSpan && dev[cur][left] <= hi ? n : at + reach[cur];
+    }
+  }
+  idx.sort((a, b) => a - b);
+  const out = idx.map((i) => ({ x: H[i].x, y: H[i].y }));
+  let deviation = 0;
+  for (const p of hull) deviation = Math.max(deviation, distToBoundary(p, out));
+  return { hull: out, deviation };
+}
+
+/** quantise every vertex to 1/64 in, then re-hull (quantising can make a vertex collinear) */
+export function quantiseHull(hull: readonly Vec2[]): Vec2[] {
+  return convexHull(hull.map((p) => ({ x: q64(p.x), y: q64(p.y) })));
+}
+
+/** reduce, then quantise; the deviation includes the quantisation */
+export function finishHull(raw: readonly Vec2[], maxVerts: number): { hull: Vec2[]; deviation: number } {
+  const r = reduceHull(raw, maxVerts);
+  let out = quantiseHull(r.hull);
+  // quantising never adds a vertex, but a pathological input could leave fewer than three
+  if (out.length < 3) out = r.hull.map((p) => ({ x: q64(p.x), y: q64(p.y) }));
+  let deviation = 0;
+  for (const p of raw) if (insetDepth(p, out) < 0) deviation = Math.max(deviation, distToBoundary(p, out));
+  return { hull: out, deviation: Math.max(deviation, r.deviation) };
+}
+
+// ---- units, up axis, front --------------------------------------------------------------
+
+/** the unit each format is in when the file does not say */
+export function formatDefaultUnit(format: ModelFormat): LengthUnit {
+  return format === 'glb' || format === 'gltf' ? 'm' : 'mm';
+}
+
+/** glTF is +Y up by spec; CAD and print formats are almost always +Z up */
+export function formatDefaultUp(format: ModelFormat): UpAxis {
+  return format === 'glb' || format === 'gltf' ? '+y' : '+z';
+}
+
+/**
+ * Guess the unit from the model's largest extent (in source units). Each candidate is scored by
+ * how far, in log space, the robot it implies is from a typical 15-in FTC robot; the format's own
+ * unit gets `UNIT_PRIOR_BONUS` off. Lowest wins, ties in `LENGTH_UNITS` order.
+ */
+export function detectUnits(maxExtent: number, prior: LengthUnit | null): { unit: LengthUnit; scores: Record<LengthUnit, number> } {
+  const scores = {} as Record<LengthUnit, number>;
+  let unit: LengthUnit = prior ?? 'mm';
+  let best = Infinity;
+  for (const u of LENGTH_UNITS) {
+    const inches = maxExtent * INCHES_PER_UNIT[u];
+    const s = inches > 0 ? Math.abs(Math.log(inches / TYPICAL_ROBOT_IN)) - (u === prior ? UNIT_PRIOR_BONUS : 0) : Infinity;
+    scores[u] = s;
+    if (s < best) {
+      best = s;
+      unit = u;
+    }
+  }
+  return { unit, scores };
+}
+
+type V3 = [number, number, number];
+const AXIS_VEC: Record<UpAxis, V3> = {
+  '+x': [1, 0, 0],
+  '-x': [-1, 0, 0],
+  '+y': [0, 1, 0],
+  '-y': [0, -1, 0],
+  '+z': [0, 0, 1],
+  '-z': [0, 0, -1],
+};
+
+/**
+ * The source axis that becomes FRONT when nobody has said: the CAD front view. A Z-up CAD file
+ * is drawn facing −Y (the Front view looks along +Y), a Y-up file (glTF, by spec) faces +Z.
+ */
+export function defaultFront(up: UpAxis): UpAxis {
+  switch (up) {
+    case '+z': return '-y';
+    case '-z': return '+y';
+    case '+y': return '+z';
+    case '-y': return '-z';
+    default: return '-y';
+  }
+}
+
+const crossV = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+
+/**
+ * The 3×3 rotation (rows) taking SOURCE axes to the model frame for this up axis and yaw: row 0 is
+ * the source vector that becomes +x (front), row 1 +y (left = up × front), row 2 +z (up). Integer
+ * entries only, so it is exact.
+ */
+export function orientation(up: UpAxis, yaw: QuarterTurns): [V3, V3, V3] {
+  const U = AXIS_VEC[up];
+  const F = AXIS_VEC[defaultFront(up)];
+  const L = crossV(U, F);
+  // yaw q quarter turns CCW about +z: x' = cos·x − sin·y, y' = sin·x + cos·y
+  const c = [1, 0, -1, 0][yaw];
+  const s = [0, 1, 0, -1][yaw];
+  const rx: V3 = [c * F[0] - s * L[0], c * F[1] - s * L[1], c * F[2] - s * L[2]];
+  const ry: V3 = [s * F[0] + c * L[0], s * F[1] + c * L[1], s * F[2] + c * L[2]];
+  return [rx, ry, [U[0], U[1], U[2]]];
+}
+
+export interface UpDetection {
+  up: UpAxis;
+  scores: Record<UpAxis, number>;
+  /** best minus second best */
+  margin: number;
+}
+
+/**
+ * Which source axis is UP, from the geometry. A robot stands on its wheels, so the right "down"
+ * has floor contacts that spread across the footprint, a centre of mass inside that support
+ * polygon, and almost no flat, downward-facing area at the very bottom; a robot lying on a side
+ * plate fails the last two. Each signed axis is scored on those three, the format default gets
+ * `UP_PRIOR_BONUS`, and the best wins.
+ */
+export function detectUp(parts: readonly MeshPart[], inchesPerUnit: number, prior: UpAxis): UpDetection {
+  // AABB, surface centroid
+  const min: V3 = [Infinity, Infinity, Infinity];
+  const max: V3 = [-Infinity, -Infinity, -Infinity];
+  for (const p of parts) {
+    const a = p.positions;
+    for (let i = 0; i < a.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        const v = a[i + k] * inchesPerUnit;
+        if (v < min[k]) min[k] = v;
+        if (v > max[k]) max[k] = v;
+      }
+    }
+  }
+  const scores = {} as Record<UpAxis, number>;
+  if (!Number.isFinite(min[0])) {
+    for (const u of UP_AXES) scores[u] = u === prior ? 1 : 0;
+    return { up: prior, scores, margin: 1 };
+  }
+  let areaSum = 0;
+  const com: V3 = [0, 0, 0];
+  // flat downward area per direction (index: axis*2 + (sign<0 ? 1 : 0))
+  const flat = [0, 0, 0, 0, 0, 0];
+  forEachTriangle(parts, (ax, ay, az, bx, by, bz, cx, cy, cz) => {
+    const A: V3 = [ax * inchesPerUnit, ay * inchesPerUnit, az * inchesPerUnit];
+    const B: V3 = [bx * inchesPerUnit, by * inchesPerUnit, bz * inchesPerUnit];
+    const C: V3 = [cx * inchesPerUnit, cy * inchesPerUnit, cz * inchesPerUnit];
+    const n = crossV([B[0] - A[0], B[1] - A[1], B[2] - A[2]], [C[0] - A[0], C[1] - A[1], C[2] - A[2]]);
+    const len = Math.hypot(n[0], n[1], n[2]);
+    if (len === 0) return;
+    const area = len / 2;
+    areaSum += area;
+    for (let k = 0; k < 3; k++) com[k] += area * (A[k] + B[k] + C[k]) / 3;
+    for (let k = 0; k < 3; k++) {
+      const nk = n[k] / len;
+      // facing DOWN for "up = +k" means normal ≈ −k; for "up = −k", ≈ +k. Winding varies between
+      // exporters, so a face counts whichever way it is wound.
+      if (Math.abs(nk) < 0.95) continue;
+      const lo = Math.min(A[k], B[k], C[k]);
+      const hi = Math.max(A[k], B[k], C[k]);
+      if (hi <= min[k] + UP_FLAT_SLAB_IN) flat[k * 2] += area;
+      if (lo >= max[k] - UP_FLAT_SLAB_IN) flat[k * 2 + 1] += area;
+    }
+  });
+  if (areaSum > 0) for (let k = 0; k < 3; k++) com[k] /= areaSum;
+  else for (let k = 0; k < 3; k++) com[k] = (min[k] + max[k]) / 2;
+
+  for (const up of UP_AXES) {
+    const k = up[1] === 'x' ? 0 : up[1] === 'y' ? 1 : 2;
+    const neg = up[0] === '-';
+    const u = (k + 1) % 3;
+    const v = (k + 2) % 3;
+    const footArea = Math.max((max[u] - min[u]) * (max[v] - min[v]), 1e-9);
+    const support: number[] = [];
+    for (const p of parts) {
+      const a = p.positions;
+      for (let i = 0; i < a.length; i += 3) {
+        const h = a[i + k] * inchesPerUnit;
+        if (neg ? h >= max[k] - UP_SUPPORT_SLAB_IN : h <= min[k] + UP_SUPPORT_SLAB_IN) {
+          support.push(a[i + u] * inchesPerUnit, a[i + v] * inchesPerUnit);
+        }
+      }
+    }
+    const sh = hullOfXY(support);
+    const spread = sh.length >= 3 ? Math.min(1, Math.abs(polygonArea(sh)) / footArea) : 0;
+    const comP = { x: com[u], y: com[v] };
+    let stab = 0;
+    if (sh.length >= 3) {
+      // the hull is CCW in (u, v); depth is positive inside
+      const d = insetDepth(comP, sh);
+      const scale = Math.sqrt(footArea);
+      stab = d >= 0 ? 0.5 + Math.min(0.2, (2 * d) / scale) : Math.max(-0.3, (2 * d) / scale);
+    } else {
+      stab = -0.3;
+    }
+    const flatFrac = Math.min(0.5, flat[k * 2 + (neg ? 1 : 0)] / footArea);
+    scores[up] = spread + stab - 2 * flatFrac + (up === prior ? UP_PRIOR_BONUS : 0);
+  }
+  let best: UpAxis = prior;
+  for (const u of UP_AXES) if (scores[u] > scores[best]) best = u;
+  let second = -Infinity;
+  for (const u of UP_AXES) if (u !== best && scores[u] > second) second = scores[u];
+  return { up: best, scores, margin: scores[best] - second };
+}
+
+/** call `fn` with the source coordinates of every triangle's three corners */
+export function forEachTriangle(
+  parts: readonly MeshPart[],
+  fn: (ax: number, ay: number, az: number, bx: number, by: number, bz: number, cx: number, cy: number, cz: number) => void,
+): void {
+  for (const p of parts) {
+    const a = p.positions;
+    const idx = p.indices;
+    const n = idx ? idx.length : a.length / 3;
+    for (let t = 0; t + 2 < n; t += 3) {
+      const i = (idx ? idx[t] : t) * 3;
+      const j = (idx ? idx[t + 1] : t + 1) * 3;
+      const l = (idx ? idx[t + 2] : t + 2) * 3;
+      fn(a[i], a[i + 1], a[i + 2], a[j], a[j + 1], a[j + 2], a[l], a[l + 1], a[l + 2]);
+    }
+  }
+}
+
+// ---- wheels ------------------------------------------------------------------------------
+
+interface Cluster {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  n: number;
+}
+
+/**
+ * Single-linkage clusters of floor-contact points (flat [x, y, …], MODEL frame). Two points join
+ * when they are within `link` of each other OR a mesh edge runs between them inside the contact
+ * slab (`edges`, pairs of point indices): a wheel's contact line is one edge between two cap
+ * vertices a wheel-width apart, and an intake roller's is one edge a robot-width long, so edges
+ * are what keep the first one wheel and make the second one long. Points are snapped to a
+ * 0.05-in grid and deduplicated first. The partition does not depend on input order; clusters
+ * are returned sorted by (minX, minY), so labels do not either.
+ */
+export function clusterContacts(xy: ArrayLike<number>, edges: ArrayLike<number> = [], link = CONTACT_LINK_IN): Cluster[] {
+  const snap = 0.05;
+  const seen = new Map<string, number>();
+  const pts: number[] = [];
+  const dedup = new Int32Array(Math.floor(xy.length / 2));
+  for (let i = 0; i + 1 < xy.length; i += 2) {
+    const sx = Math.round(xy[i] / snap);
+    const sy = Math.round(xy[i + 1] / snap);
+    const key = `${sx},${sy}`;
+    let d = seen.get(key);
+    if (d === undefined) {
+      d = pts.length / 2;
+      seen.set(key, d);
+      pts.push(sx * snap, sy * snap);
+    }
+    dedup[i / 2] = d;
+  }
+  const n = pts.length / 2;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  for (let e = 0; e + 1 < edges.length; e += 2) {
+    const a = dedup[edges[e]];
+    const b = dedup[edges[e + 1]];
+    if (a === undefined || b === undefined) continue;
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb);
+  }
+  const cells = new Map<string, number[]>();
+  for (let i = 0; i < n; i++) {
+    const key = `${Math.floor(pts[2 * i] / link)},${Math.floor(pts[2 * i + 1] / link)}`;
+    let c = cells.get(key);
+    if (!c) cells.set(key, (c = []));
+    c.push(i);
+  }
+  const l2 = link * link;
+  for (let i = 0; i < n; i++) {
+    const cx = Math.floor(pts[2 * i] / link);
+    const cy = Math.floor(pts[2 * i + 1] / link);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const c = cells.get(`${cx + dx},${cy + dy}`);
+        if (!c) continue;
+        for (const j of c) {
+          if (j <= i) continue;
+          const ex = pts[2 * i] - pts[2 * j];
+          const ey = pts[2 * i + 1] - pts[2 * j + 1];
+          if (ex * ex + ey * ey <= l2) {
+            const ri = find(i);
+            const rj = find(j);
+            if (ri !== rj) parent[Math.max(ri, rj)] = Math.min(ri, rj);
+          }
+        }
+      }
+    }
+  }
+  const byRoot = new Map<number, Cluster>();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    const x = pts[2 * i];
+    const y = pts[2 * i + 1];
+    const c = byRoot.get(r);
+    if (!c) byRoot.set(r, { minX: x, maxX: x, minY: y, maxY: y, n: 1 });
+    else {
+      c.minX = Math.min(c.minX, x);
+      c.maxX = Math.max(c.maxX, x);
+      c.minY = Math.min(c.minY, y);
+      c.maxY = Math.max(c.maxY, y);
+      c.n++;
+    }
+  }
+  return [...byRoot.values()].sort((a, b) => a.minX - b.minX || a.minY - b.minY);
+}
+
+const clusterCentre = (c: Cluster): Vec2 => ({ x: (c.minX + c.maxX) / 2, y: (c.minY + c.maxY) / 2 });
+
+/**
+ * Every vertex at or below `slab` (MODEL frame, so the floor is z = 0), as flat [x, y, …], and
+ * every triangle edge with both ends in that set, as pairs of indices into it.
+ */
+export function floorContacts(modelParts: readonly MeshPart[], slab: number): { xy: number[]; edges: number[] } {
+  const xy: number[] = [];
+  const edges: number[] = [];
+  for (const p of modelParts) {
+    const a = p.positions;
+    const nV = a.length / 3;
+    const local = new Int32Array(nV).fill(-1);
+    for (let i = 0; i < nV; i++) {
+      if (a[3 * i + 2] <= slab) {
+        local[i] = xy.length / 2;
+        xy.push(a[3 * i], a[3 * i + 1]);
+      }
+    }
+    const idx = p.indices;
+    const n = idx ? idx.length : nV;
+    for (let t = 0; t + 2 < n; t += 3) {
+      const v = [idx ? idx[t] : t, idx ? idx[t + 1] : t + 1, idx ? idx[t + 2] : t + 2];
+      for (let k = 0; k < 3; k++) {
+        const s = local[v[k]];
+        const e = local[v[(k + 1) % 3]];
+        if (s >= 0 && e >= 0) edges.push(s, e);
+      }
+    }
+  }
+  return { xy, edges };
+}
+
+/**
+ * Four wheel contacts (FL, FR, BL, BR) from floor-contact points, MODEL frame. Clusters longer
+ * than `WHEEL_MAX_PATCH_IN` are not wheels. With four or more wheel clusters the four CORNER ones
+ * are used — the extremes of ±x ± y after normalising by the layout's half-extents, so a 6-wheel
+ * tank keeps its outer four. Fewer than four, or corners that are not a front-left / front-right /
+ * back-left / back-right layout, fail with a reason.
+ */
+export function detectWheels(contactXY: ArrayLike<number>, edges: ArrayLike<number> = []): WheelDetection {
+  const clusters = clusterContacts(contactXY, edges);
+  const contacts = clusters.map(clusterCentre);
+  const wheels = clusters.filter((c) => Math.max(c.maxX - c.minX, c.maxY - c.minY) <= WHEEL_MAX_PATCH_IN).map(clusterCentre);
+  const long = clusters.length - wheels.length;
+  const longNote = long > 0 ? ` ${long} long floor contact${long === 1 ? '' : 's'} (an intake or a skid) ${long === 1 ? 'was' : 'were'} left out.` : '';
+  if (wheels.length < 4) {
+    return {
+      wheels: null,
+      contacts,
+      note:
+        wheels.length === 0
+          ? `Couldn’t find any wheels touching the floor.${longNote} Drag the wheel markers onto the wheels.`
+          : `Found ${wheels.length} wheel${wheels.length === 1 ? '' : 's'} touching the floor, not four.${longNote} Drag the wheel markers onto the wheels.`,
+    };
+  }
+  const b = bbox(wheels);
+  const cx = (b.minX + b.maxX) / 2;
+  const cy = (b.minY + b.maxY) / 2;
+  const sx = Math.max((b.maxX - b.minX) / 2, 0.5);
+  const sy = Math.max((b.maxY - b.minY) / 2, 0.5);
+  const pick = (fx: number, fy: number): number => {
+    let best = 0;
+    let bestS = -Infinity;
+    wheels.forEach((w, i) => {
+      const s = (fx * (w.x - cx)) / sx + (fy * (w.y - cy)) / sy;
+      if (s > bestS + 1e-9) {
+        bestS = s;
+        best = i;
+      }
+    });
+    return best;
+  };
+  const ids = [pick(1, 1), pick(1, -1), pick(-1, 1), pick(-1, -1)];
+  const [fl, fr, bl, br] = ids.map((i) => wheels[i]);
+  const distinct = new Set(ids).size === 4;
+  const layoutOk = distinct && fl.x > bl.x + 1 && fr.x > br.x + 1 && fl.y > fr.y + 1 && bl.y > br.y + 1;
+  if (!layoutOk) {
+    return {
+      wheels: null,
+      contacts,
+      note: `The ${wheels.length} floor contacts don’t form front-left, front-right, back-left and back-right wheels. Drag the wheel markers onto the wheels.`,
+    };
+  }
+  const extra = wheels.length - 4;
+  return {
+    wheels: [fl, fr, bl, br],
+    contacts,
+    note:
+      (extra > 0 ? `Found ${wheels.length} wheels touching the floor; used the four corner ones.` : 'Found four wheels touching the floor.') +
+      longNote,
+  };
+}
+
+// ---- height bands ------------------------------------------------------------------------
+
+/**
+ * Up to three stacked convex prisms for 3D collision. Triangles are clipped into
+ * `BAND_SLICE_IN` slices, each slice hulled, and the slices split into contiguous bands by DP on
+ * the volume each band's hull wastes over the slices inside it. Returned only when they save at
+ * least `BAND_MIN_SAVING` of the one-prism volume; MODEL frame.
+ */
+export function computeBands(modelParts: readonly MeshPart[], heightIn: number, maxBands = MAX_BANDS): ImportedBand[] | null {
+  if (!(heightIn > BAND_SLICE_IN * 2)) return null;
+  const S = Math.ceil(heightIn / BAND_SLICE_IN);
+  const slicePts: number[][] = Array.from({ length: S }, () => []);
+  const sliceZ = (s: number): number => Math.min(heightIn, s * BAND_SLICE_IN);
+  const clipAdd = (P: V3[], s: number): void => {
+    const z0 = sliceZ(s);
+    const z1 = sliceZ(s + 1);
+    // Sutherland–Hodgman against z >= z0 and z <= z1
+    const clip = (poly: V3[], keep: (p: V3) => number): V3[] => {
+      const out: V3[] = [];
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i];
+        const b = poly[(i + 1) % poly.length];
+        const da = keep(a);
+        const db = keep(b);
+        if (da >= 0) out.push(a);
+        if ((da >= 0) !== (db >= 0)) {
+          const t = da / (da - db);
+          out.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2])]);
+        }
+      }
+      return out;
+    };
+    const c = clip(clip(P, (p) => p[2] - z0), (p) => z1 - p[2]);
+    const dst = slicePts[s];
+    for (const p of c) dst.push(p[0], p[1]);
+  };
+  forEachTriangle(modelParts, (ax, ay, az, bx, by, bz, cx, cy, cz) => {
+    const lo = Math.min(az, bz, cz);
+    const hi = Math.max(az, bz, cz);
+    const s0 = Math.max(0, Math.min(S - 1, Math.floor(lo / BAND_SLICE_IN)));
+    const s1 = Math.max(0, Math.min(S - 1, Math.floor(hi / BAND_SLICE_IN)));
+    if (s0 === s1) {
+      slicePts[s0].push(ax, ay, bx, by, cx, cy);
+      return;
+    }
+    const P: V3[] = [[ax, ay, az], [bx, by, bz], [cx, cy, cz]];
+    for (let s = s0; s <= s1; s++) clipAdd(P, s);
+  });
+  const sliceHull = slicePts.map((pts) => hullOfXY(pts));
+  const sliceArea = sliceHull.map((h) => (h.length >= 3 ? Math.abs(polygonArea(h)) : 0));
+  const sliceH = Array.from({ length: S }, (_, s) => sliceZ(s + 1) - sliceZ(s));
+  const filled = sliceArea.reduce((acc, a, s) => acc + a * sliceH[s], 0);
+  // hull area of slices i..j, memoised
+  const memo = new Map<number, number>();
+  const unionArea = (i: number, j: number): number => {
+    const key = i * 1024 + j;
+    const hit = memo.get(key);
+    if (hit !== undefined) return hit;
+    const pts: number[] = [];
+    for (let s = i; s <= j; s++) for (const p of sliceHull[s]) pts.push(p.x, p.y);
+    const h = hullOfXY(pts);
+    const a = h.length >= 3 ? Math.abs(polygonArea(h)) : 0;
+    memo.set(key, a);
+    return a;
+  };
+  const bandCost = (i: number, j: number): number => unionArea(i, j) * (sliceZ(j + 1) - sliceZ(i));
+  // DP[k][j] = min total prism volume covering slices 0..j with k bands
+  const K = Math.max(1, Math.min(MAX_BANDS, maxBands));
+  const dp: number[][] = Array.from({ length: K + 1 }, () => new Array<number>(S).fill(Infinity));
+  const cut: number[][] = Array.from({ length: K + 1 }, () => new Array<number>(S).fill(-1));
+  for (let j = 0; j < S; j++) dp[1][j] = bandCost(0, j);
+  for (let k = 2; k <= K; k++) {
+    for (let j = 0; j < S; j++) {
+      for (let i = 1; i <= j; i++) {
+        const c = dp[k - 1][i - 1] + bandCost(i, j);
+        if (c < dp[k][j] - 1e-9) {
+          dp[k][j] = c;
+          cut[k][j] = i;
+        }
+      }
+    }
+  }
+  const single = dp[1][S - 1];
+  let bestK = 1;
+  for (let k = 2; k <= K; k++) if (dp[k][S - 1] < dp[bestK][S - 1] - BAND_MIN_SAVING * single * 0.4) bestK = k;
+  if (bestK === 1 || single - dp[bestK][S - 1] < BAND_MIN_SAVING * single || single <= filled) return null;
+  const ranges: [number, number][] = [];
+  let j = S - 1;
+  for (let k = bestK; k >= 1; k--) {
+    const i = k === 1 ? 0 : cut[k][j];
+    ranges.unshift([i, j]);
+    j = i - 1;
+  }
+  const bands: ImportedBand[] = [];
+  for (const [i, jj] of ranges) {
+    const pts: Vec2[] = [];
+    for (let s = i; s <= jj; s++) pts.push(...sliceHull[s]);
+    const h = convexHull(pts);
+    if (h.length < 3) continue;
+    const { hull } = finishHull(h, MAX_BAND_VERTS);
+    if (hull.length < 3) continue;
+    bands.push({ z0: q64(sliceZ(i)), z1: q64(sliceZ(jj + 1)), hull });
+  }
+  return bands.length >= 2 ? bands : null;
+}
+
+// ---- the whole measurement -----------------------------------------------------------------
+
+/** a column-major 4×4 from a 3×3 (rows) linear part and a translation */
+function mat4(rows: [V3, V3, V3], t: V3): number[] {
+  return [
+    rows[0][0], rows[1][0], rows[2][0], 0,
+    rows[0][1], rows[1][1], rows[2][1], 0,
+    rows[0][2], rows[1][2], rows[2][2], 0,
+    t[0], t[1], t[2], 1,
+  ];
+}
+
+/**
+ * Apply a column-major 4×4 to every part's positions (new arrays; indices shared). Normals are
+ * carried through the linear part and renormalised — exact for the similarity transforms the
+ * importer uses (rotation × uniform scale).
+ */
+export function transformParts(parts: readonly MeshPart[], m: readonly number[]): MeshPart[] {
+  return parts.map((p) => {
+    const a = p.positions;
+    const out = new Float32Array(a.length);
+    for (let i = 0; i < a.length; i += 3) {
+      const x = a[i];
+      const y = a[i + 1];
+      const z = a[i + 2];
+      out[i] = m[0] * x + m[4] * y + m[8] * z + m[12];
+      out[i + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+      out[i + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+    }
+    let normals: Float32Array | null = null;
+    if (p.normals) {
+      const n = p.normals;
+      normals = new Float32Array(n.length);
+      for (let i = 0; i < n.length; i += 3) {
+        const x = m[0] * n[i] + m[4] * n[i + 1] + m[8] * n[i + 2];
+        const y = m[1] * n[i] + m[5] * n[i + 1] + m[9] * n[i + 2];
+        const z = m[2] * n[i] + m[6] * n[i + 1] + m[10] * n[i + 2];
+        const l = Math.hypot(x, y, z) || 1;
+        normals[i] = x / l;
+        normals[i + 1] = y / l;
+        normals[i + 2] = z / l;
+      }
+    }
+    return { positions: out, indices: p.indices, normals, color: p.color, name: p.name };
+  });
+}
+
+/** a fresh `ImportSetup` with everything on auto (the drive defaults are the sim's reference) */
+export function defaultImportSetup(drive?: Partial<ImportSetup['drive']>): ImportSetup {
+  return {
+    v: 1,
+    units: 'auto',
+    up: 'auto',
+    yaw: 0,
+    hullMaxVerts: MAX_HULL_VERTS,
+    wheels: null,
+    bands: true,
+    triBudget: DEFAULT_TRI_BUDGET,
+    drive: {
+      drivetrain: 'mecanum',
+      motor: { kind: 'gobilda', ratio: '19.2' },
+      externalRatio: 1,
+      wheel: { kind: 'catalogue', id: 'gobilda-gripforce-104' },
+      massLb: 30,
+      ...drive,
+    },
+  };
+}
+
+export interface MeasureOptions {
+  format: ModelFormat;
+  /** the unit the file itself declares (STEP via occt, 3MF's `unit`), when it does */
+  fileUnit?: LengthUnit | null;
+}
+
+const UNIT_WORD: Record<LengthUnit, string> = { mm: 'millimetres', cm: 'centimetres', m: 'metres', in: 'inches', ft: 'feet' };
+const fmtIn = (v: number): string => (Math.round(v * 10) / 10).toFixed(1);
+
+/**
+ * Measure a model: detect (or apply) units, up axis and yaw, put it in the MODEL frame, and
+ * measure the footprint hull, height, floor contacts, wheels, wheelbase centre and height bands.
+ * Returns the measurement and the parts in the MODEL frame (for the engine to simplify and bake).
+ */
+export function measureParts(
+  parts: readonly MeshPart[],
+  setup: ImportSetup,
+  opts: MeasureOptions,
+): { measurement: ImportMeasurement; modelParts: MeshPart[] } {
+  const trisIn = triangleCount(parts);
+  // source AABB
+  let maxExtent = 0;
+  {
+    const mn = [Infinity, Infinity, Infinity];
+    const mx = [-Infinity, -Infinity, -Infinity];
+    for (const p of parts) {
+      const a = p.positions;
+      for (let i = 0; i < a.length; i += 3) {
+        for (let k = 0; k < 3; k++) {
+          const v = a[i + k];
+          if (!Number.isFinite(v)) continue;
+          if (v < mn[k]) mn[k] = v;
+          if (v > mx[k]) mx[k] = v;
+        }
+      }
+    }
+    for (let k = 0; k < 3; k++) if (mx[k] > mn[k]) maxExtent = Math.max(maxExtent, mx[k] - mn[k]);
+  }
+  const checks: ImportCheck[] = [];
+  const unitPrior = opts.fileUnit ?? formatDefaultUnit(opts.format);
+  const unitsDetected = setup.units === 'auto' && !opts.fileUnit;
+  const units: LengthUnit =
+    setup.units !== 'auto' ? setup.units : opts.fileUnit ? opts.fileUnit : detectUnits(maxExtent, unitPrior).unit;
+  const k = INCHES_PER_UNIT[units];
+  const upPrior = formatDefaultUp(opts.format);
+  let up: UpAxis;
+  let upMargin = 1;
+  if (setup.up !== 'auto') up = setup.up;
+  else {
+    const d = detectUp(parts, k, upPrior);
+    up = d.up;
+    upMargin = d.margin;
+  }
+  const yaw = setup.yaw;
+  const R = orientation(up, yaw);
+  const rows: [V3, V3, V3] = [
+    [R[0][0] * k, R[0][1] * k, R[0][2] * k],
+    [R[1][0] * k, R[1][1] * k, R[1][2] * k],
+    [R[2][0] * k, R[2][1] * k, R[2][2] * k],
+  ];
+  const rotated = transformParts(parts, mat4(rows, [0, 0, 0]));
+  const mn = [Infinity, Infinity, Infinity];
+  const mx = [-Infinity, -Infinity, -Infinity];
+  for (const p of rotated) {
+    const a = p.positions;
+    for (let i = 0; i < a.length; i += 3) {
+      for (let j = 0; j < 3; j++) {
+        const v = a[i + j];
+        if (v < mn[j]) mn[j] = v;
+        if (v > mx[j]) mx[j] = v;
+      }
+    }
+  }
+  const empty = trisIn === 0 || !Number.isFinite(mn[0]);
+  const t: V3 = empty ? [0, 0, 0] : [-(mn[0] + mx[0]) / 2, -(mn[1] + mx[1]) / 2, -mn[2]];
+  const sourceToModel = mat4(rows, t);
+  const modelParts = rotated.map((p) => {
+    const a = p.positions;
+    for (let i = 0; i < a.length; i += 3) {
+      a[i] += t[0];
+      a[i + 1] += t[1];
+      a[i + 2] += t[2];
+    }
+    return p;
+  });
+  const size = empty
+    ? { length: 0, width: 0, height: 0 }
+    : { length: mx[0] - mn[0], width: mx[1] - mn[1], height: mx[2] - mn[2] };
+
+  // footprint: hull of per-part hulls
+  const hullPts: Vec2[] = [];
+  for (const p of modelParts) {
+    const a = p.positions;
+    const xy = new Float64Array((a.length / 3) * 2);
+    for (let i = 0, j = 0; i < a.length; i += 3, j += 2) {
+      xy[j] = a[i];
+      xy[j + 1] = a[i + 1];
+    }
+    hullPts.push(...hullOfXY(xy));
+  }
+  const rawHull = convexHull(hullPts);
+  const maxVerts = Math.max(3, Math.min(MAX_HULL_VERTS, Math.floor(setup.hullMaxVerts) || MAX_HULL_VERTS));
+  const { hull, deviation } = rawHull.length >= 3 ? finishHull(rawHull, maxVerts) : { hull: [] as Vec2[], deviation: 0 };
+
+  // floor contacts → wheels
+  let wheels: WheelDetection = { wheels: null, contacts: [], note: 'Couldn’t find any wheels touching the floor. Drag the wheel markers onto the wheels.' };
+  if (!empty) {
+    for (const slab of WHEEL_SLABS_IN) {
+      const { xy, edges } = floorContacts(modelParts, slab);
+      const d = detectWheels(xy, edges);
+      if (slab === WHEEL_SLABS_IN[0] || d.wheels) wheels = d;
+      if (d.wheels) break;
+    }
+  }
+  const manual = Array.isArray(setup.wheels) && setup.wheels.length === 4 && setup.wheels.every((w) => Number.isFinite(w?.x) && Number.isFinite(w?.y));
+  const wheelsUsed = manual ? setup.wheels!.map((w) => ({ x: w.x, y: w.y })) : wheels.wheels;
+  const wheelSource: ImportMeasurement['wheelSource'] = manual ? 'manual' : wheels.wheels ? 'detected' : 'none';
+  const origin = wheelsUsed
+    ? {
+        x: q64(wheelsUsed.reduce((s, w) => s + w.x, 0) / 4),
+        y: q64(wheelsUsed.reduce((s, w) => s + w.y, 0) / 4),
+      }
+    : { x: 0, y: 0 };
+  const heightIn = size.height;
+  let bands: ImportedBand[] | undefined;
+  if (setup.bands && !empty) {
+    const b = computeBands(modelParts, heightIn);
+    if (b) bands = b.map((band) => ({ z0: band.z0, z1: band.z1, hull: quantiseHull(band.hull.map((p) => ({ x: p.x - origin.x, y: p.y - origin.y }))) }));
+  }
+
+  // ---- checks (copy: docs/area/ui.md — sentence case, Couldn’t … + a next step) ----
+  if (empty) {
+    checks.push({ code: 'empty', level: 'block', message: 'Couldn’t find any triangles in this file. Export the robot as a solid or mesh and try again.' });
+  } else {
+    const over = (['length', 'width', 'height'] as const).filter((d) => size[d] > ROBOT_MAX_IN + HULL_QUANTUM);
+    if (over.length) {
+      const worst = Math.max(size.length, size.width, size.height);
+      checks.push({
+        code: 'oversize',
+        level: 'block',
+        message: `The robot is ${fmtIn(size.length)} × ${fmtIn(size.width)} × ${fmtIn(size.height)} in; ${over.join(' and ')} ${over.length === 1 ? 'is' : 'are'} over 18 in. Check the units, or import the robot in its starting configuration.`,
+      });
+      // a units hint when a different unit would make it robot-sized
+      const alt = detectUnits(worst / INCHES_PER_UNIT[units], null).unit;
+      if (alt !== units && (worst > 40 || worst < 4)) {
+        checks.push({
+          code: 'units-suspect',
+          level: 'warn',
+          message: `${fmtIn(worst)} in is not robot-sized. If the file is in ${UNIT_WORD[alt]}, set Units to ${alt}.`,
+        });
+      }
+    } else if (Math.max(size.length, size.width, size.height) < 4) {
+      const worst = Math.max(size.length, size.width, size.height);
+      const alt = detectUnits(worst / INCHES_PER_UNIT[units], null).unit;
+      checks.push({
+        code: 'units-suspect',
+        level: 'warn',
+        message: `The robot is only ${fmtIn(worst)} in across.${alt !== units ? ` If the file is in ${UNIT_WORD[alt]}, set Units to ${alt}.` : ' Check the units.'}`,
+      });
+    }
+    if (setup.up === 'auto' && upMargin < 0.15) {
+      checks.push({ code: 'up-uncertain', level: 'info', message: 'Couldn’t be sure which way is up. Check that the robot stands on its wheels in the preview.' });
+    }
+    if (wheelSource === 'none') {
+      const few = wheels.contacts.length;
+      checks.push({
+        code: few <= 1 ? 'no-floor' : 'few-wheels',
+        level: 'warn',
+        message: few <= 1 ? 'Only one part of the robot touches the floor. Check the up axis, or drag the wheel markers onto the wheels.' : wheels.note,
+      });
+    } else if (wheelSource === 'detected' && /corner ones/.test(wheels.note)) {
+      checks.push({ code: 'wheels-picked', level: 'info', message: wheels.note });
+    }
+    if (wheelsUsed && hull.length >= 3) {
+      const off = wheelsUsed.filter((w) => insetDepth(w, hull) < -0.05).length;
+      if (off) {
+        checks.push({
+          code: 'wheels-off-hull',
+          level: 'block',
+          message: `${off === 1 ? 'A wheel is' : `${off} wheels are`} outside the robot’s footprint. Drag ${off === 1 ? 'it' : 'them'} back onto the robot.`,
+        });
+      }
+    }
+    if (deviation > 0.25) {
+      checks.push({
+        code: 'hull-simplified',
+        level: 'info',
+        message: `The footprint outline is up to ${fmtIn(deviation)} in inside the model at its roundest corner.`,
+      });
+    }
+  }
+
+  return {
+    measurement: {
+      units,
+      unitsDetected,
+      up,
+      upDetected: setup.up === 'auto',
+      upMargin,
+      yaw,
+      sourceToModel,
+      size,
+      hull,
+      hullRawVerts: rawHull.length,
+      hullDeviation: deviation,
+      wheels,
+      wheelsUsed,
+      wheelSource,
+      origin,
+      heightIn,
+      bands,
+      trisIn,
+      checks,
+    },
+    modelParts,
+  };
+}
+
+// ---- frames and the descriptor -------------------------------------------------------------
+
+export const modelToRobot = (p: Vec2, origin: Vec2): Vec2 => ({ x: p.x - origin.x, y: p.y - origin.y });
+export const robotToModel = (p: Vec2, origin: Vec2): Vec2 => ({ x: p.x + origin.x, y: p.y + origin.y });
+
+/** shift mechanism placements from the MODEL frame to robot-local (spans along their edge) */
+export function mechModelToRobot(mech: ImportedMech, origin: Vec2): ImportedMech {
+  const out: ImportedMech = {};
+  if (mech.shooter) out.shooter = { x: q64(mech.shooter.x - origin.x), y: q64(mech.shooter.y - origin.y), z: q64(mech.shooter.z) };
+  if (mech.place) out.place = { x: q64(mech.place.x - origin.x), y: q64(mech.place.y - origin.y), z: q64(mech.place.z) };
+  if (mech.intakes) {
+    out.intakes = mech.intakes.map((m) => {
+      const lateral = m.edge === 'front' || m.edge === 'back' ? origin.y : origin.x;
+      const a = q64(m.from - lateral);
+      const b = q64(m.to - lateral);
+      return { edge: m.edge as ImportedEdge, from: Math.min(a, b), to: Math.max(a, b) };
+    });
+  }
+  return out;
+}
+
+/**
+ * THE CONTRACT SHAPE (plan §3.1) from a measurement. Robot-local inches, quantised to 1/64,
+ * hull re-hulled after the shift (so `coerceImported` finds it already canonical), wheels clamped
+ * into the hull, heights clamped to (0, 18]. A footprint over 18 in is scaled uniformly about the
+ * origin exactly as the coercer would; the `oversize` check is what tells the player.
+ */
+export function buildDescriptor(input: { id: string; measurement: ImportMeasurement; mech?: ImportedMech | null }): ImportedRobot {
+  const m = input.measurement;
+  const o = m.origin;
+  let hull = quantiseHull(m.hull.map((p) => modelToRobot(p, o)));
+  const b = bbox(hull);
+  const span = Math.max(b.maxX - b.minX, b.maxY - b.minY);
+  let scale = 1;
+  if (span > ROBOT_MAX_IN) {
+    scale = ROBOT_MAX_IN / span;
+    hull = quantiseHull(hull.map((p) => ({ x: p.x * scale, y: p.y * scale })));
+    // quantising can round a side back over by 1/64; shrink until it fits
+    while (Math.max(bbox(hull).maxX - bbox(hull).minX, bbox(hull).maxY - bbox(hull).minY) > ROBOT_MAX_IN) {
+      hull = quantiseHull(hull.map((p) => ({ x: p.x * (1 - 1 / 1024), y: p.y * (1 - 1 / 1024) })));
+    }
+  }
+  const heightIn = Math.min(ROBOT_MAX_IN, Math.max(HULL_QUANTUM, q64(m.heightIn)));
+  const out: ImportedRobot = { v: 1, id: input.id, hull, heightIn };
+  if (m.wheelsUsed) {
+    out.wheels = m.wheelsUsed.map((w) => {
+      const r = modelToRobot(w, o);
+      const c = clampIntoConvex({ x: r.x * scale, y: r.y * scale }, hull);
+      return { x: q64(c.x), y: q64(c.y) };
+    });
+  }
+  if (m.bands && m.bands.length) {
+    out.bands = m.bands.map((band) => ({
+      z0: Math.min(heightIn, q64(band.z0)),
+      z1: Math.min(heightIn, q64(band.z1)),
+      hull: scale === 1 ? band.hull.map((p) => ({ x: p.x, y: p.y })) : quantiseHull(band.hull.map((p) => ({ x: p.x * scale, y: p.y * scale }))),
+    })).filter((band) => band.z1 > band.z0 && band.hull.length >= 3);
+    if (!out.bands.length) delete out.bands;
+  }
+  if (input.mech) {
+    const mech = mechModelToRobot(input.mech, o);
+    if (mech.shooter || mech.place || mech.intakes?.length) out.mech = mech;
+  }
+  return out;
+}
+
+// ---- the top image's frame -------------------------------------------------------------
+
+export interface TopImageFrame {
+  /** robot-local point at the image centre, inches */
+  cx: number;
+  cy: number;
+  /** inches the square image spans */
+  sideIn: number;
+  inPerPx: number;
+  px: number;
+}
+
+/**
+ * The top-down PNG's mapping, from the descriptor's hull alone (so a renderer recomputes it from
+ * `spec.imported.hull` and nothing else). Centre = the hull's box centre; side = the larger box
+ * side plus 0.5 in a side. Front = image up, robot left = image left.
+ */
+export function topImageFrame(hull: readonly Vec2[], px = TOP_IMAGE_PX): TopImageFrame {
+  const b = bbox(hull);
+  const ok = Number.isFinite(b.minX);
+  const cx = ok ? (b.minX + b.maxX) / 2 : 0;
+  const cy = ok ? (b.minY + b.maxY) / 2 : 0;
+  const sideIn = (ok ? Math.max(b.maxX - b.minX, b.maxY - b.minY) : ROBOT_MAX_IN) + 1;
+  return { cx, cy, sideIn, inPerPx: sideIn / px, px };
+}
+
+/** robot-local inches → image pixel (continuous, origin top-left) */
+export function robotToTopPixel(p: Vec2, f: TopImageFrame): { u: number; v: number } {
+  return { u: f.px / 2 - (p.y - f.cy) / f.inPerPx, v: f.px / 2 - (p.x - f.cx) / f.inPerPx };
+}
+
+/** image pixel → robot-local inches */
+export function topPixelToRobot(u: number, v: number, f: TopImageFrame): Vec2 {
+  return { x: f.cx + (f.px / 2 - v) * f.inPerPx, y: f.cy + (f.px / 2 - u) * f.inPerPx };
+}

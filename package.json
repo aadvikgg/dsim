@@ -50,6 +50,8 @@
     "docaudit": "node scripts/docaudit.mjs",
     "costprobe": "tsx scripts/costprobe.ts",
     "bundleaudit": "node scripts/bundleaudit.mjs",
+    "bundleaudit:importer": "node scripts/robot-import/bundle.mjs",
+    "robot-import:fixtures": "tsx scripts/robot-import/fixtures.ts",
     "field-cad": "node scripts/field-cad.mjs",
     "element-cad": "node scripts/field-cad/elements.mjs",
     "hive-calibrate": "tsx scripts/hive-calibrate.ts",
@@ -137,6 +139,7 @@
     "electron": "^43.0.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.25.12",
+    "occt-import-js": "0.0.23",
     "three": "0.186.0",
     "typescript": "^5.6.0",
     "vite": "^6.0.0"

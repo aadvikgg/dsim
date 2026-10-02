@@ -30,8 +30,9 @@
  * so sim-adjacent code (`net/practiceRuns.ts`) and the UI can both take it.
  */
 
-/** which store: `localStorage` outlives the browser closing, `sessionStorage` dies with the tab */
-export type StorageKind = 'local' | 'session';
+/** which store: `localStorage` outlives the browser closing, `sessionStorage` dies with the tab,
+ *  `indexeddb` is a database on this device for things too big for either (the key is its name) */
+export type StorageKind = 'local' | 'session' | 'indexeddb';
 
 /**
  * WHAT THE KEY IS FOR, in the three buckets a consent standard recognises.
@@ -118,6 +119,8 @@ export const VERIFY_BANNER_KEY = 'decodesim.verifyBanner.v1';
 export const DISCORD_INSTANCE_KEY = 'decodesim.discordInstance.v1';
 /** the Zenith auto library (`src/auto/library.ts`): auto files for AUTO, per game, this device only */
 export const ZENITH_AUTOS_KEY = 'decodesim.zenithAutos.v1';
+/** the IndexedDB database holding imported robots (`src/robotImport/library.ts`): mesh, pictures, setup */
+export const ROBOT_LIBRARY_DB = 'decodesim.robots';
 
 /**
  * THE INVENTORY, in the order the privacy page prints it: `necessary` first (the ones you
@@ -160,6 +163,14 @@ export const STORAGE_KEYS: readonly StorageKeyEntry[] = [
       'Your solo practice runs: score, length, and the input log that reproduces the run. Solo practice runs on this device with no server watching it, so this is the only copy until you sign in.',
     retention:
       'The last 10 are kept; the oldest goes first past that. Deleting a run removes it at once.',
+  },
+  {
+    key: ROBOT_LIBRARY_DB,
+    storage: 'indexeddb',
+    category: 'necessary',
+    purpose:
+      'Robots you imported from CAD: a simplified 3D model of each, its pictures, and the setup that makes it drive like the real one. The models stay on this device; only a robot’s measurements travel with your settings.',
+    retention: 'Until you delete a robot from your imported robots or clear your browser data.',
   },
   {
     key: ZENITH_AUTOS_KEY,
