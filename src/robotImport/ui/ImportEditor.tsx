@@ -8,7 +8,7 @@ import { loadImporterEngine, type ImporterEngine } from '../engineLoader';
 import type { NormalisedModel, PreparedModel } from '../engine/importerEngine';
 import type { LoadStage } from '../engine/load';
 import { defaultImportSetup, transformParts } from '../geometry';
-import { getRobot, newRobotId, putRobot } from '../library';
+import { getRobot, listRobots, newRobotId, putRobot } from '../library';
 import { readShareFile, type SharePayload } from '../shareFile';
 import { STORED_MESH_TO_ROBOT, type ImportSetup, type LibraryRobot } from '../types';
 import { defaultMechFor, mechHandlesFor, mechRobotToModel, validateMechFor } from './placement';
@@ -243,6 +243,10 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         const thumb = await e.renderThumb(robotParts);
         if (my !== gen.current) return;
         const now = Date.now();
+        // the file's own id names the robot only inside the file: this device's copy gets a fresh
+        // one (see `LibraryRobot.sharedFrom`), and a copy already added from it is offered for
+        // replacement under ITS id
+        const fileId = spec.imported.id;
         const record = (s: RobotSpec): LibraryRobot => ({
           id: s.imported!.id,
           game,
@@ -252,6 +256,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
           thumb,
           source: { name: file.name, format: 'glb', bytes: file.size, trisIn: model.trisIn, trisOut: model.trisIn },
           setup: { ...payload.setup, units: 'm', up: '+y', yaw: 0 },
+          sharedFrom: fileId,
           created: now,
           updated: now,
         });
@@ -268,20 +273,19 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
           postRobotNotice(COPY.added(s.name));
           onSaved(s);
         };
-        const have = await getRobot(spec.imported.id);
-        if (have.ok) {
+        const withId = (id: string, name = spec.name): RobotSpec => ({ ...spec, name, imported: { ...spec.imported!, id } });
+        const listed = await listRobots(game);
+        const have = listed.ok ? listed.value.find((r) => r.sharedFrom === fileId || r.id === fileId) : undefined;
+        if (have) {
           setDialog({
             kind: 'dup',
             name: spec.name,
-            replace: () => void finish(spec),
-            keepBoth: () => {
-              const id = newRobotId();
-              void finish({ ...spec, name: `${spec.name.slice(0, 22)} 2`, imported: { ...spec.imported!, id } });
-            },
+            replace: () => void finish(withId(have.id)),
+            keepBoth: () => void finish(withId(newRobotId(), `${spec.name.slice(0, 22)} 2`)),
           });
           return;
         }
-        await finish(spec);
+        await finish(withId(newRobotId()));
       } catch (err) {
         console.warn('[import] share file failed', err);
         setPhase(null);

@@ -140,6 +140,7 @@ const entryOf = (r: LibraryRobot | LibraryEntry): LibraryEntry => ({
   spec: r.spec,
   source: r.source,
   setup: r.setup,
+  ...(r.sharedFrom ? { sharedFrom: r.sharedFrom } : {}),
   created: r.created,
   updated: r.updated,
 });

@@ -204,6 +204,11 @@ export interface LibraryRobot {
    *  `mesh` is over the relay's 1 MiB cap; absent when `mesh` already fits or has not been needed. A
    *  re-save of the robot drops it, because the mesh it was cut from may have changed. */
   meshLite?: Blob;
+  /** the import id inside the share file this robot was added from. A share-file import always gets
+   *  a FRESH id (a room refuses two seats with one id, so two teammates who loaded the same file
+   *  could not sit together); this is how a second import of that file on this device is still
+   *  recognised as the same robot. Absent on robots imported from CAD. */
+  sharedFrom?: string;
   source: LibrarySource;
   setup: ImportSetup;
   created: number;

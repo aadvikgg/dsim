@@ -33456,6 +33456,14 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
     'import UI bundle: the robot page reaches the library dialogs and the export by import() on a click, never statically',
     !/^import [^;]*from '\.\/(?:LibraryDialogs|exportRobot)'/m.test(row) && /import\('\.\/LibraryDialogs'\)/.test(row) && /import\('\.\/exportRobot'\)/.test(row),
   );
+  // a room refuses two seats holding one import id, so a robot added from a share file never keeps
+  // the file's id: two teammates who load one file must be able to sit in one room
+  const edN = ed.replace(/\r\n/g, '\n');
+  check(
+    'import UI share file: an added robot gets a fresh id and remembers the file’s (sharedFrom), and a second add of that file offers Replace under the local id',
+    ['await finish(withId(newRobotId()));', 'sharedFrom: fileId,', 'r.sharedFrom === fileId || r.id === fileId', 'replace: () => void finish(withId(have.id))'].every((t) => edN.includes(t)) &&
+      readFileSync('src/robotImport/library.ts', 'utf8').includes('...(r.sharedFrom ? { sharedFrom: r.sharedFrom } : {}),'),
+  );
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
