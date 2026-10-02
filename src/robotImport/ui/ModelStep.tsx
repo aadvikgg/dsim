@@ -5,7 +5,7 @@ import type { ImportMeasurement, ImportSetup, LengthUnit, QuarterTurns, UpAxis }
 import { LENGTH_UNITS, UP_AXES } from '../types';
 import { COPY, FORMAT_LABEL, UNIT_LABEL, sizeLabel, upLabel } from './copy';
 import { ACCEPT, DropZone, type DropError, type Phase } from './DropZone';
-import type { EditorDoc } from './editorModel';
+import { rectangleWheels, type EditorDoc } from './editorModel';
 import { NumberField } from './NumberField';
 import { TopDownMap, type MapHandle } from './TopDownMap';
 
@@ -160,6 +160,11 @@ export function ModelStep({
           status={sel ? COPY.placed(COPY.wheelNames[selectedWheel], sel.x, sel.y) : m.wheels.note}
           onSelect={(k) => onSelectWheel(Number(k.slice(1)))}
           onMove={(k, p, final) => onWheel(Number(k.slice(1)), p, final)}
+          onHome={(k) => {
+            const i = Number(k.slice(1));
+            const home = (m.wheels.wheels ?? rectangleWheels(m.hull))[i];
+            if (home) onWheel(i, home, true);
+          }}
         />
         <ToggleRow label={COPY.mirror} value={mirror} onPick={onMirror} />
         {sel ? (

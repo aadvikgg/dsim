@@ -84,7 +84,7 @@ export const COPY = {
   left: 'Left',
   useDetected: 'Use detected wheels',
   grabPad: (dpad: string, a: string, b: string) => `Move with ${dpad} or the left stick. ${a} to drop, ${b} to cancel.`,
-  grabKeys: 'Arrow keys move it. Hold Shift for small steps.',
+  grabKeys: 'Arrow keys move it. Hold Shift for small steps. Home puts it back.',
   handleAria: (label: string, x: number, y: number, z?: number) => `${label}, ${where(x, y, z)}`,
 
   // ---- errors the UI adds (the engine's own come as ImportError messages) ----

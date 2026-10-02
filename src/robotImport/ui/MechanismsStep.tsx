@@ -28,6 +28,7 @@ export function MechanismsStep({
   hull,
   heightIn,
   mech,
+  home,
   defs,
   checks,
   selected,
@@ -44,6 +45,8 @@ export function MechanismsStep({
   heightIn: number;
   /** MODEL frame */
   mech: ImportedMech;
+  /** the game's own placements for this build (MODEL frame): where Home puts a handle back */
+  home: ImportedMech;
   defs: readonly MechHandleDef[];
   checks: readonly MechCheck[];
   selected: string | null;
@@ -99,6 +102,20 @@ export function MechanismsStep({
     const old = mech[field];
     if (!old) return;
     onMech({ ...mech, [field]: { x: q64(p.x), y: q64(p.y), z: old.z } });
+  };
+
+  /** Home on a handle: that placement (a span: the whole span) back to the game's pre-fill */
+  const goHome = (key: string): void => {
+    const base = key.split(':').length === 3 ? key.slice(0, key.lastIndexOf(':')) : key;
+    const def = defs.find((d) => d.key === base);
+    if (!def) return;
+    if (def.field === 'intake') {
+      const h = home.intakes?.find((i) => i.edge === def.edge);
+      if (h) onMech({ ...mech, intakes: (mech.intakes ?? []).map((i) => (i.edge === def.edge ? { ...h } : i)) });
+      return;
+    }
+    const h = home[def.field];
+    if (h) onMech({ ...mech, [def.field]: { ...h } });
   };
 
   // the selected handle's own controls
@@ -195,6 +212,7 @@ export function MechanismsStep({
         status={status}
         onSelect={onSelect}
         onMove={(k, p) => move(k, p)}
+        onHome={goHome}
       />
       {controls}
       <div>

@@ -573,6 +573,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         hull={m.hull}
         heightIn={m.heightIn}
         mech={doc.mech}
+        home={defaultMechFor(game, built.spec, m.origin, null)}
         defs={defs}
         checks={mechChecks}
         selected={selHandle}

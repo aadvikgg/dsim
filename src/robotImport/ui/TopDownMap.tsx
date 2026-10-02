@@ -15,7 +15,8 @@ import { padIsActive, useHandleGrab } from './useHandleGrab';
  * The drawing is an SVG in field inches; the HANDLES are real buttons laid over it by percent, so
  * the keyboard, the screen reader and the controller all reach them as ordinary controls:
  *  · pointer: drag, the drawing follows, the move commits on release (StartPositionEditor's rule);
- *  · keyboard: arrows move 1/4 in, Shift+arrows 1/16 in, each press commits;
+ *  · keyboard: arrows move 1/4 in, Shift+arrows 1/16 in, each press commits; Home puts it back
+ *    where the import put it (`onHome`);
  *  · controller: A grabs (`useHandleGrab`), the D-pad or the left stick moves, A drops, B cancels.
  */
 
@@ -53,6 +54,7 @@ export function TopDownMap({
   status,
   onSelect,
   onMove,
+  onHome,
 }: {
   hull: readonly Vec2[];
   handles: readonly MapHandle[];
@@ -67,6 +69,8 @@ export function TopDownMap({
   onSelect?: (key: string) => void;
   /** `final` is false while a drag is in flight, true when it is let go */
   onMove?: (key: string, p: Vec2, final: boolean) => void;
+  /** Home on a handle: put it back where the import placed it */
+  onHome?: (key: string) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const drag = useRef<{ key: string; moved: boolean; last: Vec2 } | null>(null);
@@ -135,6 +139,11 @@ export function TopDownMap({
   };
   const onKey = (e: KeyboardEvent<HTMLButtonElement>, h: MapHandle): void => {
     if (readOnly) return;
+    if (e.key === 'Home' && onHome) {
+      e.preventDefault();
+      onHome(h.key);
+      return;
+    }
     const step = e.shiftKey ? 1 / 16 : 0.25;
     const dir: Record<string, [number, number]> = {
       ArrowUp: [0, step],

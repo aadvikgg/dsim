@@ -130,6 +130,62 @@ app.whenReady().then(async () => {
   check('pad: …and the import waits there as Resume import', await js(`!!document.querySelector('.ds-opt-add') && document.querySelector('.ds-opt-add').textContent.includes('Resume import')`));
   await shot('robot-resume');
 
+  // ── the same editor by KEYBOARD (real key events, not synthetic ones) ──
+  await js(`navigator.getGamepads = () => []; true`);
+  win.webContents.focus();
+  const key = async (keyCode, modifiers = []) => {
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
+    // a button activates on Enter's CHAR event (keypress), so Return needs one too
+    if (keyCode.length === 1 || keyCode === 'Return') win.webContents.sendInputEvent({ type: 'char', keyCode: keyCode === 'Return' ? '\r' : keyCode, modifiers });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
+    await sleep(180);
+  };
+  await js(`document.querySelector('.ds-opt-add')?.focus(); true`);
+  await key('Return');
+  await sleep(1500);
+  check('keys: Enter on Resume import reopens the editor', await js(`location.pathname.endsWith('/configure/robot/import')`));
+  check('keys: …on the step it was left on (Mechanisms)', (await tab()) === '3', await tab());
+  await js(`document.querySelector('.ds-import-steps .ds-tab')?.focus(); true`);
+  await key('Return');
+  await sleep(500);
+  check('keys: Enter on a step tab goes to that step', (await tab()) === '1', await tab());
+  // Tab order = DOM order = the narrow layout's visual order: rail, preview controls, then the step
+  await js(`document.querySelector('.ds-import-steps .ds-tab:last-child')?.focus(); true`);
+  await key('Tab');
+  check('keys: Tab after the step rail reaches the preview controls next (DOM = narrow visual order)', await js(`!!document.activeElement?.closest('.ds-import-preview, .ds-import-canvas-host') || !!document.activeElement?.closest('.ds-segs')`), await active());
+  for (let i = 0; i < 8 && !(await js(`!!document.activeElement?.closest('.ds-import-body')`)); i++) await key('Tab');
+  check('keys: …and a few Tabs later, the step itself', await js(`!!document.activeElement?.closest('.ds-import-body')`), await active());
+  // handles: arrows 1/4 in, Shift 1/16 in, Home back to the import's placement
+  await js(`document.getElementById('ri-h-w2').focus(); true`);
+  const k0 = await js(`document.getElementById('ri-h-w2').getAttribute('aria-label')`);
+  await key('Up');
+  await key('Up');
+  const k1 = await js(`document.getElementById('ri-h-w2').getAttribute('aria-label')`);
+  check('keys: ↑ twice moves a wheel 0.5 in forward', Math.abs(fwd(k1) - fwd(k0) - 0.5) < 0.051, `${k0} → ${k1}`);
+  check('keys: an arrow on a handle does not scroll or leave it', (await js(`document.activeElement?.id`)) === 'ri-h-w2');
+  await key('Home');
+  await sleep(300);
+  const k2 = await js(`document.getElementById('ri-h-w2').getAttribute('aria-label')`);
+  check('keys: Home puts the wheel back where the import placed it', Math.abs(fwd(k2) - fwd(k0)) < 0.051, `${k0} → ${k2}`);
+  // Next by Enter; the discard dialog opens and Escape closes it, nothing else leaves on Escape
+  await js(`[...document.querySelectorAll('.ds-import-foot .ds-btn')].find((b) => b.classList.contains('primary'))?.focus(); true`);
+  await key('Return');
+  await sleep(400);
+  check('keys: Enter on Next: Drivetrain', (await tab()) === '2', await tab());
+  await key('Escape');
+  await sleep(300);
+  check('keys: Escape outside a dialog does not leave the editor', await js(`location.pathname.endsWith('/configure/robot/import')`));
+  const discard = await js(`(() => { const b = [...document.querySelectorAll('.ds-head .ds-btn')].find((x) => /Discard/.test(x.textContent)); b?.focus(); return !!b; })()`);
+  if (discard) {
+    await key('Return');
+    await sleep(400);
+    check('keys: Discard asks first (a dialog, focus inside it)', await js(`!!document.activeElement?.closest('.ds-modal')`));
+    await key('Escape');
+    await sleep(400);
+    check('keys: Escape closes the dialog and hands focus back to Discard', await js(`!document.querySelector('.ds-modal') && /Discard/.test(document.activeElement?.textContent ?? '')`), await active());
+  } else check('keys: a Discard button in the foot', false);
+  await shot('keys-drivetrain');
+
   console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
   app.exit(failures ? 1 : 0);
 });
