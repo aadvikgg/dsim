@@ -6,6 +6,7 @@
  */
 import type { GameId, RobotSpec } from '../../types';
 import type { ImportSetup } from '../types';
+import { saveBlob } from '../../ui/saveBlob';
 
 /** `Ironclad 2` → `ironclad-2.dsim.glb` */
 export function shareFileName(name: string): string {
@@ -18,19 +19,9 @@ export function shareFileName(name: string): string {
   return `${slug || 'robot'}.dsim.glb`;
 }
 
-/** hand the browser a file to save */
+/** hand the browser a file to save (through `saveBlob`, the one owner of a download's object URL) */
 export function downloadBytes(bytes: Uint8Array | Blob, filename: string): void {
-  const blob = bytes instanceof Blob ? bytes : new Blob([new Uint8Array(bytes)], { type: 'model/gltf-binary' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  // the download has the URL by the next task; revoking sooner cancels it in some browsers
-  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  saveBlob(bytes instanceof Blob ? bytes : new Blob([new Uint8Array(bytes)], { type: 'model/gltf-binary' }), filename);
 }
 
 /** a share file from a stored mesh and the setup that goes with it */

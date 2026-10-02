@@ -164,6 +164,8 @@ export const COPY = {
   toFix: (n: number) => `${n} to fix before saving`,
   notes: (n: number) => `Ready, with ${n} ${n === 1 ? 'note' : 'notes'}`,
   passFits: 'Fits the 18 in cube',
+  tooSmall: (side: number, min: number) =>
+    `The footprint is only ${side.toFixed(1)} in across. The sim needs ${min} in a side, so check the units.`,
   passWheels: 'Four wheels on the footprint',
   passWeight: 'Weight in the sim’s range',
   passRpm: 'Drive rpm in the sim’s range',

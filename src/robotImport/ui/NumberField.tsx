@@ -33,9 +33,10 @@ export function NumberField({
   const fmt = (v: number): string => (Number.isFinite(v) ? Number(v.toFixed(decimals)).toString() : '');
   const [text, setText] = useState(fmt(value));
   useEffect(() => setText(fmt(value)), [value]); // eslint-disable-line react-hooks/exhaustive-deps
-  const commit = (): void => {
-    const v = Number(text);
-    if (!Number.isFinite(v) || text.trim() === '') {
+  // reads the FIELD, not the state: a blur can arrive in the same task as the last keystroke
+  const commit = (raw: string): void => {
+    const v = Number(raw);
+    if (!Number.isFinite(v) || raw.trim() === '') {
       setText(fmt(value));
       return;
     }
@@ -59,9 +60,9 @@ export function NumberField({
         step={step}
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
+        onBlur={(e) => commit(e.currentTarget.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') commit();
+          if (e.key === 'Enter') commit(e.currentTarget.value);
         }}
       />
     </label>

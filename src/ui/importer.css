@@ -38,6 +38,7 @@
 }
 .ds-import-in > .ds-import-foot {
   grid-area: foot;
+  align-self: start;
 }
 /* ---- the step rail: `.ds-tabs`, numbered, each with its check count ---- */
 .ds-import-steps {
@@ -106,6 +107,9 @@
   .ds-import-in {
     grid-template-columns: minmax(0, 1fr) minmax(340px, 42%);
     grid-template-areas: 'steps preview' 'body preview' 'foot preview';
+    /* the preview spans all three rows and is taller than the first two: the slack goes to the
+       LAST row, so the step body sits right under the rail instead of a gap opening between */
+    grid-template-rows: auto auto 1fr;
   }
   .ds-import-in > .ds-import-preview {
     position: sticky;

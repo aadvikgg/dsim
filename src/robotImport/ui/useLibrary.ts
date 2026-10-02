@@ -10,9 +10,9 @@ import { onLibraryChange } from './handoff';
  * hook and not the IndexedDB code; the cards land one read after the first paint, beside an add
  * card that was there from the start.
  *
- * Thumbnails are object URLs kept for the life of the document, keyed by id and `updated`, so a
- * remount of the page does not re-read and re-decode them; a robot that changes or goes has its
- * old URL revoked.
+ * Thumbnails are DATA URLs (a 192-px PNG is a few tens of KB), cached for the life of the document
+ * by id and `updated`, so a remount of the page does not re-read them. Not object URLs: those pin
+ * their blob until revoked, and `saveBlob` is the one place allowed to revoke one (`npm test`).
  */
 
 export interface LibraryView {
@@ -28,6 +28,15 @@ export interface LibraryView {
 
 const urls = new Map<string, { updated: number; url: string }>();
 
+function dataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
 function lib() {
   return import('../library');
 }
@@ -38,8 +47,7 @@ async function thumbUrl(id: string, updated: number): Promise<string | null> {
   const { thumbFor } = await lib();
   const blob = await thumbFor(id);
   if (!blob) return null;
-  if (have) URL.revokeObjectURL(have.url);
-  const url = URL.createObjectURL(blob);
+  const url = await dataUrl(blob);
   urls.set(id, { updated, url });
   return url;
 }
@@ -55,13 +63,8 @@ export async function readLibrary(game: GameId): Promise<LibraryView> {
       if (u) thumbs[e.id] = u;
     }),
   );
-  // a robot that left the library takes its URL with it
-  for (const [id, v] of urls) {
-    if (!list.value.some((e) => e.id === id)) {
-      URL.revokeObjectURL(v.url);
-      urls.delete(id);
-    }
-  }
+  // a robot that left the library takes its picture with it
+  for (const id of urls.keys()) if (!list.value.some((e) => e.id === id)) urls.delete(id);
   const draft = drafts.ok ? (drafts.value.find((d) => d.key === `${game}:new`) ?? null) : null;
   return { entries: list.value, thumbs, draft, error: null };
 }

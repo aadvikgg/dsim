@@ -80,6 +80,7 @@ export function DrivetrainStep({
         <OptRow<Family>
           label={COPY.motor}
           value={m.kind}
+          cols="five"
           mini
           options={COPY.motorFamilies.map(([v, t]) => ({ v, t }))}
           onPick={(k) => onDrive({ motor: motorOf(k, m) })}
@@ -89,6 +90,7 @@ export function DrivetrainStep({
         <OptRow<string>
           label={COPY.gearbox}
           value={m.ratio}
+          cols="five"
           mini
           // by ratio: the keys read like numbers, so object order put 1:1, 139:1 and 188:1 first
           options={Object.entries(GOBILDA_RATIOS)
@@ -100,6 +102,7 @@ export function DrivetrainStep({
         <OptRow<string>
           label={COPY.gearbox}
           value={stackKey(m.cartridges)}
+          cols="five"
           mini
           options={HD_STACKS.map((c) => ({ v: stackKey(c), t: stackLabel(c) }))}
           onPick={(k) => onDrive({ motor: { kind: 'revHdHex', cartridges: (HD_STACKS.find((c) => stackKey(c) === k) ?? []).slice() } })}

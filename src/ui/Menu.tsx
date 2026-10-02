@@ -30,7 +30,7 @@ import { OptRow, ToggleRow } from './OptRow';
 import { BuiltinMechRows } from './builderMechs';
 import { useLibrary } from '../robotImport/ui/useLibrary';
 import { ImportedPanel, ImportedRow, useImportedActions, useRobotNotice } from '../robotImport/ui/ImportedRobots';
-import { FootprintPicture } from '../robotImport/ui/adapters';
+import { FootprintPicture, bbox as importBox } from '../robotImport/ui/adapters';
 import { handOffFiles } from '../robotImport/ui/handoff';
 import { PAGE_COPY as IMPORT_COPY } from '../robotImport/ui/pageCopy';
 import { rangeFill } from './rangeFill';
@@ -483,13 +483,22 @@ export function Menu({ settings, onChange, onImport }: Props) {
   // terms and never in Chain Reaction's. Drive rpm is not here: it is a slider with its value
   // printed beside it, and top speed and accel are what it changes.
   const heroTeam = teamLine(spec);
+  const heroBox = spec.imported
+    ? (() => {
+        const b = importBox(spec.imported.hull);
+        const r = (v: number): number => Math.round(v * 10) / 10;
+        return { w: r(b.maxY - b.minY), l: r(b.maxX - b.minX) };
+      })()
+    : null;
   const heroStats: readonly (readonly [string, string, string])[] = [
     ['Top speed', dp.maxSpeed.toFixed(0), 'in/s'],
     ['Accel', dp.accel.toFixed(0), 'in/s²'],
     ['Turn', dp.maxTurn.toFixed(1), 'rad/s'],
     ['Turn accel', dp.turnAccel.toFixed(0), 'rad/s²'],
     ['Mass', String(spec.massLb), 'lb'],
-    ['W × L', `${spec.width} × ${spec.length}`, 'in'],
+    // an import's TRUE footprint box: its parametric `length` is capped per intake for readers that
+    // know nothing of imports (DECODE caps an 18-in hull at 15), and that is not the robot
+    ['W × L', heroBox ? `${heroBox.w} × ${heroBox.l}` : `${spec.width} × ${spec.length}`, 'in'],
   ];
 
   // ---- the player's SAVED robot library (their own full robots, up to 3) ----

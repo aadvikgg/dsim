@@ -10,6 +10,7 @@
 import type { GameId } from '../../games/types';
 import type { ImportedEdge, ImportedMech, RobotSpec, Vec2 } from '../../types';
 import { coerceSpec } from '../../sim/spawn';
+import { IMPORT_MIN_SIDE } from '../../sim/imported';
 import { driveParams, massLimits, pushForce, rpmLimits } from '../../sim/drivetrain';
 import { chainMassFloorBump } from '../../games/chain/config';
 import { DRIVETRAIN_LABELS } from '../../ui/labelData';
@@ -197,7 +198,14 @@ export function reviewItems(m: ImportMeasurement | null, built: Built | null, ga
     if (c.code === 'mesh-simplified' || c.code === 'hull-simplified' || c.code === 'wheels-picked') continue;
     items.push({ id: c.code, level: c.level, text: c.message, fix: FIX[c.code] });
   }
-  if (!codes.has('oversize') && !codes.has('empty')) items.push({ id: 'fits', level: 'ok', text: COPY.passFits });
+  // TOO SMALL is a block too: `coerceImported` refuses a footprint under 6 in a side (or 24 in²) and the
+  // robot would silently play as its parametric fallback. Almost always a units mistake.
+  const imp = built.spec.imported;
+  const hb = bbox(m.hull);
+  const sideMin = m.hull.length >= 3 ? Math.min(hb.maxX - hb.minX, hb.maxY - hb.minY) : 0;
+  if (!codes.has('empty') && !codes.has('oversize') && (!imp || sideMin < IMPORT_MIN_SIDE)) {
+    items.push({ id: 'tiny', level: 'block', text: COPY.tooSmall(sideMin, IMPORT_MIN_SIDE), fix: { step: 0, focus: 'ri-units' } });
+  } else if (!codes.has('oversize') && !codes.has('empty')) items.push({ id: 'fits', level: 'ok', text: COPY.passFits });
   if (!codes.has('no-floor') && !codes.has('few-wheels') && !codes.has('wheels-off-hull')) {
     items.push({ id: 'wheels', level: 'ok', text: COPY.passWheels });
   }

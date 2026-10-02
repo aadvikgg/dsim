@@ -117,7 +117,8 @@ export function ModelStep({
           value={m.units}
           cols="five"
           mini
-          options={LENGTH_UNITS.map((u) => ({ v: u, t: UNIT_LABEL[u] }))}
+          // feet only when the file is in feet: a fifth tile wrapped the row for a unit nobody exports in
+          options={LENGTH_UNITS.filter((u) => u !== 'ft' || m.units === 'ft').map((u) => ({ v: u, t: UNIT_LABEL[u] }))}
           onPick={(u) => onSetup({ units: u, wheels: null })}
         />
       </div>
@@ -139,10 +140,10 @@ export function ModelStep({
         </span>
         <div className="ds-import-turns">
           <button type="button" className="ds-btn small" onClick={() => turn(1)}>
-            <span aria-hidden="true">↺</span> {COPY.turnLeft}
+            {COPY.turnLeft}
           </button>
           <button type="button" className="ds-btn small" onClick={() => turn(3)}>
-            {COPY.turnRight} <span aria-hidden="true">↻</span>
+            {COPY.turnRight}
           </button>
         </div>
       </div>
