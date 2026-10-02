@@ -21,7 +21,6 @@ import { bbSettled } from './settle';
 import { createBiobuzzWorld } from './spawn';
 import { bbActiveStartLegal } from './start';
 import { biobuzzStep } from './step';
-import { BB_IMPORT_MECH } from './importChecks';
 
 /**
  * BIOBUZZ (FTC 2026-27) — the SIMULATION half of the game module.
@@ -145,8 +144,6 @@ export const BIOBUZZ_SIM: GameSimModule = {
   // `robotSolids` unchanged; filled here because a BIOBUZZ sweeper is a roller bar on any
   // edge and DECODE's front funnel is not a description of it. See `bbRobotSolids`.
   artifactSolids: bbRobotSolids,
-  // imported robots: the placement editor's handles, pre-fills and checks
-  importMech: BB_IMPORT_MECH,
   // the match is finalized only once nothing left on the field can score (§10.5 A/C) — a tip
   // swing that the buzzer caught finishes and pays before anything is saved. See `bbSettled`.
   settled: bbSettled,

@@ -12,7 +12,6 @@ import { chainColliders } from './colliders';
 import { chainStartLegal } from './state';
 import { createChainWorld } from './spawn';
 import { chainStep } from './step';
-import { CHAIN_IMPORT_MECH } from './importChecks';
 
 /**
  * Chain Reaction SIMULATION module (DOM-free) — fully playable + SCORED. `scored: true`
@@ -59,6 +58,4 @@ export const CHAIN_SIM: GameSimModule = {
   createWorld: createChainWorld,
   step: chainStep,
   settled: chainSettled,
-  // imported robots: the placement editor's handles, pre-fills and checks
-  importMech: CHAIN_IMPORT_MECH,
 };

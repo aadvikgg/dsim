@@ -125,10 +125,20 @@ pattern, or `import` reads as a section name). Four steps: Model, Drivetrain, Me
   imported by `main` wholly in `main`, so one static import moved the measurement code (8 KB)
   and the editor's strings into every page load. The robot page uses `polyBounds` from
   `src/sim/imported.ts` and `pageCopy.ts`. A smoke check greps for it.
+- ⚠️ **Three more things stay OUT of `main`, and each was in it once** (`npm run bundleaudit` is
+  what noticed). (1) `library.ts` (IndexedDB) is reached only by `import()`: the renderers' asset
+  seam and the visuals relay's client both do it that way, and its `library` route reading
+  `absent` means someone imported it statically. (2) The relay's PNG/GLB validators are
+  `src/net/visualCheck.ts`, imported statically by the server (and so by the LAN host worker) and
+  by `import()` from the client, which needs them only when a look is uploaded or received; put
+  them back into `importVisuals.ts`, which `api.ts` and `protocol.ts` import for a capability
+  string, and ~12 KB of minified code is in every page load. (3) The per-game placement checks
+  (`<game>/importChecks.ts`) are reached only through `src/games/importMechChecks.ts`, which only
+  `placement.ts` (this editor) imports; they are not on `GameSimModule`.
 - **The editor works in the MODEL frame** (wheels, handles, the map); `ImportedMech` is stored
   ROBOT-local. `placement.ts` converts (`mechRobotToModel`, and `mechModelToRobot` in
   `geometry.ts` on the way out) and wraps lane 2's `mechHandles` / `defaultImportedMech` /
-  `validateImportedMech`. The mount pickers (`intakeMount` …) still decide WHICH edges exist;
+  `validateImportedMech` (all three from `src/games/importMechChecks.ts`). The mount pickers (`intakeMount` …) still decide WHICH edges exist;
   the map only places them. A player's placement is never moved by a later default.
 - **Re-opening a saved robot re-reads its STORED mesh**, not the source file (the library does
   not keep it), so the setup is units `m`, up `+y`, quarter turns 0, and the placements are the

@@ -81,7 +81,15 @@
  *                a STEP file is dropped. Matched by FILENAME.
  *   library    — the device ROBOT LIBRARY (`library-*.js`, `src/robotImport/library.ts`), reached
  *                by a dynamic import from the renderers' asset seam the first time an imported
- *                robot is drawn. Matched by FILENAME.
+ *                robot is drawn, and from the visuals relay's client the first time it reads an
+ *                asset the owner uploads. Matched by FILENAME. ⚠️ A STATIC import of it from any
+ *                main-side file folds it into `main` and this route reads `absent`: that is the
+ *                symptom to look for.
+ *   relay      — the VISUALS RELAY's VALIDATORS (`visualCheck-*.js`, `src/net/visualCheck.ts`): the PNG
+ *                and GLB structure checks, reached by `import()` from `importVisualsClient.ts` the
+ *                first time a look is uploaded or received. The room and the LAN host worker import
+ *                the same file statically (their bundles carry it), so only the client's copy is lazy.
+ *                Matched by FILENAME.
  *   other      — everything else. In practice this is empty: `@dimforge/rapier2d-compat` is a
  *                STATIC import (`src/sim/physicsEngine.ts`), so the 2D physics engine lives
  *                inside `main` already and always has (that is existing, unchanged behavior,
@@ -189,6 +197,9 @@ function routeFor(file, buf) {
   // engine both import it: Rollup splits it into a chunk the two share, fetched with the engine.
   if (/^(importerEngine|engineLoader|geometry)-[^/]*\.js$/.test(base)) return 'importer';
   if (/^(stepWorker|stepReader)-[^/]*\.js$/.test(base) || /^occt-import-js[^/]*\.wasm$/.test(base)) return 'step';
+  // THE RELAY'S VALIDATORS, by FILENAME: `importVisualsClient.ts` reaches them by `import()`, so a
+  // client that never uploads or receives an imported robot's look never fetches them
+  if (/^visualCheck-[^/]*\.js$/.test(base)) return 'relay';
   // THE ROBOT LIBRARY (`src/robotImport/library.ts`, IndexedDB), by FILENAME: the renderers' asset
   // seam (`src/render/importedAssets.ts`) reaches it with a dynamic `import()` the first time an
   // imported robot is drawn, so it is its own small chunk rather than a cost in `main`.
@@ -392,11 +403,46 @@ const fmtKB = (bytes) => `${(bytes / 1000).toFixed(2)} KB`;
  *               which had crept to within 0.18 KB of the tolerance; called out here, not folded in
  *               silently.
  *
+ * ── RE-MEASURED 2026-10-01, the robot import feature branch (bundle trim) ────────────────────
+ *   Built the same hour, same machine: the alpha base it forked from (3834b2a1) against the branch
+ *   with its lanes merged, and the main chunk taken apart by sourcemap, file by file.
+ *   main        1013.97 KB — RAISED from 984.28. The branch BUILT 1021.60 against alpha's 989.17
+ *               (+32.43). Three things that did not belong in the entry chunk moved out first, −7.63:
+ *               `robotImport/library.ts` (IndexedDB: the visuals relay's client imported it
+ *               statically, which is why its route read `absent`), the relay's PNG/GLB validators
+ *               (`net/visualCheck.ts`, ~3.3 KB, fetched on the first look) and the three games'
+ *               placement checks (`games/importMechChecks.ts`, ~2.6 KB, in the editor's chunk now).
+ *               What is left is +24.84 over alpha and is code a match or the robot page runs for an
+ *               imported robot, none of it lazy-able: the footprint polygon and mouth-carve sim
+ *               (`sim/imported.ts`, `importedMech.ts`: 5.3, run by prediction every tick), the 2D
+ *               sprite and asset seam, the two games' sprite and preview branches, `FootprintSvg`
+ *               (5.7), each game's `importMech.ts` (1.0), the robot page's row, panel and notices
+ *               (4.3), the sim/net plumbing (physics,
+ *               robot, spawn, field, mounts, the spec admission and the replay format: 3.4), the
+ *               visuals relay client (2.1) with its wire constants and bridge (0.9), and the app's
+ *               route, test-drive and lobby wiring (2.2). The other +4.89 of the distance from the
+ *               old 984.28 is alpha's own drift since 2026-09-27 (989.17), called out, not folded in.
+ *   hostWorker  797.84 KB — RAISED from 778.01. Alpha base 781.68 (+3.67 drift); the branch is +16.16:
+ *               a LAN host runs a `Room`, and a Room steps imported robots (`sim/imported.ts` and
+ *               `importedMech.ts`: 5.4) and relays their look (`server/importVisuals.ts` 2.3 and the
+ *               validators 2.8, which the room runs synchronously on the last frame, so they cannot
+ *               be lazy there as they are in the client). Only a LAN host downloads this worker.
+ *   scene       231.54 KB — RAISED from 226.59 (alpha base 226.61): +4.93 = `renderImported.ts` (+2.86,
+ *               the imported robot's 3D draw) and +1.98 from three.js now living in a chunk the
+ *               importer and the scene share, so the same bytes compress as two files.
+ *   relay        3.35 KB — NEW, `visualCheck-*.js` (see the route table).
+ *   library      2.26 KB — was 1.85, measured before the relay client reached it: the lite-mesh
+ *               cache reads (`meshLiteFor`, `putMeshLite`) are in the one shared chunk now.
+ *   importerui  24.18 KB — was 21.55 (+2.63): the placement checks and their shared helpers, which
+ *               moved here from `main`.
+ *   physics3d   1144.96 KB — NOT raised: alpha's own base already measures 1143.47 against the 1125.06
+ *               below (+1.49 is the branch), inside the 2% tolerance either way.
+ *
  * RECALIBRATE by running `npm run build && npm run bundleaudit` and copying the printed gzip
  * totals in here, the same way `uiaudit.mjs`'s header describes lowering ITS baseline.
  */
 const BASELINE = {
-  main: { gzip: 984.28 * 1000 },
+  main: { gzip: 1013.97 * 1000 },
   // `@discord/embedded-app-sdk` behind `watchDiscordParticipants`'s dynamic import —
   // loaded only inside a real Discord Activity embed (`onDiscordHost()` gates the
   // import), so no ordinary player downloads it. MEASURED 2026-09-18.
@@ -405,7 +451,9 @@ const BASELINE = {
   // tab, and a custom room now plays Zenith autos (docs/area/autos.md), so the room statically
   // imports the auto seat and with it Zenith's planner and follower (the `autos` chunk's content,
   // 55.75 KB). Only a player HOSTING a LAN room downloads this worker; nobody else pays for it.
-  hostWorker: { gzip: 778.01 * 1000 },
+  // 2026-10-01: 778.01 -> 797.84 (+19.83), MEASURED: the imported robot's sim and the visuals relay,
+  // which a LAN host's Room runs (see the RE-MEASURED entry above). Alpha's own drift was +3.67 of it.
+  hostWorker: { gzip: 797.84 * 1000 },
   physics3d: { gzip: 1125.06 * 1000 },
   // 2026-09-19: 199.48 -> 201.44 (+1.96). The owner's render pass made three meshes REAL —
   // a swerve pod that is a pod (top plate, azimuth ring, fork, 3-in wheel, belt drive)
@@ -489,7 +537,11 @@ const BASELINE = {
   // tolerance, so the baseline moves to it. What was added: the dovetail seam and tile outlines
   // (`renderTiles.ts`), and in `renderRobots.ts` the intake-arm keep-outs, the butterfly traction
   // placement, the top-cap and end-bar pieces and the measured turret rest pose (`restTurretHeads`).
-  scene: { gzip: 226.59 * 1000, budgetCeiling: 250 * 1000 },
+  //
+  // 2026-10-01, THE IMPORTED ROBOT: 226.59 -> 231.54 (+4.95), MEASURED. `renderImported.ts` (+2.86) and
+  // three.js moving into a chunk the importer shares (+1.98): see the RE-MEASURED entry above. 18 KB of
+  // ceiling left.
+  scene: { gzip: 231.54 * 1000, budgetCeiling: 250 * 1000 },
   // 2026-09-21, THE EIGHT PAINTED ENVIRONMENTS: 4.01 -> 5.56 (+1.55), well inside the 4 KB
   // tolerance, so the number below is deliberately NOT moved — recorded here for the same reason
   // the `scene` note above records its own under-tolerance creep. The growth is DATA:
@@ -559,14 +611,23 @@ const BASELINE = {
   // `importedAssets`' dynamic import; the rest of that lane is +5.60 in `main` (the 2D sprites'
   // import branches, the asset seam, FootprintSvg) and +2.86 in `scene` (`renderImported.ts`),
   // both inside tolerance against the robot-import branch measured the same minute.
-  library: { gzip: 1.85 * 1000 },
+  // 2026-10-01: 1.85 -> 2.26: the visuals relay's client reads it too, so `meshLiteFor` and `putMeshLite`
+  // are in the shared chunk.
+  library: { gzip: 2.26 * 1000 },
+  // 2026-10-01: NEW. `visualCheck-*.js`, the relay's PNG and GLB validators, behind `importVisualsClient.ts`'s
+  // dynamic import (prefetched when a look is asked for or an upload starts). They were in `main` (~3.3 KB
+  // of the entry chunk) until this build; the room and the LAN host worker still carry their own copy.
+  relay: { gzip: 3.35 * 1000 },
   // 2026-10-01: NEW, the importer's UI (lane 4). `ImportEditor-*.js` 18.75 (the steps, the top-down
   // editor, the preview host, drafts, the review checks), and what the robot page `import()`s on a
   // click: `shareFile-*.js` 1.38, `LibraryDialogs-*.js` 0.75 and `exportRobot-*.js` 0.66. Fetched
   // when a player opens the importer or acts on an imported robot. What the robot page itself
   // carries for imports (the row, the panel, the notice, the test-drive and lobby wiring) is in
   // `main`: +4.53 KB against the feature branch at 5d0e6aa5 (1017.05 -> 1021.58).
-  importerui: { gzip: 21.55 * 1000 },
+  // 2026-10-01: 21.55 -> 24.18 (+2.63): `ImportEditor-*.js` 21.38 now carries the placement checks
+  // (`games/importMechChecks.ts`, the three games' `importChecks.ts` and the shared helpers), which were in
+  // `main` as a `GameSimModule` slot and are reached only by the editor.
+  importerui: { gzip: 24.18 * 1000 },
   other: { gzip: 1 * 1000 },
 };
 

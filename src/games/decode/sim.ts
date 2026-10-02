@@ -5,7 +5,6 @@ import { decodeSettled } from '../../sim/settle';
 import { step } from '../../sim/world';
 import type { GameSimModule } from '../types';
 import { decodeColliders } from './colliders';
-import { DECODE_IMPORT_MECH } from './importChecks';
 
 /**
  * DECODE's SIMULATION module (DOM-free) — a thin wrapper over the existing
@@ -31,6 +30,4 @@ export const DECODE_SIM: GameSimModule = {
   step,
   // the match is finalized when nothing left can score — see `decodeSettled`
   settled: decodeSettled,
-  // imported robots: the placement editor's handles, pre-fills and checks
-  importMech: DECODE_IMPORT_MECH,
 };

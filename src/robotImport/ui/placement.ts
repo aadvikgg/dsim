@@ -1,6 +1,7 @@
 /**
- * THE EDITOR'S VIEW OF A GAME'S PLACEMENTS — lane 2's `importMech` slot (`src/games/sim.ts`:
- * `mechHandles`, `defaultImportedMech`, `validateImportedMech`), adapted to the editor's frames.
+ * THE EDITOR'S VIEW OF A GAME'S PLACEMENTS — lane 2's `ImportMechSlot` per game (`src/games/
+ * importMechChecks.ts`: `mechHandles`, `defaultImportedMech`, `validateImportedMech`), adapted to the
+ * editor's frames.
  *
  * The game speaks ROBOT-LOCAL (origin at the wheelbase centre). The editor keeps placements in the
  * MODEL frame, which does not move when a wheel is dragged (`docs/area/robot-import.md`), so the
@@ -8,7 +9,7 @@
  */
 import type { GameId } from '../../games/types';
 import type { ImportMechHandle, ImportMechHandleKey } from '../../games/types';
-import { defaultImportedMech, mechHandles, validateImportedMech } from '../../games/sim';
+import { defaultImportedMech, mechHandles, validateImportedMech } from '../../games/importMechChecks';
 import type { ImportedEdge, ImportedMech, RobotSpec, Vec2 } from '../../types';
 
 export type PointField = 'shooter' | 'shooter2' | 'place';

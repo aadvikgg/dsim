@@ -39,12 +39,12 @@ import {
   hasVisualsCap,
   isVisualKind,
   streamMayWrite,
-  validateVisual,
   visualFrames,
   visualSpan,
   type VisualKind,
   type VisualRefusal,
 } from '../src/net/importVisuals';
+import { validateVisual } from '../src/net/visualCheck';
 
 // ---- the per-process budget ---------------------------------------------------------------------
 

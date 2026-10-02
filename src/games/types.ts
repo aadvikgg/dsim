@@ -15,9 +15,15 @@ import type { IntakeStyle } from '../types';
 import type { ImportedEdge, ImportedMech } from '../types';
 
 /**
- * IMPORTED ROBOTS — what the mechanism placement editor needs from a game (`GameSimModule.
- * importMech`, wrapped by `validateImportedMech` / `defaultImportedMech` / `mechHandles` in
- * `./sim.ts`). DOM-free; every input is a COERCED spec (`coerceSpec(…, game)`) carrying `imported`.
+ * IMPORTED ROBOTS — what the mechanism placement editor needs from a game (an `ImportMechSlot`
+ * per game, reached through `validateImportedMech` / `defaultImportedMech` / `mechHandles` in
+ * `./importMechChecks.ts`). DOM-free; every input is a COERCED spec (`coerceSpec(…, game)`)
+ * carrying `imported`.
+ *
+ * ⚠️ NOT A `GameSimModule` SLOT. The slots lived there until the bundle audit measured them in the
+ * entry chunk: the sim registry is reached from every page, and the checks are only ever asked by
+ * the importer editor (and the smoke suite). `importMechChecks.ts` is the one registry of them and
+ * only the editor imports it, so they are in the editor's lazy chunk.
  */
 export type ImportMechHandleKey = 'shooter' | 'shooter2' | 'place' | `intake:${ImportedEdge}`;
 
@@ -390,11 +396,6 @@ export interface GameSimModule {
    * solve collides on, what its pin test would measure against, and what its sprite must draw.
    */
   artifactSolids?(r: RobotState, heldBalls: readonly Artifact[], radius: number): RobotSolids;
-  /**
-   * IMPORTED ROBOTS: this game's placement handles, pre-fills and checks (`ImportMechSlot`). Absent
-   * ⇒ the editor offers nothing to place and every check passes.
-   */
-  importMech?: ImportMechSlot;
   /**
    * WHICH PHYSICS BACKENDS THIS GAME'S UI MAY OFFER, for a room or practice setup — absent ⇒
    * only `'2d'`, which is every game before BIOBUZZ's Day 1 seam. BIOBUZZ fills

@@ -26,7 +26,6 @@
  */
 import type { GameId } from '../types';
 import { loadImporterEngine } from '../robotImport/engineLoader';
-import { meshFor, meshLiteFor, putMeshLite, topFor } from '../robotImport/library';
 import { getViewPref, subscribeViewPref } from '../games/biobuzz/graphics/store';
 import { registerRelayedAsset, hasRelayedAsset, relayedIdTakenByOther, unregisterRelayedAssets } from './importedAssetsBridge';
 import {
@@ -36,7 +35,6 @@ import {
   base64ToBytes,
   bytesToBase64,
   isVisualKind,
-  validateVisual,
   visualFrames,
   visualSpan,
   type VisualKind,
@@ -44,6 +42,27 @@ import {
 import { getShowOthersImported, subscribeShowOthersImported } from './importVisualsPref';
 import { encodeMsg, type LobbyPlayer, type ServerMsg } from './protocol';
 import type { Transport } from './transport';
+
+/**
+ * THE VALIDATORS ARE FETCHED THE FIRST TIME A LOOK NEEDS CHECKING (`visualCheck.ts`). A client that
+ * never uploads an imported robot's look and is never sent one never needs them, and they are
+ * ~12 KB of the entry chunk when they are imported. A load that fails is a failed check: the look
+ * is not used and the footprint stays, which is where every refusal here already ends up.
+ */
+type VisualCheck = typeof import('./visualCheck');
+let checkModule: VisualCheck | null = null;
+let checkLoading: Promise<VisualCheck | null> | null = null;
+function loadCheck(): Promise<VisualCheck | null> {
+  if (checkModule) return Promise.resolve(checkModule);
+  checkLoading ??= import('./visualCheck').then(
+    (m) => (checkModule = m),
+    () => {
+      checkLoading = null; // a later look may find the network back
+      return null;
+    },
+  );
+  return checkLoading;
+}
 
 /** where the owner's own bytes come from: the device library, or a test */
 export interface OwnAssets {
@@ -55,30 +74,41 @@ export interface OwnAssets {
   has?(id: string): Promise<boolean>;
 }
 
-/** the library, with the importer engine making (once, cached) a lighter mesh when the stored one is over the cap */
+/**
+ * the library, with the importer engine making (once, cached) a lighter mesh when the stored one is
+ * over the cap.
+ *
+ * ⚠️ THE LIBRARY IS REACHED BY `import()`, NOT IMPORTED: this file is in the entry chunk (the lobby
+ * and the match session both hold the client), and a static import dragged the whole IndexedDB
+ * layer into the chunk every player downloads, for a read that happens only once a seat holds an
+ * imported robot. The renderers' asset seam (`render/importedAssets.ts`) reaches it the same way,
+ * so there is one shared `library-*.js` chunk, fetched on first use.
+ */
+const library = (): Promise<typeof import('../robotImport/library')> => import('../robotImport/library');
 export const libraryOwnAssets: OwnAssets = {
   async has(id) {
     try {
-      return !!(await topFor(id));
+      return !!(await (await library()).topFor(id));
     } catch {
       return false;
     }
   },
   async top(id) {
-    const b = await topFor(id);
+    const b = await (await library()).topFor(id);
     return b ? new Uint8Array(await b.arrayBuffer()) : null;
   },
   async mesh(id) {
-    const full = await meshFor(id);
+    const lib = await library();
+    const full = await lib.meshFor(id);
     if (!full) return null;
     if (full.size <= VISUAL_MAX_BYTES.mesh) return new Uint8Array(await full.arrayBuffer());
-    const cached = await meshLiteFor(id);
+    const cached = await lib.meshLiteFor(id);
     if (cached) return new Uint8Array(await cached.arrayBuffer());
     try {
       const engine = await loadImporterEngine();
       const out = await engine.liteMesh(await full.arrayBuffer(), VISUAL_MAX_BYTES.mesh);
       if (!out) return null;
-      void putMeshLite(id, new Blob([out], { type: 'model/gltf-binary' }));
+      void lib.putMeshLite(id, new Blob([out], { type: 'model/gltf-binary' }));
       return new Uint8Array(out);
     } catch {
       return null;
@@ -321,6 +351,7 @@ export class ImportVisualsClient {
     const key = `${id}|${kind}`;
     const up: Upload = { id, kind, timer: null, sent: false };
     this.upload = up;
+    void loadCheck(); // in step with the library read below
     let bytes: Uint8Array | null = null;
     try {
       bytes = kind === 'top' ? await this.own.top(id) : await this.own.mesh(id);
@@ -328,7 +359,9 @@ export class ImportVisualsClient {
       bytes = null;
     }
     if (this.upload !== up) return; // cancelled while reading
-    if (!bytes || validateVisual(kind, bytes)) {
+    const check = bytes ? await loadCheck() : null;
+    if (this.upload !== up) return; // cancelled while the validators loaded
+    if (!bytes || !check || check.validateVisual(kind, bytes)) {
       // nothing to share (a robot opened on another device, an unusable file): the outline it is
       this.noUpload.add(key);
       this.upload = null;
@@ -391,6 +424,7 @@ export class ImportVisualsClient {
         this.asks.set(key, asked + 1);
         this.incoming.set(key, { owner, id, kind, total: 0, next: 0, got: 0, buf: null, lastAt: Date.now() });
         tx.send(encodeMsg({ t: 'visualGet', owner, id, kind }));
+        void loadCheck(); // the validators arrive while the room answers, so the first look is checked on the spot too
         this.startWatchdog();
       }
     }
@@ -419,12 +453,22 @@ export class ImportVisualsClient {
     inc.next++;
     inc.lastAt = Date.now();
     if (inc.got < total) return;
-    this.incoming.delete(key);
-    if (validateVisual(inc.kind, inc.buf)) {
-      this.asks.set(key, MAX_ASKS); // the owner's bytes are not a picture or a model: no second try
-      return;
-    }
-    void this.deliver(inc.owner, inc.id, inc.kind, inc.buf, this.tx);
+    const buf = inc.buf;
+    const tx = this.tx;
+    // ⚠️ `incoming` keeps the entry until the look is judged: a poke while the validators load would
+    // otherwise find the asset neither held nor in flight and ask for it again
+    const done = (check: VisualCheck | null): void => {
+      if (this.tx !== tx || this.incoming.get(key) !== inc) return; // the room was left, or the download dropped, meanwhile
+      this.incoming.delete(key);
+      if (!check || check.validateVisual(inc.kind, buf)) {
+        this.asks.set(key, MAX_ASKS); // the owner's bytes are not a picture or a model: no second try
+        return;
+      }
+      void this.deliver(inc.owner, inc.id, inc.kind, buf, tx);
+    };
+    // the first look waits for the validators; every later one is checked on the spot, as before
+    if (checkModule) done(checkModule);
+    else void loadCheck().then(done);
   }
 
   /**
