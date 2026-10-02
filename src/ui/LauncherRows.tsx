@@ -51,11 +51,14 @@ export function FlywheelRows({
   spec,
   setSpec,
   allowAuto,
+  allowPresets = true,
   defaultRpm = FLY_DEFAULT_RPM,
 }: {
   spec: RobotSpec;
   setSpec: (patch: Partial<RobotSpec>) => void;
   allowAuto: boolean;
+  /** BIOBUZZ's fixed launcher runs one setpoint (`coerceBiobuzzSpec`), so it offers no presets */
+  allowPresets?: boolean;
   defaultRpm?: number;
 }) {
   const fly = spec.flywheel;
@@ -63,7 +66,7 @@ export function FlywheelRows({
   const modes: readonly { id: 'auto' | FlywheelSpec['mode']; label: string; blurb: string }[] = [
     ...(allowAuto ? [{ id: 'auto' as const, label: 'Auto', blurb: 'Sets its speed for the range' }] : []),
     { id: 'fixed', label: 'One speed', blurb: 'One setpoint, one range' },
-    { id: 'presets', label: 'Presets', blurb: 'Step through up to three' },
+    ...(allowPresets ? [{ id: 'presets' as const, label: 'Presets', blurb: 'Step through up to three' }] : []),
   ];
   const pick = (m: 'auto' | FlywheelSpec['mode']) =>
     setSpec({ flywheel: m === 'auto' ? undefined : seedFlywheel(m, fly, defaultRpm) });
@@ -77,6 +80,8 @@ export function FlywheelRows({
   };
   return (
     <>
+      {/* a single mode is a statement, not a choice: no cards for it */}
+      {modes.length > 1 && (
       <div className="ds-opts card4">
         {modes.map((m) => (
           <button
@@ -90,6 +95,7 @@ export function FlywheelRows({
           </button>
         ))}
       </div>
+      )}
       {fly && fly.mode === 'presets' && (
         <div className="ds-opts two">
           {[2, FLY_PRESETS_MAX].map((n) => (

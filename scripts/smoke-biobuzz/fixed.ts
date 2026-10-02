@@ -186,8 +186,8 @@ export function fixedChecks(check: Check): void {
     check('fixed: the dumper keeps its own (unread) 70–85 clamp, untouched', dumperHood.hoodDeg === 70, J(dumperHood));
     const hostile = bbCoerce({ ...KIT, flywheel: { mode: 'presets', rpm: [NaN, 9000, -5, 'x', 1200, 1300, 1400], wheelMm: 1e9, feedS: -1 } });
     check(
-      'fixed: a hostile flywheel is clamped field by field (presets cut to three, rpm into 500..6000, wheel and feed into range)',
-      J(hostile.flywheel) === J({ mode: 'presets', rpm: [6000, 500, 1200], wheelMm: 140, feedS: 0.05 }),
+      'fixed: a hostile flywheel is clamped field by field (rpm into 500..6000, wheel and feed into range), and its presets fold to the first',
+      J(hostile.flywheel) === J({ mode: 'fixed', rpm: [6000], wheelMm: 140, feedS: 0.05 }),
       J(hostile.flywheel),
     );
     check('fixed: …and the clamped one is a fixed point', J(bbCoerce(hostile)) === J(hostile));
@@ -270,26 +270,20 @@ export function fixedChecks(check: Check): void {
     }
   }
 
-  // ---- presets change the band -------------------------------------------------------------------
+  // ---- one setpoint in this game, and the setpoint IS the band ------------------------------------
   {
-    const PRE: Partial<RobotSpec> = { ...KIT, flywheel: { mode: 'presets', rpm: [2679, 3000], wheelMm: 96, feedS: 0.3 } };
+    const PRE: Partial<RobotSpec> = { ...KIT, flywheel: { mode: 'presets', rpm: [3000, 2679], wheelMm: 96, feedS: 0.3 } };
     const spec = bbCoerce(PRE);
-    const slow = bbFixedBand(spec);
-    const fast = bbFixedBand({ ...spec, flywheel: { ...spec.flywheel!, rpm: [3000] } });
-    check('presets: a faster preset moves the band OUT', !!slow && !!fast && fast[0] > slow[0] && fast[1] > slow[1], J({ slow, fast }));
+    check('setpoint: BIOBUZZ folds a presets wheel to its first speed (one setpoint, no preset button)', J(spec.flywheel) === J({ mode: 'fixed', rpm: [3000], wheelMm: 96, feedS: 0.3 }), J(spec.flywheel));
+    const slow = bbFixedBand(bbCoerce(KIT));
+    const fast = bbFixedBand(spec);
+    check('setpoint: a faster wheel moves the band OUT', !!slow && !!fast && fast[0] > slow[0] && fast[1] >= slow[1], J({ slow, fast }));
     const w = createBiobuzzWorld('match', 3, [setup(0, 'blue', PRE)]);
     w.match.phase = 'teleop';
     w.match.phaseTimeLeft = 100;
     const r = w.robots[0];
-    const at0 = r.flyPreset;
-    biobuzzStep(w, SIM_DT, new Map([[0, cmd({ flyPreset: true })]]));
-    const held = r.flyPreset;
-    const rpmAfter = r.flyRpm ?? 0;
     for (let k = 0; k < 4; k++) biobuzzStep(w, SIM_DT, new Map([[0, cmd({ flyPreset: true })]]));
-    check('presets: the button steps once per press, not once per tick', at0 === 0 && held === 1 && r.flyPreset === 1, J({ at0, held, now: r.flyPreset }));
-    check('presets: right after the step the wheel is still spinning up to the new setpoint', rpmAfter < 3000 * FLY_FEED_MIN_FRAC, String(rpmAfter));
-    for (let k = 0; k < 60; k++) biobuzzStep(w, SIM_DT, new Map([[0, cmd({})]]));
-    check('presets: …and reaches it', r.flyRpm === 3000, String(r.flyRpm));
+    check('setpoint: a stray preset press does nothing to a one-speed wheel', r.flyPreset === undefined && r.flyRpm === 3000, J({ p: r.flyPreset, rpm: r.flyRpm }));
   }
 
   // ---- the drawn path is the fire gate -----------------------------------------------------------

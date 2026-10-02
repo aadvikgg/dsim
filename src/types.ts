@@ -82,8 +82,8 @@ export interface RobotCommand {
    */
   bbPass?: boolean;
   /**
-   * DECODE + BIOBUZZ, a flywheel built with SPEED PRESETS (`RobotSpec.flywheel.mode === 'presets'`):
-   * step to the next preset setpoint, wrapping. EDGE-triggered and debounced like `driveMode`
+   * DECODE, a flywheel built with SPEED PRESETS (`RobotSpec.flywheel.mode === 'presets'`): step to
+   * the next preset setpoint, wrapping (BIOBUZZ's fixed launcher runs one setpoint). EDGE-triggered and debounced like `driveMode`
    * (`RobotState.flyPresetHeld`); ignored by every other build. Protocol bit 1024. Optional; absent
    * reads false.
    */

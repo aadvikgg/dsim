@@ -198,8 +198,8 @@ export const SHARED_TOUCH_BUTTONS: readonly TouchButton[] = [
     ready: (l) => l.held.length < l.cap,
   },
   {
-    // a SETPOINT FLYWHEEL with speed presets (DECODE + BIOBUZZ): step to the next one. Held like
-    // every command bit; the sim takes the press as one debounced edge (`flyStep`).
+    // a SETPOINT FLYWHEEL with speed presets (DECODE's; BIOBUZZ runs one setpoint): step to the
+    // next one. Held like every command bit; the sim takes the press as one debounced edge.
     action: 'flyPreset',
     hold: 'flyPreset',
     label: 'SPEED',

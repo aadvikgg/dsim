@@ -169,7 +169,10 @@ export function coerceBiobuzzSpec(raw: RobotSpec, base: RobotSpec = BB_DEFAULT_S
    * direct call cannot smuggle a malformed one, and re-shaping is idempotent.
    */
   if (mech.launcher.kind === 'fixed') {
-    out.flywheel = coerceFlywheel(raw.flywheel) ?? { ...BB_FIXED_FLY_DEFAULT, rpm: [...BB_FIXED_FLY_DEFAULT.rpm] };
+    const fly = coerceFlywheel(raw.flywheel) ?? { ...BB_FIXED_FLY_DEFAULT, rpm: [...BB_FIXED_FLY_DEFAULT.rpm] };
+    // ONE SETPOINT in this game: both kit robots run one, and the pad has no button left to step a
+    // preset with (D-DOWN is unbound on purpose), so a presets wheel keeps its first speed
+    out.flywheel = fly.mode === 'presets' ? { ...fly, mode: 'fixed', rpm: [fly.rpm[0]] } : fly;
   } else {
     delete out.flywheel;
   }

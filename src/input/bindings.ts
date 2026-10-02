@@ -195,8 +195,8 @@ export interface ControlBindings {
 //   bbNectar → `src/games/biobuzz/play.ts` (`bbHumanPlayerTick`, shared by the 2D and 3D paths)
 //   bbRamp → `src/games/biobuzz/robot.ts` (the `ramp` intake archetype only)
 //   intake / fire → all three, through three unrelated sites each
-//   flyPreset → `src/sim/flywheel.ts` (`flyStep`), which DECODE's `robot.ts` and BIOBUZZ's stage 5b
-//               and 3D stage 11 call; Chain Reaction has no setpoint flywheel
+//   flyPreset → `src/sim/flywheel.ts` (`flyStep`), DECODE's presets wheel. BIOBUZZ's fixed launcher
+//               runs ONE setpoint (`coerceBiobuzzSpec` folds presets), so it never reads the bit
 //   driveMode → `src/sim/robot.ts`, which every game's step routes through (`updateRobot`)
 //   the drive/rotate/tank actions → every game, through `updateRobot`
 // `PadAction` is a strict subset of `KeyAction`, so one table answers for both devices.
@@ -214,7 +214,7 @@ export const ACTION_GAMES: Readonly<Record<KeyAction, readonly GameId[]>> = {
   rotateCW: ALL,
   intake: ALL,
   fire: ALL,
-  flyPreset: ['decode', 'biobuzz'],
+  flyPreset: ['decode'],
   catalyst: ['chain'],
   fling: ['chain'],
   bbPlaceNectar: ['biobuzz'],
@@ -396,9 +396,9 @@ export const DEFAULT_BINDINGS: ControlBindings = {
     rotateCW: ['arrowright', 'e'],
     intake: ['shift', 'k'],
     fire: [' '],
-    // A SETPOINT FLYWHEEL's next speed preset (DECODE + BIOBUZZ). '1' — the number row is free in
-    // every game, and it reads as "gear one, two, three" for a wheel that has up to three.
-    flyPreset: ['1'],
+    // A SETPOINT FLYWHEEL's next speed preset (DECODE). 'z', shared with BIOBUZZ's Deploy ramp: the
+    // MODE TOGGLE role in the table above — a press that switches a mechanism between states.
+    flyPreset: ['z'],
     /**
      * ⚠️ **THE MECHANISM KEYS ARE SHARED ACROSS GAMES, BY ROLE, AND THAT IS THE POINT.**
      * (Owner, 2026-09-22: "the default keybind should have duplicates across games ... we
@@ -419,7 +419,8 @@ export const DEFAULT_BINDINGS: ControlBindings = {
      *     v   send it AWAY at range
      *         chain `fling` (catapult throw)     . biobuzz `bbPass` (pass to a partner)
      *     x   biobuzz's SECOND place — nectar, which Chain Reaction has no equivalent of
-     *     z   biobuzz `bbRamp`
+     *     z   a mechanism's MODE TOGGLE: biobuzz `bbRamp` (deploy / fold) . decode `flyPreset`
+     *         (the next flywheel speed) — R3 on the pad, the same pair
      *
      * A player who drives both seasons learns one hand. `fire` and `intake` are in every game
      * and still steal from everything, which is unchanged.
@@ -470,10 +471,9 @@ export const DEFAULT_BINDINGS: ControlBindings = {
     buttons: {
       fire: [7, 0], // RT or A
       intake: [6, 1], // LT or B
-      // D-DOWN — the one standard button no default in DECODE or BIOBUZZ holds. It used to be
-      // Deploy ramp's and players reported pressing it by accident; a preset step is harmless to
-      // press by accident (it only changes the next shot's speed, and the HUD says so).
-      flyPreset: [13],
+      // R3 — the MODE TOGGLE role, shared with BIOBUZZ's Deploy ramp (no game has both). D-DOWN
+      // stays unbound on purpose (see Deploy ramp below).
+      flyPreset: [11],
       /**
        * ⚠️ **THE SAME ROLE-SHARING THE KEYBOARD DOES, AND ON THE PAD IT FIXES A REAL HOLE.**
        * `bbPass` used to ship **completely unbound** here, with a comment explaining that the
@@ -535,6 +535,8 @@ export const DEFAULT_BINDINGS: ControlBindings = {
  */
 const FRESH_FALLBACK_KEYS: Partial<Record<KeyAction, readonly string[]>> = {
   bbRamp: ['g', 'm'],
+  // DECODE's preset step, when a stored map already has Z on a DECODE action
+  flyPreset: ['1'],
 };
 
 export function cloneBindings(b: ControlBindings): ControlBindings {

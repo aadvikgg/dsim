@@ -595,7 +595,7 @@ export function BiobuzzBuilder({ spec, setSpec, hideFrame = false }: BiobuzzBuil
             max={BB_FIXED_HOOD_MAX_DEG}
             onChange={(hoodDeg) => send({ ...launcher, hoodDeg }, lift)}
           />
-          <FlywheelRows spec={spec} setSpec={setSpec} allowAuto={false} defaultRpm={BB_FIXED_FLY_DEFAULT.rpm[0]} />
+          <FlywheelRows spec={spec} setSpec={setSpec} allowAuto={false} allowPresets={false} defaultRpm={BB_FIXED_FLY_DEFAULT.rpm[0]} />
         </>
       )}
       {launcher.kind === 'dumper' && (
