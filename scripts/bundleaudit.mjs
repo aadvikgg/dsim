@@ -565,7 +565,7 @@ const BASELINE = {
   // click: `shareFile-*.js` 1.38, `LibraryDialogs-*.js` 0.75 and `exportRobot-*.js` 0.66. Fetched
   // when a player opens the importer or acts on an imported robot. What the robot page itself
   // carries for imports (the row, the panel, the notice, the test-drive and lobby wiring) is in
-  // `main`: +4.30 KB against the feature branch at 89aa8323 (1014.33 -> 1018.63).
+  // `main`: +4.53 KB against the feature branch at 5d0e6aa5 (1017.05 -> 1021.58).
   importerui: { gzip: 21.55 * 1000 },
   other: { gzip: 1 * 1000 },
 };
