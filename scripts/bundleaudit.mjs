@@ -546,8 +546,8 @@ const BASELINE = {
   // dropped; every other import, and every player who never imports a robot, pays nothing.
   step: { gzip: 3133.28 * 1000 },
   // 2026-10-01: NEW (robot import, rendering lane). `library-*.js` 1.85: the device library behind
-  // `importedAssets`' dynamic import; the rest of that lane is +5.34 in `main` (the 2D sprites'
-  // import branches, the asset seam, FootprintSvg) and +2.85 in `scene` (`renderImported.ts`),
+  // `importedAssets`' dynamic import; the rest of that lane is +5.60 in `main` (the 2D sprites'
+  // import branches, the asset seam, FootprintSvg) and +2.86 in `scene` (`renderImported.ts`),
   // both inside tolerance against the robot-import branch measured the same minute.
   library: { gzip: 1.85 * 1000 },
   other: { gzip: 1 * 1000 },
