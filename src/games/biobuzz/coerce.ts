@@ -211,7 +211,14 @@ export function coerceBiobuzzSpec(raw: RobotSpec, base: RobotSpec = BB_DEFAULT_S
   // SNAPPED TO THE DIAL'S 1-in STEP for the same reason the two sizes above are: a clamp is not
   // a repair for a value that is already in range, and a 15-digit height would print the same
   // way a 15-digit width did. Both bounds are whole inches, so rounding cannot leave the range.
-  if (typeof raw.heightIn === 'number' && Number.isFinite(raw.heightIn)) {
+  //
+  // AN IMPORTED ROBOT'S HEIGHT IS ITS CAD's (`imported.heightIn`, the measured truth), rounded UP
+  // onto the dial and clamped to its range — up, so the cap `bbMechEnvelopes`/the 3D bands are
+  // built under never shaves the top off the model — and it declares NO stow height: the CAD is
+  // the starting configuration, already inside R102's cube, so stowed and deployed are one height.
+  if (out.imported && Number.isFinite(out.imported.heightIn)) {
+    out.heightIn = clamp(Math.ceil(out.imported.heightIn), BB3_HEIGHT_MIN, BB3_HEIGHT_MAX);
+  } else if (typeof raw.heightIn === 'number' && Number.isFinite(raw.heightIn)) {
     out.heightIn = Math.round(clamp(raw.heightIn, BB3_HEIGHT_MIN, BB3_HEIGHT_MAX));
   } else {
     delete out.heightIn;
@@ -233,7 +240,9 @@ export function coerceBiobuzzSpec(raw: RobotSpec, base: RobotSpec = BB_DEFAULT_S
   // `GameSimModule.startLegal` (`sim.ts`), and the builder says so before a player ever readies
   // up. Clamping here is how a legality check quietly becomes a decoration.
   const stow = (out as { stowHeightIn?: unknown }).stowHeightIn;
-  if (typeof stow === 'number' && Number.isFinite(stow)) {
+  if (out.imported) {
+    delete (out as { stowHeightIn?: number }).stowHeightIn;
+  } else if (typeof stow === 'number' && Number.isFinite(stow)) {
     (out as { stowHeightIn?: number }).stowHeightIn = Math.round(
       clamp(stow, BB3_HEIGHT_MIN, bbDeployedHeightIn(out)),
     );

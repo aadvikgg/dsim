@@ -28,8 +28,8 @@ import {
   type RoomConfig,
   type ServerMsg,
 } from '../src/net/protocol';
-import { DEFAULT_ASSISTS, DEFAULT_SPEC, coerceSpec } from '../src/sim/spawn';
-import { IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_REFUSED_HERE, IMPORT_REFUSED_RANKED, IMPORT_ROOM_NEEDS_UPDATE, isImportedSpec } from '../src/net/imported';
+import { DEFAULT_ASSISTS, DEFAULT_SPEC } from '../src/sim/spawn';
+import { IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_REFUSED_HERE, IMPORT_REFUSED_RANKED, IMPORT_ROOM_NEEDS_UPDATE } from '../src/net/imported';
 import type { Alliance, RobotCommand } from '../src/types';
 import type { Client } from '../server/room';
 import {
@@ -659,7 +659,7 @@ async function scenarios(s: Server): Promise<void> {
     K.close();
   }
   // the rest read the roster the room holds, which is what `coerceSpec` kept
-  if (isImportedSpec(coerceSpec({ ...DEFAULT_SPEC, imported: IMP }, DEFAULT_SPEC, 'decode'))) {
+  {
     const room = newCode();
     const P = await open();
     P.send({ t: 'join', room, config: versus, player: impP('P', 'red'), caps: CLIENT_CAPS });
@@ -680,8 +680,6 @@ async function scenarios(s: Server): Promise<void> {
     check(L('...while a build with it is seated'), !!(await G.until('welcome')));
     P.close();
     G.close();
-  } else {
-    console.log(`SKIP B[${s.label}]: [needs coerceSpec carry] a room holding an imported robot turns away a build without the cap — coerceSpec does not carry \`imported\` yet`);
   }
 }
 

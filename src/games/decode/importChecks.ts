@@ -1,0 +1,67 @@
+import type { ImportedMech, RobotSpec } from '../../types';
+import * as C from '../../config';
+import {
+  chordAt,
+  decodeImportLaunchZ,
+  decodeImportMouth,
+  decodeImportTurret,
+  decodeMouthHalfRange,
+  DECODE_IMPORT_LAUNCH_MIN,
+} from '../../sim/importedMech';
+import { coercedMech, defaultSpans, heightIssue, inches, mouthIssues, spanHandles, unplacedIssue, withoutMech } from '../importChecks';
+import type { ImportMechHandle, ImportMechIssue, ImportMechSlot } from '../types';
+
+/**
+ * DECODE's placement handles, pre-fills and checks for an imported robot (`GameSimModule.
+ * importMech`). DECODE's intake faces FORWARD — the preset funnels and the vector row are front
+ * hardware, and the sim reads the `front` span only — so a robot whose intake is at its back turns
+ * its front in the importer's Model step.
+ */
+
+function handles(spec: RobotSpec): ImportMechHandle[] {
+  return [
+    ...spanHandles(['front']),
+    { key: 'shooter', kind: 'point', label: 'Launcher', z: decodeImportLaunchZ(spec), zMin: DECODE_IMPORT_LAUNCH_MIN, zMax: 18 },
+  ];
+}
+
+function defaults(spec: RobotSpec): ImportedMech {
+  const bare = withoutMech(spec);
+  const imp = bare.imported!;
+  const t = decodeImportTurret(bare);
+  return coercedMech(imp, {
+    intakes: defaultSpans([decodeImportMouth(bare).m]),
+    shooter: { x: t.x, y: t.y, z: Math.min(C.LAUNCH_HEIGHT, imp.heightIn) },
+  });
+}
+
+function issues(spec: RobotSpec): ImportMechIssue[] {
+  const imp = spec.imported!;
+  const d = decodeImportMouth(spec);
+  const out = mouthIssues(imp, [d.m], decodeMouthHalfRange(spec.intake).min, 'DECODE intakes face forward: turn the robot’s front in the Model step.');
+  const sh = imp.mech?.shooter;
+  if (!sh) out.push(unplacedIssue('shooter', 'The launcher'));
+  out.push(...heightIssue('shooter', 'Launcher', sh?.z, DECODE_IMPORT_LAUNCH_MIN, 18));
+  // three artifacts are stored in a line behind the roller (a triangle: one deep, two beside)
+  const back = chordAt(imp.hull, { x: 0, y: 1 }, { x: 1, y: 0 }, d.yc);
+  const room = back ? d.tip - back[0] : 0;
+  const need = spec.intake === 'triangle' ? d.tip - d.face + 6 + C.BALL_RADIUS : 6 * C.BALL_RADIUS;
+  if (room < need) {
+    out.push({
+      level: 'warn',
+      code: 'held-room',
+      text: `There’s ${inches(room)} behind the intake to store three artifacts, which need ${inches(need)}. They will overlap the back of the robot.`,
+      handle: 'intake:front',
+    });
+  }
+  if (imp.heightIn < C.intakeLidZ(spec)) {
+    out.push({
+      level: 'warn',
+      code: 'top-below-roller',
+      text: `The robot is ${inches(imp.heightIn)} tall, lower than this intake’s rollers (${inches(C.intakeLidZ(spec))}). Check the units in the Model step.`,
+    });
+  }
+  return out;
+}
+
+export const DECODE_IMPORT_MECH: ImportMechSlot = { issues, defaults, handles };

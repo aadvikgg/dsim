@@ -41,6 +41,7 @@ import {
 } from './bodies';
 import { hyp3, hypXY, quatMul, QUAT_IDENTITY, round4, yawQuat, yawOfQuat } from './math3';
 import { datan2, dcos, dsin, nextRandom, rot } from '../../../math';
+import { polyFeature } from '../../../sim/imported';
 
 /** the LAST JSON a robot body was synced to -- what `syncRobot` diffs the CURRENT `RobotState`
  * against to decide "did something outside the solve move this" (see plan section 3.2). */
@@ -670,6 +671,11 @@ function removeElementBody(engine: Engine3d, id: number): void {
  */
 /** the distance from a point to a `Chassis3dShape` box, both in the SAME robot frame; 0 inside. */
 function boxGap(s: Chassis3dShape, lx: number, ly: number, lz: number): number {
+  if (s.shape === 'prism' && s.pts) {
+    // an IMPORTED robot's prism: the exact distance to its polygon in plan, then to its z band
+    const g = Math.max(-polyFeature(s.pts, { x: lx - s.cx, y: ly - s.cy }).depth, 0);
+    return hyp3(g, 0, Math.max(Math.abs(lz - s.cz) - s.hz, 0));
+  }
   const dx = Math.max(Math.abs(lx - s.cx) - s.hx, 0);
   const dy = Math.max(Math.abs(ly - s.cy) - s.hy, 0);
   const dz = Math.max(Math.abs(lz - s.cz) - s.hz, 0);

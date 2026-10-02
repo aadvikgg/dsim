@@ -42,6 +42,7 @@ import type { Alliance, AssistConfig, DrivetrainType, RobotSpec, StartCat, Vec2,
 import { DRIVETRAIN_LIMITS, INTAKE_PRESETS, ROBOT_MAX_SIZE } from '../../config';
 import { clamp, datan2, dcos, dsin, hyp, wrapAngle } from '../../math';
 import { lengthLimits, widthLimits } from '../../sim/drivetrain';
+import { importPlacePoint } from '../../sim/importedMech';
 import {
   BB_DEFAULT_INTAKE_MOUNT,
   type BbIntakeMount,
@@ -1922,6 +1923,9 @@ export function bbTowerBoxRobot(frame: BbBoxTubeFrame, b: BbTowerBox): { x0: num
 export function bbLiftPlaceLocal(spec: RobotSpec): { x: number; y: number } | null {
   const lift = bbLiftOf(spec);
   if (!lift) return null;
+  // an IMPORT reaches out of its hull from the placed base — the SAME `importPlacePoint` the sim's
+  // `bbImportPlacePoint` calls, so the two cannot drift
+  if (spec.imported) return importPlacePoint(spec.imported, MOUNT_DIR[lift.mount], BB_PLACE_REACH);
   const d = MOUNT_DIR[lift.mount];
   const reach = bbIntakeReach(spec);
   const im = bbIntakeMountOf(spec);
@@ -3666,6 +3670,9 @@ export const BB3_LIFT_EDGE_R = 0.2;
  * never drawn.
  */
 export function bbMechEnvelopes(spec: RobotSpec, heightIn: number): BbMechEnvelope[] {
+  // an IMPORTED robot's turret, dumper and tower are in its CAD height bands already
+  // (`sim3d/bodies.ts` `import3dShapes`) — a second, archetype-shaped solid would double them
+  if (spec.imported) return [];
   const launcher = bbLauncherOf(spec, BB_HOOD_DEFAULT_DEG);
   const cap = (z: number): number => Math.min(z, heightIn);
   const out: BbMechEnvelope[] = [];

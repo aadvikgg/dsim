@@ -507,6 +507,21 @@ import { placeGroundArtifact } from '../src/sim/world';
 import { bbFootprintGap, bbRobotsContact } from '../src/games/biobuzz/penalties';
 import { bbEvalStart, bbStartBox } from '../src/games/biobuzz/start';
 import type { ImportedRobot } from '../src/types';
+import type { Vec2 } from '../src/types';
+import * as IMPC from '../src/config';
+import type { SolidShape } from '../src/sim/artifactSolids';
+import { heldSlotPos } from '../src/sim/physics';
+import { turretWorldPos } from '../src/sim/robot';
+import { decodeImportLaunchZ, decodeImportMouth, DECODE_IMPORT_LAUNCH_MIN } from '../src/sim/importedMech';
+import { defaultImportedMech, mechHandles, validateImportedMech } from '../src/games/sim';
+import { BB_DEFAULT_SPEC } from '../src/games/biobuzz/coerce';
+import { createBiobuzzWorld } from '../src/games/biobuzz/spawn';
+import { biobuzzStep } from '../src/games/biobuzz/step';
+import { hiveCellTarget } from '../src/games/biobuzz/elements';
+import { bbAimTarget, bbCellSideOf, bbDumpShotEnters, bbPretendHive, bbTurretShotEnters } from '../src/games/biobuzz/play';
+import { bbAimHeading, bbMouths, bbPlacePointLocal, bbRobotSolids, bbTurretRelease, bbTurretSolution, mouthAxes } from '../src/games/biobuzz/robot';
+import { BB_PLACE_REACH, BB_POLLEN_R, bbLiftPlaceLocal } from '../src/games/biobuzz/config';
+import { import3dShapes } from '../src/games/biobuzz/sim3d/bodies';
 
 // the sim now steps a Rapier physics world (robots) — load the WASM before any
 // step() runs. tsx runs this file as ESM, so top-level await is available.
@@ -29177,9 +29192,8 @@ const dumperSetup = (): RobotSetup => {
  * The capability, the predicates, the one admission rule every door asks, the replay stamp and
  * the device-only rule for practice and LAN runs. The rooms are next.
  *
- * ⚠️ LANE NOTE: `coerceSpec` carries `imported` across only once the sim lane lands. Nothing in
- * THIS block needs it — specs are built with `imported` directly — and the two checks that do are
- * marked `[needs coerceSpec carry]` and say so when they are skipped.
+ * `coerceSpec` carries `imported` (the sim lane landed), so the roster checks below read what the
+ * room actually kept.
  */
 {
   const IMP = {
@@ -29352,7 +29366,6 @@ const dumperSetup = (): RobotSetup => {
   const started = (s: Sink, id: string) => s[id].find((m) => m.t === 'matchStart') as Extract<ServerMsg, { t: 'matchStart' }> | undefined;
   const result = (s: Sink, id: string) => s[id].find((m) => m.t === 'matchResult') as Extract<ServerMsg, { t: 'matchResult' }> | undefined;
   const anyImport = (m: Extract<ServerMsg, { t: 'matchStart' }> | undefined): boolean => !!m && m.setups.some((x) => isImportedSpec(x.spec));
-  const carried = isImportedSpec(coerceSpec(impSpec, DEFAULT_SPEC, 'decode'));
 
   // ---- a CUSTOM room (and a LAN room is this same class) ----------------------------------
   {
@@ -29422,13 +29435,9 @@ const dumperSetup = (): RobotSetup => {
     room.add(mk(s, 'b', CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
     room.onMessage('a', { t: 'update', patch: { spec: impSpec } });
     check('imports/room: a custom room takes an update that brings an import (no refusal)', errs(s, 'a').length === 0, JSON.stringify(errs(s, 'a')));
-    if (carried) {
-      check('imports/room: [needs coerceSpec carry] ...and the roster now carries it', isImportedSpec(rosterSpec(s, 'b', 'a')));
-      room.onMessage('a', { t: 'update', patch: { spec: { ...DEFAULT_SPEC } } });
-      check('imports/room: [needs coerceSpec carry] a re-pick of a STANDARD robot drops the import (the base spec must not keep it)', !isImportedSpec(rosterSpec(s, 'b', 'a')));
-    } else {
-      console.log('SKIP imports/room: [needs coerceSpec carry] roster carries the import / a standard re-pick drops it — coerceSpec does not carry `imported` yet');
-    }
+    check('imports/room: ...and the roster now carries it', isImportedSpec(rosterSpec(s, 'b', 'a')));
+    room.onMessage('a', { t: 'update', patch: { spec: { ...DEFAULT_SPEC } } });
+    check('imports/room: a re-pick of a STANDARD robot drops the import (the base spec must not keep it)', !isImportedSpec(rosterSpec(s, 'b', 'a')));
     room.stop();
   }
 
@@ -29673,7 +29682,17 @@ function impBroken(c: ImportedRobot): string[] {
   }
   if (c.mech?.intakes) {
     if (c.mech.intakes.length > 4) bad.push('more than 4 intakes');
-    for (const it of c.mech.intakes) if (!(it.from < it.to)) bad.push('intake from >= to');
+    for (const it of c.mech.intakes) if (!(it.to - it.from >= 1)) bad.push('intake narrower than 1 in or from >= to');
+    const order = ['front', 'back', 'left', 'right'];
+    for (let i = 1; i < c.mech.intakes.length; i++) {
+      if (!(order.indexOf(c.mech.intakes[i - 1].edge) < order.indexOf(c.mech.intakes[i].edge))) bad.push('intakes not one per edge, front/back/left/right');
+    }
+  }
+  for (const k of ['shooter', 'shooter2', 'place'] as const) {
+    const p = c.mech?.[k];
+    if (!p) continue;
+    if (polyFeature(h, p).depth < 0 || !onGrid(p.x) || !onGrid(p.y)) bad.push(`${k} outside the hull / off grid`);
+    if (!(p.z >= 0 && p.z <= c.heightIn) || !onGrid(p.z)) bad.push(`${k} z ${p.z}`);
   }
   if (JSON.stringify(c).length > 2048) bad.push(`descriptor is ${JSON.stringify(c).length} bytes`);
   return bad;
@@ -29738,6 +29757,19 @@ function impBroken(c: ImportedRobot): string[] {
       },
     }],
     ['mech with nothing valid', { ...base, mech: { shooter: { x: NaN, y: 0, z: 0 }, intakes: [{ edge: 'front', from: 2, to: 2 }] } }],
+    ['mech: duplicate edges out of order, a narrow span, a second head off the robot', {
+      ...base,
+      mech: {
+        shooter2: { x: -40, y: 3, z: 6 },
+        intakes: [
+          { edge: 'left', from: -3, to: 4 },
+          { edge: 'right', from: 1, to: 1.5 },
+          { edge: 'front', from: -6, to: 6 },
+          { edge: 'left', from: -8, to: 8 },
+          { edge: 'back', from: 2, to: -2 },
+        ],
+      },
+    }],
     ['100 000 points', { ...base, hull: circle(100000, 8) }],
     ['null', null],
     ['a string', 'imported'],
@@ -29782,8 +29814,25 @@ function impBroken(c: ImportedRobot): string[] {
     check('coerceImported: bands — at most 3, the inverted one dropped, sorted by z0', bands.length === 3 && bands[0].z0 <= bands[1].z0 && bands[1].z0 <= bands[2].z0, JSON.stringify(bands.map((b) => [b.z0, b.z1, b.hull.length])));
   }
   {
-    const m = want('mech: far shooter, bad edges, reversed spans, ten intakes')!.mech!;
-    check('coerceImported: mech — shooter clamped near the hull, intakes capped at 4 with from < to', m.shooter!.x <= 16 && m.shooter!.y >= -14 && m.shooter!.z <= 24 && m.intakes!.length === 4 && m.intakes![0].edge === 'front' && m.intakes![0].from === -5, JSON.stringify(m));
+    const c = want('mech: far shooter, bad edges, reversed spans, ten intakes')!;
+    const m = c.mech!;
+    check(
+      'coerceImported: mech — the shooter is moved INSIDE the hull with z capped at heightIn, a negative z is 0, and the ten left spans keep only the first',
+      polyFeature(c.hull, m.shooter!).depth >= 0 && m.shooter!.z === c.heightIn && m.place!.z === 0 &&
+        m.intakes!.length === 2 && m.intakes![0].edge === 'front' && m.intakes![0].from === -5 && m.intakes![0].to === 5 &&
+        m.intakes![1].edge === 'left' && m.intakes![1].from === 0 && m.intakes![1].to === 1,
+      JSON.stringify(m),
+    );
+  }
+  {
+    const c = want('mech: duplicate edges out of order, a narrow span, a second head off the robot')!;
+    const m = c.mech!;
+    check(
+      'coerceImported: mech — one span per edge (the first wins), sorted front/back/left/right, a span under 1 in dropped, shooter2 kept inside the hull',
+      isDeepStrictEqual(m.intakes!.map((i) => [i.edge, i.from, i.to]), [['front', -6, 6], ['back', -2, 2], ['left', -3, 4]]) &&
+        polyFeature(c.hull, m.shooter2!).depth >= 0 && m.shooter2!.z === 6,
+      JSON.stringify(m),
+    );
   }
   check('coerceImported: a mech with nothing valid is dropped', want('mech with nothing valid')!.mech === undefined);
 }
@@ -30062,21 +30111,30 @@ function impPlayCheck(g: GameId): void {
 }
 
 /**
- * AN ARTIFACT IS NEVER LEFT INSIDE AN IMPORT: the solids are the closed hull (every game, BIOBUZZ's
- * slot included), and `placeGroundArtifact` walks one dropped onto the robot's centre out of it.
+ * AN ARTIFACT IS NEVER LEFT INSIDE AN IMPORT: the solids are the hull CARVED by the game's intake
+ * (`importedMech.ts` — the chassis behind the mouth face, the funnel wedges or side plates), every
+ * piece inside the hull (a funnel's lip pokes `INTAKE_LIP` past it, as on a standard robot), and
+ * `placeGroundArtifact` walks one dropped onto the robot's centre out of every piece.
  */
 {
   const { w } = impWorld('decode', [{ imported: IMP_NOSE }]);
   const r = w.robots[0];
   const sol = robotSolids(r, []);
-  check('robotSolids of an import: the closed hull, no intake structure', sol.chassis.kind === 'poly' && sol.structure.length === 0 && isDeepStrictEqual((sol.chassis as { pts: unknown }).pts, r.spec.imported!.hull));
+  const hull = r.spec.imported!.hull;
+  const ptsOf = (sh: { kind: string; pts?: Vec2[] }) => sh.pts ?? [];
+  const inHull = (p: Vec2, pad: number) => polyFeature(hull, p).depth >= -pad - 1e-9;
+  check(
+    'robotSolids of an import: the hull behind the intake face plus the funnel wedges, every piece inside the hull (the lip excepted)',
+    sol.chassis.kind === 'poly' && sol.structure.length === 2 && ptsOf(sol.chassis).every((p) => inHull(p, 0)) && sol.structure.every((s) => ptsOf(s).every((p) => inHull(p, INTAKE_LIP))),
+    JSON.stringify(sol.structure.map(ptsOf)).slice(0, 200),
+  );
   const bb = simModuleFor('biobuzz').artifactSolids!(r, [], 1.4);
-  check('BIOBUZZ artifactSolids of an import: the same closed hull', isDeepStrictEqual(bb.chassis, sol.chassis) && bb.structure.length === 0);
+  check('BIOBUZZ artifactSolids of an import: its own carve — the hull behind the sweeper face and a plate either side, all inside the hull', bb.chassis.kind === 'poly' && bb.structure.length === 2 && [bb.chassis, ...bb.structure].every((s) => ptsOf(s).every((p) => inHull(p, 0))));
   const ball = w.balls.find((b) => b.state.kind === 'ground')!;
   ball.pos = { x: r.pos.x + 1, y: r.pos.y + 0.5 };
   placeGroundArtifact(w, ball, new Map([[r.id, sol]]));
-  const d = polyFeature(r.spec.imported!.hull, rot({ x: ball.pos.x - r.pos.x, y: ball.pos.y - r.pos.y }, -r.heading)).depth;
-  check('placeGroundArtifact walks an artifact out of an imported hull', d <= -BALL_RADIUS + 1e-6, `skin ${(d + BALL_RADIUS).toFixed(3)} in`);
+  const q = robotPenetration(r, sol, ball.pos, BALL_RADIUS);
+  check('placeGroundArtifact walks an artifact out of every solid of an imported robot', q === null || q.pen <= 1e-6, q ? `pen ${q.pen.toFixed(3)} in ${q.part}` : 'clear');
 }
 
 /**
@@ -30123,6 +30181,534 @@ function impPlayCheck(g: GameId): void {
   };
   const dflt = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_NOSE }, DEFAULT_SPEC, 'decode');
   check('wheels: BASE parking counts the stated wheels (narrow: full, default: partial)', park(narrow) === 10 && park(dflt) === 5, `${park(narrow)} / ${park(dflt)}`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// IMPORTED ROBOTS: MECHANISMS (`src/sim/importedMech.ts`, each game's `importMech.ts` /
+// `importChecks.ts`; `docs/area/physics.md` "Imported robots: mechanisms"). Mouths carved from the
+// hull at the placed span, the launcher and placer where they were placed, BIOBUZZ 3D built from
+// the CAD bands, and the placement editor's checks. Standard robots step byte-identically.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * THE MECHANISM-HEAVY STANDARD RUN: four standard robots per game, each a different archetype,
+ * driving at the nearest loose element with the intake running, firing whenever they hold
+ * anything, pressing the catalyst / ramp / place buttons on a cadence. Every intake, launch and
+ * placement path the import branches sit beside runs for a standard robot here, so a branch that
+ * reached a standard robot moves the pin. Recorded on feat/robot-import a882e8c2, BEFORE the
+ * mechanism branches existed; never re-record one to make an import change pass.
+ */
+const L2_MECH_PINS: Record<string, string> = {
+  decode: 'held=2872 2299820267:1516006287 2380413841:306312656 1300675608:205143914',
+  chain: 'held=2913 280568408:432347152 3067491810:3978456955 2730570165:2501872899',
+  biobuzz: 'held=1025 2762021873:2009800956 2776997930:279128570 4136908741:1973256459',
+  bb3d: 'held=907 4176744764:1760924406 112866128:1298346330',
+};
+const L2_MECH_SPECS: Record<'decode' | 'chain' | 'biobuzz', Partial<RobotSpec>[]> = {
+  decode: [
+    { intake: 'sloped', canSort: true },
+    { intake: 'vector', drivetrain: 'tank', massLb: 30 },
+    { intake: 'triangle', drivetrain: 'swerve', width: 16, length: 12 },
+    { intake: 'sloped', drivetrain: 'xdrive', flywheelInertia: 0.5 },
+  ],
+  chain: [
+    { scoreMode: 'turret', intakeMount: 'front', catalystType: 'arm', catalystMount: 'front' },
+    { scoreMode: 'drum', intakeMount: 'side', shooterMount: 'front', catalystType: 'rail', catalystMount: 'back' },
+    { scoreMode: 'dumper', intakeMount: 'frontback', shooterMount: 'left', catalystType: 'arm', catalystMount: 'center', catalystSwing: 'lr' },
+    { scoreMode: 'twinturret', intakeMount: 'back', shooterMount: 'frontleft', catalystType: 'turret', catalystMount: 'frontright' },
+  ],
+  biobuzz: [
+    { scoreMode: 'turret', intakeMount: 'front', bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } } },
+    { scoreMode: 'twinturret', intakeMount: 'side', bbMech: { launcher: { kind: 'twinturret', mount: 'frontleft', mount2: 'backright', hoodDeg: 45 }, lift: null, intake: { kind: 'siderollers' } } },
+    { scoreMode: 'dumper', intakeMount: 'frontback', bbMech: { launcher: { kind: 'dumper', mount: 'back', hoodDeg: 50 }, lift: { kind: 'vslide', mount: 'front' }, intake: { kind: 'ramp' } } },
+    { scoreMode: 'turret', intakeMount: 'back', intake: 'triangle', bbMech: { launcher: { kind: 'turret', mount: 'back', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'left' }, intake: { kind: 'sweeper' } } },
+  ],
+};
+
+/** drive at the nearest loose element with the intake running; fire once anything is held */
+function l2MechCmd(w: World, i: number, tick: number): RobotCommand {
+  const r = w.robots[i];
+  let best: { x: number; y: number } | null = null;
+  let bd = Infinity;
+  for (const b of w.balls) {
+    if (b.state.kind !== 'ground') continue;
+    const d = hyp(b.pos.x - r.pos.x, b.pos.y - r.pos.y);
+    if (d < bd) {
+      bd = d;
+      best = b.pos;
+    }
+  }
+  const full = r.hopper.length >= 3;
+  const target = !best || (full && tick % 240 < 120) ? { x: (i % 2 === 0 ? 1 : -1) * 30, y: (i < 2 ? 1 : -1) * 30 } : best;
+  const local = rot({ x: target.x - r.pos.x, y: target.y - r.pos.y }, -r.heading);
+  const ang = datan2(local.y, local.x);
+  const driveY = clamp(local.x / 10, -1, 1);
+  const rotate = clamp(-wrapAngle(ang) * 0.9, -1, 1);
+  return {
+    driveY,
+    driveX: clamp(-local.y / 14, -1, 1),
+    rotate,
+    leftDrive: clamp(driveY - rotate, -1, 1),
+    rightDrive: clamp(driveY + rotate, -1, 1),
+    intake: tick % 200 < 170,
+    fire: r.hopper.length > 0 && tick % 30 < 20,
+    catalyst: tick % 150 === 75,
+    fling: tick % 400 === 390,
+    bbRamp: tick % 300 < 4,
+    bbPlace: tick % 90 < 3,
+    bbPlaceNectar: tick % 90 > 45 && tick % 90 < 48,
+  };
+}
+
+function l2MechRun(g: GameId | 'bb3d', ticks: number): string {
+  const key = g === 'bb3d' ? 'biobuzz' : g;
+  const mod = simModuleFor(key);
+  const w = mod.createWorld(
+    'match',
+    777,
+    L2_MECH_SPECS[key].map((s, i) => ({
+      id: i,
+      alliance: i % 2 === 0 ? 'blue' : 'red',
+      spec: { ...DEFAULT_SPEC, ...s } as RobotSpec,
+      assists: { fieldCentric: false, aimAssist: true, autoIntake: false, autoFire: false },
+      startIndex: Math.floor(i / 2),
+    })),
+    undefined,
+    g === 'biobuzz' ? '2d' : g === 'bb3d' ? '3d' : undefined,
+  );
+  w.match.phase = 'teleop';
+  w.match.phaseTimeLeft = 90;
+  const out: string[] = [];
+  let held = 0;
+  for (let t = 0; t < ticks; t++) {
+    const cmds = new Map<number, RobotCommand>();
+    for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, l2MechCmd(w, i, t));
+    mod.step(w, 1 / 60, cmds);
+    for (const r of w.robots) held += r.hopper.length;
+    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(w))}`);
+  }
+  return `held=${held} ${out.join(' ')}`;
+}
+{
+  const got = l2MechRun('decode', 900);
+  check('imported mechanisms: STANDARD robots step byte-identically through intake/fire/sort — decode (worldHash + whole-world JSON, 900 ticks)', got === L2_MECH_PINS.decode, got);
+}
+{
+  const got = l2MechRun('chain', 900);
+  check('imported mechanisms: STANDARD robots step byte-identically through intake/launch/catalyst — chain (worldHash + whole-world JSON, 900 ticks)', got === L2_MECH_PINS.chain, got);
+}
+{
+  const got = l2MechRun('biobuzz', 900);
+  check('imported mechanisms: STANDARD robots step byte-identically through every intake kind/launcher/Box Tube — biobuzz 2D (worldHash + whole-world JSON, 900 ticks)', got === L2_MECH_PINS.biobuzz, got);
+}
+{
+  await initPhysics3d();
+  const got = l2MechRun('bb3d', 600);
+  check('imported mechanisms: STANDARD robots step byte-identically through every intake kind/launcher/Box Tube — biobuzz 3D (worldHash + whole-world JSON, 600 ticks)', got === L2_MECH_PINS.bb3d, got);
+}
+
+/** an 18 × 16 robot with its front corners chamfered: a hull no box describes */
+const L2_OCT: ImportedRobot = {
+  v: 1,
+  id: 'a1a1a1a1a1a1a1a1',
+  hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 10, y: -6 }, { x: 10, y: 6 }, { x: 8, y: 8 }, { x: -8, y: 8 }],
+  heightIn: 14,
+};
+const L2_ASSISTS = { fieldCentric: false, aimAssist: true, autoIntake: false, autoFire: false };
+
+function l2Pts(sh: SolidShape): Vec2[] {
+  if (sh.kind === 'poly') return sh.pts;
+  if (sh.kind === 'box') {
+    return [
+      { x: sh.cx - sh.hx, y: sh.cy - sh.hy },
+      { x: sh.cx + sh.hx, y: sh.cy - sh.hy },
+      { x: sh.cx + sh.hx, y: sh.cy + sh.hy },
+      { x: sh.cx - sh.hx, y: sh.cy + sh.hy },
+    ];
+  }
+  return [];
+}
+/** two convex polygons with the same vertex SET, to `eps` */
+function l2SamePoly(a: Vec2[], b: Vec2[], eps = 1e-9): boolean {
+  return a.length === b.length && a.every((p) => b.some((q) => Math.abs(p.x - q.x) < eps && Math.abs(p.y - q.y) < eps));
+}
+/** a standard footprint rectangle as an imported hull */
+function l2RectImport(x0: number, x1: number, y0: number, y1: number): ImportedRobot {
+  return { v: 1, id: 'b2b2b2b2b2b2b2b2', heightIn: 14, hull: [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }] };
+}
+
+/**
+ * REDUCES TO STANDARD: an import whose hull IS a standard robot's footprint rectangle, with the
+ * standard span, gets exactly that robot's mechanisms — the carve, the held slots, the mouth's
+ * face/roller line/axle/width — so the import path is the standard model generalised, not a
+ * second model. DECODE ×3 presets, BIOBUZZ and Chain front/back (a side or front-and-back sweeper
+ * puts a standard footprint over the 18-in cube an import is held to).
+ */
+{
+  for (const intake of ['sloped', 'vector', 'triangle'] as const) {
+    const std = coerceSpec({ ...DEFAULT_SPEC, intake, width: 16, length: INTAKE_PRESETS[intake].maxLength }, DEFAULT_SPEC, 'decode');
+    const hl = std.length / 2;
+    const hw = std.width / 2;
+    const tip = hl + INTAKE_PRESETS[intake].reach;
+    const mh = intakeMouth(std).mouthHalf;
+    const sp = coerceSpec({ ...std, imported: { ...l2RectImport(-hl, tip, -hw, hw), mech: { intakes: [{ edge: 'front', from: -mh, to: mh }] } } }, DEFAULT_SPEC, 'decode');
+    const mk = (s: RobotSpec) => createWorld('free', 1, [{ id: 0, alliance: 'blue', spec: s, assists: L2_ASSISTS, startIndex: 0 }]).robots[0];
+    const a = robotSolids(mk(std), []);
+    const b = robotSolids(mk(sp), []);
+    check(
+      `imported mechanisms: DECODE ${intake} — an import shaped like the standard footprint carves EXACTLY the standard chassis and ${INTAKE_PRESETS[intake].mouth.wedge ? 'funnel wedges' : 'rails'}`,
+      l2SamePoly(l2Pts(a.chassis), l2Pts(b.chassis)) && a.structure.length === b.structure.length && a.structure.every((s, i) => l2SamePoly(l2Pts(s), l2Pts(b.structure[i]))),
+      JSON.stringify(b.structure.map(l2Pts)).slice(0, 240),
+    );
+    check(
+      `imported mechanisms: DECODE ${intake} — ...stores its artifacts in the standard slots`,
+      [0, 1, 2].every((k) => [1, -1].every((side) => {
+        const p = heldSlotPos(std, k, side);
+        const q = heldSlotPos(sp, k, side);
+        return Math.abs(p.x - q.x) < 1e-9 && Math.abs(p.y - q.y) < 1e-9;
+      })),
+    );
+    const d = decodeImportMouth(sp);
+    check(
+      `imported mechanisms: DECODE ${intake} — ...with the standard face, roller line, axle, width and a centred mouth`,
+      d.face === hl && d.tip === tip && Math.abs(d.axle - intakeAxleX(std)) < 1e-12 && d.mouth.mouthHalf === mh && d.yc === 0,
+      JSON.stringify({ face: d.face, tip: d.tip, axle: d.axle, mh: d.mouth.mouthHalf, yc: d.yc }),
+    );
+  }
+  for (const mount of ['front', 'back'] as const) {
+    const std = coerceSpec({ ...BB_DEFAULT_SPEC, intakeMount: mount }, BB_DEFAULT_SPEC, 'biobuzz');
+    const hl = std.length / 2;
+    const hw = std.width / 2;
+    const reach = INTAKE_PRESETS[std.intake].reach;
+    const imp = mount === 'front' ? l2RectImport(-hl, hl + reach, -hw, hw) : l2RectImport(-hl - reach, hl, -hw, hw);
+    const sp = coerceSpec({ ...std, imported: imp }, BB_DEFAULT_SPEC, 'biobuzz');
+    const a = bbMouths(std);
+    const b = bbMouths(sp);
+    check(
+      `imported mechanisms: BIOBUZZ ${mount} — an import shaped like the standard footprint has the standard mouth rect`,
+      a.length === b.length && a.every((m, i) => m.edge === b[i].edge && m.x0 === b[i].x0 && m.x1 === b[i].x1 && m.y0 === b[i].y0 && m.y1 === b[i].y1),
+      JSON.stringify({ a, b }),
+    );
+    const ax = mouthAxes(a[0], hl, hw);
+    const bx = mouthAxes(b[0], sp.length / 2, sp.width / 2);
+    check(`imported mechanisms: BIOBUZZ ${mount} — ...the standard face and roller line, centred`, ax.dist === bx.dist && ax.uOut === bx.uOut && bx.vc === 0 && ax.half === bx.half);
+    const sa = bbRobotSolids({ spec: std, id: 0 } as RobotState, []);
+    const sb = bbRobotSolids({ spec: sp, id: 0 } as RobotState, []);
+    check(
+      `imported mechanisms: BIOBUZZ ${mount} — ...and the standard chassis and side plates`,
+      l2SamePoly(l2Pts(sa.chassis), l2Pts(sb.chassis)) && sa.structure.length === sb.structure.length && sa.structure.every((s) => sb.structure.some((t) => l2SamePoly(l2Pts(s), l2Pts(t)))),
+    );
+  }
+  for (const mount of ['front', 'back'] as const) {
+    const std = coerceSpec({ ...DEFAULT_SPEC, intakeMount: mount, length: 15, width: 15 }, DEFAULT_SPEC, 'chain');
+    const hl = std.length / 2;
+    const hw = std.width / 2;
+    const reach = INTAKE_PRESETS[std.intake].reach;
+    const imp = mount === 'front' ? l2RectImport(-hl, hl + reach, -hw, hw) : l2RectImport(-hl - reach, hl, -hw, hw);
+    const sp = coerceSpec({ ...std, imported: imp }, DEFAULT_SPEC, 'chain');
+    const a = chainIntakeMouths(std);
+    const b = chainIntakeMouths(sp);
+    check(
+      `imported mechanisms: Chain ${mount} — an import shaped like the standard footprint has the standard mouth rect`,
+      a.length === b.length && a.every((m, i) => m.x0 === b[i].x0 && m.x1 === b[i].x1 && m.y0 === b[i].y0 && m.y1 === b[i].y1),
+      JSON.stringify({ a, b }),
+    );
+  }
+}
+
+/** a DECODE scene: one robot at (−10, −30) facing +x, one artifact at `local` in its frame */
+function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact } {
+  const w = createWorld('free', 3, [{ id: 0, alliance: 'blue', spec, assists: L2_ASSISTS, startIndex: 0 }]);
+  const r = w.robots[0];
+  r.hopper = [];
+  r.pos = { x: -10, y: -30 };
+  r.heading = 0;
+  r.vel = { x: 0, y: 0 };
+  r.fieldCentric = false;
+  const ball = w.balls[0];
+  w.balls.length = 0;
+  w.balls.push(ball);
+  ball.state = { kind: 'ground' };
+  ball.pos = { x: r.pos.x + local.x, y: r.pos.y + local.y };
+  ball.vel = { x: 0, y: 0 };
+  ball.z = 0;
+  ball.vz = 0;
+  return { w, ball };
+}
+
+/** DECODE: the intake takes artifacts through the PLACED mouth and nowhere else */
+{
+  for (const intake of ['sloped', 'vector', 'triangle'] as const) {
+    const sp = coerceSpec({ ...DEFAULT_SPEC, intake, imported: { ...L2_OCT, mech: { intakes: [{ edge: 'front', from: -7, to: 1 }] } } }, DEFAULT_SPEC, 'decode');
+    const d = decodeImportMouth(sp);
+    const inMouth = l2DecodeScene(sp, { x: d.tip + 4, y: d.yc });
+    run(inMouth.w, cmd({ driveY: 0.4, intake: true }), 2);
+    const beside = l2DecodeScene(sp, { x: 13, y: 5 });
+    run(beside.w, cmd({ driveY: 0.4, intake: true }), 2);
+    const r = beside.w.robots[0];
+    const loc = rot({ x: beside.ball.pos.x - r.pos.x, y: beside.ball.pos.y - r.pos.y }, -r.heading);
+    const depth = polyFeature(sp.imported!.hull, loc).depth;
+    // a funnel deflects it out past the flank (as a standard funnel does an artifact outboard of
+    // its mouth); the vector's flat face pushes it ahead. Either way: not taken, never inside.
+    check(
+      `imported mechanisms: DECODE ${intake} — an artifact on the placed (off-centre) mouth is captured; one in front of the hull beside it is never taken and never inside the hull`,
+      inMouth.w.robots[0].hopper.length === 1 && r.hopper.length === 0 && depth < -(BALL_RADIUS - 0.3),
+      `mouth y ${d.yc} ± ${d.mouth.mouthHalf}; in ${inMouth.w.robots[0].hopper.length}, beside ${r.hopper.length} (ball at ${loc.x.toFixed(2)}, ${loc.y.toFixed(2)}; depth ${depth.toFixed(2)})`,
+    );
+    const held = [0, 1, 2].map((k) => heldSlotPos(sp, k, 1));
+    check(`imported mechanisms: DECODE ${intake} — every held slot is inside the hull, behind the mouth`, held.every((p) => polyFeature(sp.imported!.hull, p).depth > 0 && p.x < d.tip), JSON.stringify(held));
+  }
+}
+
+/** DECODE: the shot leaves from the placed turret at the placed height (and the floor holds) */
+{
+  const sp = coerceSpec({ ...DEFAULT_SPEC, intake: 'sloped', imported: { ...L2_OCT, mech: { shooter: { x: -4, y: 3, z: 13.5 } } } }, DEFAULT_SPEC, 'decode');
+  const w = createWorld('free', 3, [{ id: 0, alliance: 'blue', spec: sp, assists: L2_ASSISTS, startIndex: 0 }]);
+  const r = w.robots[0];
+  r.pos = { x: 20, y: 20 };
+  r.heading = 0.7;
+  const tp = turretWorldPos(r);
+  const want = rot({ x: -4, y: 3 }, 0.7);
+  check('imported mechanisms: DECODE — the turret is where it was placed', hyp(tp.x - r.pos.x - want.x, tp.y - r.pos.y - want.y) < 1e-9);
+  let shot: Artifact | undefined;
+  let from = { x: 0, y: 0 };
+  const before = new Set(w.balls.filter((b) => b.state.kind === 'flight').map((b) => b.id));
+  for (let i = 0; i < 120 && !shot; i++) {
+    from = turretWorldPos(r);
+    step(w, SIM_DT, new Map([[0, cmd({ fire: true })]]));
+    shot = w.balls.find((b) => b.state.kind === 'flight' && !before.has(b.id));
+  }
+  // undo the one flight step the release tick also took (`stepFlightBall`)
+  const vz0 = shot ? shot.vz + IMPC.GRAVITY * SIM_DT : 0;
+  const z0 = shot ? shot.z - vz0 * SIM_DT : 0;
+  const p0 = shot ? { x: shot.pos.x - shot.vel.x * SIM_DT, y: shot.pos.y - shot.vel.y * SIM_DT } : { x: 0, y: 0 };
+  check('imported mechanisms: DECODE — the shot leaves from the placed turret at the placed height', !!shot && Math.abs(z0 - 13.5) < 1e-9 && hyp(p0.x - from.x, p0.y - from.y) < 1e-9, `z0 ${z0}`);
+  const low = coerceSpec({ ...sp, imported: { ...sp.imported!, mech: { shooter: { x: -4, y: 3, z: 6 } } } }, DEFAULT_SPEC, 'decode');
+  check('imported mechanisms: DECODE — a launch height under 4 artifact radii is raised to the floor (a lower shot would be pushed out of its own hull)', decodeImportLaunchZ(low) === DECODE_IMPORT_LAUNCH_MIN && DECODE_IMPORT_LAUNCH_MIN > 4 * BALL_RADIUS);
+}
+
+/** a BIOBUZZ scene: one robot facing +x, one POLLEN at `local` in its frame, every other loose
+ *  element parked in a far corner */
+const L2_BB_SWEEP: Partial<RobotSpec> = { intakeMount: 'front', bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } } };
+function l2BbScene(physics: '2d' | '3d', imp: ImportedRobot, local: Vec2): { w: World; id: number } {
+  const sp = coerceSpec({ ...BB_DEFAULT_SPEC, ...L2_BB_SWEEP, imported: imp }, BB_DEFAULT_SPEC, 'biobuzz');
+  const w = createBiobuzzWorld('free', 25, [{ id: 0, alliance: 'blue', spec: sp, assists: { ...L2_ASSISTS, aimAssist: false }, startIndex: 0 }], undefined, physics);
+  const r = w.robots[0];
+  for (const b of w.balls) if (b.state.kind === 'held' && b.state.robot === r.id) b.state = { kind: 'ground' };
+  r.hopper = [];
+  const target = w.balls.find((b) => b.state.kind === 'ground')!;
+  for (const b of w.balls) if (b !== target && b.state.kind === 'ground') b.pos = { x: 60, y: -60 };
+  target.pos = { x: 0, y: 0 };
+  target.vel = { x: 0, y: 0 };
+  target.z = 0;
+  target.vz = 0;
+  r.heading = 0;
+  r.pos = { x: -local.x, y: -local.y };
+  r.vel = { x: 0, y: 0 };
+  return { w, id: target.id };
+}
+
+/** BIOBUZZ, 2D and 3D: the sweeper takes through the placed mouth; the hull beside it is a hull */
+{
+  await initPhysics3d();
+  const imp: ImportedRobot = { ...L2_OCT, mech: { intakes: [{ edge: 'front', from: -7, to: 1 }] } };
+  const sp = coerceSpec({ ...BB_DEFAULT_SPEC, ...L2_BB_SWEEP, imported: imp }, BB_DEFAULT_SPEC, 'biobuzz');
+  const ax = mouthAxes(bbMouths(sp)[0], 0, 0);
+  for (const physics of ['2d', '3d'] as const) {
+    const go = (local: Vec2) => {
+      const { w, id } = l2BbScene(physics, imp, local);
+      const m = new Map([[0, cmd({ intake: true, driveY: 0.15 })]]);
+      for (let t = 0; t < 90; t++) biobuzzStep(w, SIM_DT, m);
+      const b = w.balls.find((x) => x.id === id)!;
+      return { held: b.state.kind === 'held', b, r: w.robots[0] };
+    };
+    const inMouth = go({ x: ax.uOut + 1.6, y: ax.vc });
+    const beside = go({ x: 10 + 1.6, y: 4.5 });
+    const loc = rot({ x: beside.b.pos.x - beside.r.pos.x, y: beside.b.pos.y - beside.r.pos.y }, -beside.r.heading);
+    const depth = polyFeature(sp.imported!.hull, loc).depth;
+    check(
+      `imported mechanisms: BIOBUZZ ${physics} — a POLLEN on the placed mouth is taken; one in front of the hull beside it is pushed, never taken, never inside the hull`,
+      inMouth.held && !beside.held && depth < -(BB_POLLEN_R - 0.3),
+      `mouth v ${ax.vc} ± ${ax.half}; in ${inMouth.held}, beside ${beside.held} (depth ${depth.toFixed(2)})`,
+    );
+  }
+}
+
+/** BIOBUZZ 3D: the CAD bands are the height profile, not one prism to the top */
+{
+  await initPhysics3d();
+  const low: ImportedRobot = { ...L2_OCT, bands: [{ z0: 0, z1: 5, hull: L2_OCT.hull }, { z0: 5, z1: 14, hull: [{ x: -8, y: -3 }, { x: -2, y: -3 }, { x: -2, y: 3 }, { x: -8, y: 3 }] }] };
+  const drop = (imp: ImportedRobot) => {
+    const { w, id } = l2BbScene('3d', imp, { x: -40, y: 0 });
+    const r = w.robots[0];
+    const b = w.balls.find((x) => x.id === id)!;
+    const p = rot({ x: 5, y: 0 }, r.heading);
+    b.pos = { x: r.pos.x + p.x, y: r.pos.y + p.y };
+    b.state = { kind: 'flight', target: 'blue' };
+    b.z = 20;
+    b.vz = 0;
+    const m = new Map([[0, cmd({})]]);
+    let zMin = Infinity;
+    for (let t = 0; t < 30; t++) {
+      biobuzzStep(w, SIM_DT, m);
+      zMin = Math.min(zMin, w.balls.find((x) => x.id === id)!.z);
+    }
+    return zMin;
+  };
+  const withBands = drop(low);
+  const solid = drop({ ...L2_OCT });
+  check('imported mechanisms: BIOBUZZ 3D — an element dropped over the LOW band falls past where a single 14-in prism stops it (non-vacuous)', withBands < 7 && solid > 13, `with bands lowest z ${withBands.toFixed(2)}, one prism ${solid.toFixed(2)}`);
+  const shapes = import3dShapes(coerceSpec({ ...BB_DEFAULT_SPEC, ...L2_BB_SWEEP, imported: low }, BB_DEFAULT_SPEC, 'biobuzz'), 14);
+  check(
+    'imported mechanisms: BIOBUZZ 3D — the compound is prisms only (no archetype turret shape on top of the CAD), carved below the slot, with a pocket filler per mouth and the bands uncarved for the remote predictor',
+    shapes.chassis.every((s) => s.shape === 'prism') && shapes.pocket.length === 1 && shapes.remote.length === 2 && shapes.chassis.length > shapes.remote.length,
+    `${shapes.chassis.length} chassis, ${shapes.pocket.length} pocket, ${shapes.remote.length} remote`,
+  );
+}
+
+/** BIOBUZZ: launchers and the Box Tube work from where they were placed */
+{
+  const sp = coerceSpec({
+    ...BB_DEFAULT_SPEC,
+    intakeMount: 'front',
+    bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'left' }, intake: { kind: 'sweeper' } },
+    imported: { ...L2_OCT, mech: { shooter: { x: -3, y: -2, z: 12.25 }, place: { x: 0, y: 5, z: 6 } } },
+  }, BB_DEFAULT_SPEC, 'biobuzz');
+  check('imported mechanisms: BIOBUZZ — heightIn is the CAD height rounded up onto the dial, with no stow height', sp.heightIn === 14 && sp.stowHeightIn === undefined);
+  const r = { spec: sp, pos: { x: 0, y: 0 }, heading: 0, vel: { x: 0, y: 0 }, angVel: 0, turretHeading: 0, bbTurretPitch: 0 } as unknown as RobotState;
+  const rel = bbTurretRelease(r, 0, 100);
+  check('imported mechanisms: BIOBUZZ — the turret releases at the placed height at rest pitch', Math.abs(rel.z - 12.25) < 1e-9, `${rel.z}`);
+  const p = bbPlacePointLocal(sp)!;
+  const q = bbLiftPlaceLocal(sp)!;
+  check('imported mechanisms: BIOBUZZ — the Box Tube reaches BB_PLACE_REACH out of the hull from its placed base, the same in both copies', Math.abs(p.x) < 1e-9 && Math.abs(p.y - (8 + BB_PLACE_REACH)) < 1e-9 && p.x === q.x && p.y === q.y, JSON.stringify({ p, q }));
+  const cell = hiveCellTarget('blue', 'north');
+  const made = (patch: Partial<RobotSpec>) => {
+    let n = 0;
+    for (const [px, py] of [[cell.pos.x, cell.pos.y + 40], [cell.pos.x + 30, cell.pos.y + 30], [-40, 0], [40, 0], [0, 50]] as [number, number][]) {
+      const s = coerceSpec({ ...BB_DEFAULT_SPEC, ...L2_BB_SWEEP, ...patch }, BB_DEFAULT_SPEC, 'biobuzz');
+      const w = createBiobuzzWorld('practice', 11, [{ id: 0, alliance: 'blue', spec: s, assists: { ...L2_ASSISTS, aimAssist: false }, startIndex: 0 }]);
+      const rr = w.robots[0];
+      rr.pos = { x: px, y: py };
+      rr.heading = 0.4;
+      const t = bbAimTarget(w, rr);
+      const sol = bbTurretSolution(rr, t, 0);
+      if (!sol) continue;
+      rr.turretHeading = sol.yaw;
+      rr.bbTurretPitch = sol.pitch;
+      if (sol.reachable && bbTurretShotEnters(bbPretendHive(w.biobuzz!.hives.blue, bbCellSideOf(t)), rr, 0, sol.speed, SIM_DT)) n++;
+    }
+    return n;
+  };
+  const std = made({});
+  const imp = made({ imported: { ...L2_OCT, mech: { shooter: { x: -3, y: -2, z: 12.25 } } } });
+  check('imported mechanisms: BIOBUZZ — a turret placed on the CAD solves and scores from the stands a standard turret does', imp === std && std >= 3, `standard ${std}/5, import ${imp}/5`);
+  const dump = (patch: Partial<RobotSpec>, cluster: boolean) => {
+    const s = coerceSpec({ ...BB_DEFAULT_SPEC, intakeMount: 'back', bbMech: { launcher: { kind: 'dumper', mount: 'front', hoodDeg: 50 }, lift: null, intake: { kind: 'sweeper' } }, ...patch }, BB_DEFAULT_SPEC, 'biobuzz');
+    const w = createBiobuzzWorld('practice', 11, [{ id: 0, alliance: 'blue', spec: s, assists: { ...L2_ASSISTS, aimAssist: false }, startIndex: 0 }]);
+    const rr = w.robots[0];
+    rr.pos = { x: cell.pos.x, y: cell.pos.y + 32 };
+    const t = bbAimTarget(w, rr);
+    rr.heading = bbAimHeading(rr, t)!;
+    while (rr.hopper.length < 4) rr.hopper.push('yellow');
+    return bbDumpShotEnters(bbPretendHive(w.biobuzz!.hives.blue, bbCellSideOf(t)), rr, t, 4, cluster, SIM_DT);
+  };
+  for (const cluster of [false, true]) {
+    check(
+      `imported mechanisms: BIOBUZZ — a ${cluster ? '3D catapult' : '2D'} dump from the placed lip goes in where a standard one does`,
+      dump({}, cluster) && dump({ imported: { ...L2_OCT, mech: { shooter: { x: 9.5, y: 0, z: 10 } } } }, cluster),
+    );
+  }
+}
+
+/** Chain Reaction: mouths, turret, catalyst and storage come off the hull and the placements */
+{
+  const imp: ImportedRobot = { ...L2_OCT, mech: { intakes: [{ edge: 'front', from: -7, to: 1 }], shooter: { x: -2, y: 4, z: 13 }, place: { x: 2, y: -3, z: 6 } } };
+  const sp = coerceSpec({ ...DEFAULT_SPEC, scoreMode: 'turret', intakeMount: 'front', catalystType: 'arm', catalystMount: 'front', imported: imp }, DEFAULT_SPEC, 'chain');
+  const m = chainIntakeMouths(sp)[0];
+  check('imported mechanisms: Chain — the mouth sits on the placed span, off-centre, its lip on the hull', m.y0 === -7 && m.y1 === 1 && m.x1 === 10, JSON.stringify(m));
+  check('imported mechanisms: Chain — the turret is where it was placed', turretLocal(sp).x === -2 && turretLocal(sp).y === 4);
+  const w = createChainWorld('free', 5, [{ id: 0, alliance: 'blue', spec: sp, assists: L2_ASSISTS, startIndex: 0 }]);
+  const r = w.robots[0];
+  r.pos = { x: 0, y: 0 };
+  r.heading = 0;
+  const mouth = catalystMouth(r);
+  check('imported mechanisms: Chain — the catalyst works from where the hull ends ahead of its placed base', Math.abs(mouth.x - 10) < 1e-9 && Math.abs(mouth.y + 3) < 1e-9, JSON.stringify(mouth));
+  const cut = coerceSpec({ ...sp, imported: { ...L2_OCT, hull: [{ x: -8, y: -4 }, { x: -4, y: -8 }, { x: 6, y: -8 }, { x: 10, y: -4 }, { x: 10, y: 4 }, { x: 6, y: 8 }, { x: -4, y: 8 }, { x: -8, y: 4 }], mech: imp.mech } }, DEFAULT_SPEC, 'chain');
+  const rect = coerceSpec({ ...sp, imported: { ...l2RectImport(-8, 10, -8, 8), mech: imp.mech } }, DEFAULT_SPEC, 'chain');
+  check('imported mechanisms: Chain — storage reads the hull area (a robot with its corners cut holds less than its bounding box)', chainStorageMax(cut) < chainStorageMax(rect), `${chainStorageMax(cut)} vs ${chainStorageMax(rect)}`);
+  // a particle in an AABB corner the chamfered hull does not cover is neither plowed nor taken
+  const w2 = createChainWorld('free', 5, [{ id: 0, alliance: 'blue', spec: sp, assists: L2_ASSISTS, startIndex: 0 }]);
+  const r2 = w2.robots[0];
+  r2.pos = { x: 0, y: -20 };
+  r2.heading = 0;
+  r2.vel = { x: 0, y: 0 };
+  const g = w2.balls[0];
+  for (const b of w2.balls) if (b !== g && b.state.kind === 'ground' && hyp(b.pos.x - r2.pos.x, b.pos.y - r2.pos.y) < 30) b.pos = { x: 60, y: 60 };
+  g.state = { kind: 'ground' };
+  g.pos = { x: 10.5, y: -20 + 8.5 };
+  g.vel = { x: 0, y: 0 };
+  g.z = 0;
+  g.vz = 0;
+  const before = { ...g.pos };
+  chainStep(w2, SIM_DT, new Map([[0, cmd({ intake: true })]]));
+  check('imported mechanisms: Chain — a particle in a bounding-box corner the hull does not cover is left alone (not plowed, not taken)', g.state.kind === 'ground' && hyp(g.pos.x - before.x, g.pos.y - before.y) < 0.5, JSON.stringify(g.pos));
+}
+
+/** the placement editor's API: handles, pre-fills and plain-language checks, every game */
+{
+  const tall: ImportedRobot = { ...L2_OCT, bands: [{ z0: 0, z1: 6, hull: L2_OCT.hull }, { z0: 6, z1: 14, hull: [{ x: -4, y: -4 }, { x: 4, y: -4 }, { x: 4, y: 4 }, { x: -4, y: 4 }] }] };
+  for (const g of ['decode', 'biobuzz', 'chain'] as GameId[]) {
+    const base = g === 'biobuzz' ? BB_DEFAULT_SPEC : DEFAULT_SPEC;
+    const sp = coerceSpec({ ...base, imported: tall }, base, g);
+    const handles = mechHandles(g, sp);
+    const d = defaultImportedMech(g, sp);
+    const filled = coerceSpec({ ...sp, imported: { ...sp.imported!, mech: d } }, base, g);
+    check(`imported mechanisms: ${g} — the editor gets an intake span per mounted edge and a launcher point with its height range`, handles.some((h) => h.kind === 'span') && handles.some((h) => h.key === 'shooter' && h.z !== undefined && h.zMin !== undefined), JSON.stringify(handles));
+    check(`imported mechanisms: ${g} — the pre-filled placements are already coerced (saving them changes nothing)`, isDeepStrictEqual(filled.imported!.mech, d), JSON.stringify(d));
+    check(`imported mechanisms: ${g} — the pre-filled placements pass every check`, validateImportedMech(filled, g).length === 0, JSON.stringify(validateImportedMech(filled, g)));
+    check(`imported mechanisms: ${g} — an unplaced launcher is a warning, not a block`, validateImportedMech(sp, g).some((i) => i.code === 'shooter-default' && i.level === 'warn') && !validateImportedMech(sp, g).some((i) => i.level === 'block'));
+    // a nose too narrow at the face line for any mouth: BLOCK, on the intake handle
+    const nose: ImportedRobot = { ...tall, hull: [{ x: -8, y: -8 }, { x: -2, y: -8 }, { x: 10, y: -0.5 }, { x: 10, y: 0.5 }, { x: -2, y: 8 }, { x: -8, y: 8 }] };
+    const sn = coerceSpec({ ...base, imported: nose }, base, g);
+    const blocks = validateImportedMech(sn, g).filter((i) => i.level === 'block');
+    check(`imported mechanisms: ${g} — a front edge with no room for an intake blocks Save, in plain language`, blocks.some((i) => i.code === 'mouth-no-room' && i.handle === 'intake:front' && /needs/.test(i.text)), JSON.stringify(blocks));
+    check(`imported mechanisms: ${g} — no check text uses an ASCII apostrophe (docs/area/ui.md)`, [...validateImportedMech(sp, g), ...validateImportedMech(sn, g)].every((i) => !i.text.includes("'")));
+  }
+  // DECODE reads the front only; BIOBUZZ's double turret needs its heads apart
+  const sd = coerceSpec({ ...DEFAULT_SPEC, imported: { ...tall, mech: { intakes: [{ edge: 'left', from: -4, to: 4 }] } } }, DEFAULT_SPEC, 'decode');
+  check('imported mechanisms: DECODE — a span on any edge but the front is reported as unused', validateImportedMech(sd, 'decode').some((i) => i.code === 'mouth-ignored' && i.handle === 'intake:left'));
+  const twin = coerceSpec({ ...BB_DEFAULT_SPEC, bbMech: { launcher: { kind: 'twinturret', mount: 'frontleft', mount2: 'backright', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } }, imported: { ...tall, mech: { shooter: { x: 0, y: 0, z: 10 }, shooter2: { x: 2, y: 2, z: 10 } } } }, BB_DEFAULT_SPEC, 'biobuzz');
+  check('imported mechanisms: BIOBUZZ — two turret heads closer than 6 in block Save', validateImportedMech(twin, 'biobuzz').some((i) => i.code === 'twin-too-close' && i.level === 'block'));
+  check('imported mechanisms: BIOBUZZ — a double turret offers both heads', mechHandles('biobuzz', twin).filter((h) => h.key === 'shooter' || h.key === 'shooter2').length === 2);
+  check('imported mechanisms: a STANDARD spec has nothing to place and nothing to check', mechHandles('decode', DEFAULT_SPEC).length === 0 && validateImportedMech(DEFAULT_SPEC, 'decode').length === 0 && isDeepStrictEqual(defaultImportedMech('decode', DEFAULT_SPEC), {}));
+}
+
+/** two runs of an import scene, every game, end on one hash (determinism) */
+{
+  await initPhysics3d();
+  const imp: ImportedRobot = { ...L2_OCT, bands: [{ z0: 0, z1: 6, hull: L2_OCT.hull }, { z0: 6, z1: 14, hull: [{ x: -4, y: -4 }, { x: 4, y: -4 }, { x: 4, y: 4 }, { x: -4, y: 4 }] }], mech: { intakes: [{ edge: 'front', from: -6, to: 3 }], shooter: { x: -3, y: 1, z: 12 } } };
+  for (const g of ['decode', 'chain', 'biobuzz', 'bb3d'] as const) {
+    const key = g === 'bb3d' ? 'biobuzz' : g;
+    const patches = L2_MECH_SPECS[key].map((s) => ({ ...s, imported: imp }) as Partial<RobotSpec>);
+    const once = () => {
+      const mod = simModuleFor(key);
+      const w = mod.createWorld('match', 99, patches.map((s, i) => ({ id: i, alliance: i % 2 === 0 ? 'blue' : 'red', spec: { ...DEFAULT_SPEC, ...s } as RobotSpec, assists: L2_ASSISTS, startIndex: Math.floor(i / 2) })), undefined, g === 'biobuzz' ? '2d' : g === 'bb3d' ? '3d' : undefined);
+      w.match.phase = 'teleop';
+      w.match.phaseTimeLeft = 90;
+      let held = 0;
+      for (let t = 0; t < 300; t++) {
+        const cmds = new Map<number, RobotCommand>();
+        for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, l2MechCmd(w, i, t));
+        mod.step(w, SIM_DT, cmds);
+        for (const r of w.robots) held += r.hopper.length;
+      }
+      const finite = w.robots.every((r) => Number.isFinite(r.pos.x) && Number.isFinite(r.pos.y)) && w.balls.every((b) => Number.isFinite(b.pos.x) && Number.isFinite(b.z));
+      return { h: `${worldHash(w)}:${impFnv(JSON.stringify(w))}`, held, finite };
+    };
+    const a = once();
+    const b = once();
+    check(`imported mechanisms: four imports with placed mechanisms play deterministically — ${g} (two runs, one hash; nothing non-finite; something was intaken)`, a.h === b.h && a.finite && a.held > 0, `${a.h} / ${b.h}, held ${a.held}`);
+  }
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

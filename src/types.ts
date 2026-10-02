@@ -317,14 +317,25 @@ export interface ImportedBand {
 /** An edge of the hull's bounding box, as a robot-local direction. */
 export type ImportedEdge = 'front' | 'back' | 'left' | 'right';
 
-/** Mechanism placements on an imported robot, robot-local inches. */
+/**
+ * Mechanism placements on an imported robot, robot-local inches. POSITIONS only: WHICH edge an
+ * intake rides and which way a placer reaches stay the game's own mount fields (`intakeMount`,
+ * `shooterMount`, `bbMech.lift.mount`, `catalystMount`), and a span on an edge the mount does not
+ * use is ignored. Every point is inside the hull and every `z` in `[0, heightIn]`
+ * (`coerceImported`); each game clamps further when it READS (`src/sim/importedMech.ts`).
+ */
 export interface ImportedMech {
-  /** launcher pivot (turret axis or shooter centre); `z` is the release height. */
+  /** the launcher: a turret's AXIS, or a turretless launcher's release LIP centre. `z` is the
+   *  release height (a turret's at rest pitch). */
   shooter?: { x: number; y: number; z: number };
+  /** BIOBUZZ double turret: the second (NECTAR) head, as `shooter`. */
+  shooter2?: { x: number; y: number; z: number };
   /** intake mouths: which bounding-box edge, and the span along it (lateral coordinate for
-   *  front/back, longitudinal for left/right), `from < to`. */
+   *  front/back, longitudinal for left/right), `from < to`. At most one per edge, ordered
+   *  front, back, left, right. */
   intakes?: { edge: ImportedEdge; from: number; to: number }[];
-  /** placement point (BIOBUZZ Box Tube, Chain Reaction catalyst); `z` is its height. */
+  /** the BASE of the placer (BIOBUZZ Box Tube, Chain Reaction catalyst): it reaches out of the
+   *  hull from here along its mount's direction. `z` is for drawing only. */
   place?: { x: number; y: number; z: number };
 }
 
