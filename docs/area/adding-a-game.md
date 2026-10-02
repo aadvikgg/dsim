@@ -1,4 +1,4 @@
-<!-- governs: src/games/types.ts, src/games/index.ts, src/games/sim.ts, src/games/module.ts, src/seasons.ts, src/seasonVisibility.ts -->
+<!-- governs: src/games/types.ts, src/games/index.ts, src/games/sim.ts, src/games/module.ts, src/games/importChecks.ts, src/seasons.ts, src/seasonVisibility.ts -->
 # Adding a game
 
 FOUR registrations, and all four are silent when missed.
@@ -59,6 +59,13 @@ the game's own HUD slice, opaque (`unknown`) because only its own components rea
 is SOLID to a ground element". Absent ⇒ the shared `robotSolids`, i.e. DECODE's front funnel;
 BIOBUZZ fills it because its sweeper is a roller bar on whichever edge `intakeMount` names, and
 DECODE/CR leave it empty so `src/sim/world.ts` is untouched.
+
+`GameSimModule.importMech` (`ImportMechSlot`) is what the imported-robot placement editor asks a
+game: `handles` (the spans and points the player may drag), `defaults` (the pre-fill, coerced) and
+`issues` (plain-language checks, `block` stops Save). The editor calls them through
+`validateImportedMech` / `defaultImportedMech` / `mechHandles` in `src/games/sim.ts`; the
+game-neutral mouth/height checks and pre-fill helpers are `src/games/importChecks.ts`. Absent ⇒
+nothing to place and every check passes.
 
 `GameUiSpec` (`ui`) is an earlier attempt at the same idea and has never had a reader.
 It is left alone deliberately; do not build on it.

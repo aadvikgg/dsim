@@ -289,9 +289,37 @@ Contract: `docs/robot-import-plan.md` §3.1 and §4.
 - The wall square-up's flush is the hull edge facing the surface (`importedFlushRel`), not
   `mod π/2`. Contacts, SAT, start legality and every zone/contact foul read hull vertices and
   edge normals (`polySatGap`, `polyGap`, `polysOverlap`, `polyFeature`).
-- Artifact solids are the CLOSED hull (`importedSolids`, BIOBUZZ's slot too) until the mechanism
-  lane carves the mouth. BIOBUZZ 2D has no pin round, so a POLLEN pressed into a wall is
-  squeezed into any chassis; smoke pins that an import does exactly what a standard chassis does.
+- BIOBUZZ 2D has no pin round, so a POLLEN pressed into a wall is squeezed into any chassis;
+  smoke pins that an import does exactly what a standard chassis does.
+
+### Imported robots: mechanisms (`src/sim/importedMech.ts`, each game's `importMech.ts`)
+
+- **`imported.mech` holds POSITIONS; the game's mount fields still say WHICH edge or direction**
+  (`intakeMount`, a turretless `shooterMount`, `bbMech.lift.mount`, `catalystMount`). A span on an
+  edge the mount does not use is ignored; DECODE reads `front` only. `coerceImported`'s mech rule
+  is game-blind (points moved inside the hull, z in `[0, heightIn]`, one span per edge in a fixed
+  order); each game's ranges are applied where it READS them, never written back.
+- **Import geometry reads `imported.hull`, never `spec.length/width`** (the clamped fallback), and
+  never assumes the hull's box is centred on the origin.
+- **A mouth is resolved, not stored** (`resolveImportMouth`): the roller line is where the hull ends
+  inside the span (less archetype hardware that stands past it inside the CAD — BIOBUZZ side
+  rollers), the face is the PRESET's reach behind it (the nip, lid, held slots and flower windows
+  are calibrated on that reach), the span is fitted to the hull's chord on the face line. EXACTLY
+  TWO PASSES, NO TOLERANCE. A mouth carries a lateral centre `vc` (BIOBUZZ `mouthAxes().vc`, DECODE
+  `yc`) that is exactly 0 for every standard mouth; every `v` read off mouth axes subtracts it.
+- **The artifact solids are the hull CARVED by the mouth** (`carveImportPlates`; DECODE funnels:
+  `decodeImportSolids`, the standard wedge quad clipped by the hull grown by the lip). Pieces under
+  0.05 in² are dropped BEFORE either solve or the pin test sees them. An import shaped like the
+  standard footprint carves exactly the standard solids, and smoke pins that for every DECODE
+  preset and the BIOBUZZ/Chain end mounts.
+- DECODE: a launch height under `4R + 0.5` is raised to it (`DECODE_IMPORT_LAUNCH_MIN`): flight
+  artifacts under `4R` run through the robot contact pass, so a lower shot would be pushed out of
+  its own hull on the release tick.
+- Placers (`importPlacePoint`) reach from their base along the mount direction to where the hull
+  ends, then the game's reach: "flush on the foot = dead centre" survives because the hull's edge
+  is what meets the field.
+- `IMP_STANDARD_PINS`' mechanism twin is `L2_MECH_PINS`: an intake/fire/place run per game (BIOBUZZ
+  2D and 3D), recorded before the mechanism branches existed.
 
 ## Robot spec, builder, and drive feel
 

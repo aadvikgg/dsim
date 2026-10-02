@@ -2030,6 +2030,32 @@ pinned the chassis half an inch over the ceiling. The game's own floor is capped
 own ceiling now. It only ever reached a spec carried over from another game, because the BIOBUZZ
 builder has no intake-STYLE picker.
 
+**IMPORTED ROBOTS** (`importMech.ts`, `importChecks.ts`, `sim3d/bodies.ts` `import3dShapes`; the
+shared rules are `docs/area/physics.md` "Imported robots: mechanisms", the lane is `IMPORT` in
+`scripts/smoke-biobuzz/imported.ts`). The archetype controls stay the builder's; the CAD gives the
+positions.
+- **Mouths** (`bbMouths` → `bbImportMouthRects`): the rect on each mounted edge carries its own
+  `face`, and `mouthAxes` returns a lateral centre `vc` (0 for every standard mouth). EVERY site
+  that builds a point from mouth axes adds `vc` and every `v` read off them subtracts it —
+  `bbIntakeAct`, the flower gate, the ramp swing corners, the reach shapes, the tutorial, the AI.
+  A `siderollers` roller line sits `BB_SIDE_ROLLER_PROTRUDE` behind where the hull ends: the CAD's
+  front is the wheel's outer face, so the 3D wheels land on the hull's own face.
+- **Launchers**: a turret is the placed `shooter` (`shooter2` for a double turret's NECTAR head);
+  its flywheel axle is the placed height less the head's path radius, so the rest-pitch release is
+  exactly the placed `z` (`bbImportTurretAxleZ`, read clamped to 7.5–18). A dumper's line is
+  centred on the placed lip at the placed height (`bbDumpZ`, 6–18) with no clearance push; the
+  Box Tube reaches `BB_PLACE_REACH` out of the hull from its placed base (`importPlacePoint`, the
+  same call in `bbLiftPlaceLocal`).
+- **Height**: `heightIn` is `imported.heightIn` rounded UP onto the 12–18 dial, with no stow height
+  (the CAD is the starting configuration, already inside R102's cube).
+- **3D is the CAD bands** (`import3dShapes`): per band, below `BB3_MOUTH_SLOT_Z` the 2D carve
+  (chassis + plates) with a `GROUP_POCKET` filler per mouth, above it the whole band; no
+  `bbMechEnvelopes` shape (the bands hold the turret). Prisms are `convexHull`s with the chassis
+  boxes' edge break (eroded by `r`, contact skin `r`). A `ConvexPolyhedron` is NARROW to
+  `groundRoll3d`, so a POLLEN that lands on an import's top rolls off. The FULL predictor gives the
+  LOCAL import the authority's compound and a REMOTE one the uncarved bands; the PERF lane holds a
+  heavy import (16-vertex hull, three bands, side sweepers) to the standard budgets.
+
 **THE CHASSIS GOES TO 18 × 18** (owner, 2026-09-24: "why is max width/length 17 not 18?").
 `BB_MAX_LENGTH`/`BB_MAX_WIDTH` are `ROBOT_MAX_SIZE` (R102's cube); the 17 was a "working inch"
 no rule asks for. And length was never reaching even that: `src/sim/spawn.ts` sized a BIOBUZZ
