@@ -41,6 +41,10 @@ export interface ImportMechHandle {
   z?: number;
   zMin?: number;
   zMax?: number;
+  /** a TURRETLESS launcher's point also carries a FACING (`mech.shooterYawDeg`, degrees CCW from
+   *  robot forward): the direction the sim fires along now. The editor gives it a direction
+   *  handle beside the point. */
+  facingDeg?: number;
 }
 
 /** one plain-language check on a placement. `block` stops Save; `warn` is shown beside it. */

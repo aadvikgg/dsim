@@ -27,7 +27,7 @@ export interface MapHandle {
   x: number;
   y: number;
   z?: number;
-  shape: 'wheel' | 'point' | 'end' | 'mid';
+  shape: 'wheel' | 'point' | 'end' | 'mid' | 'aim';
   /** constrain moves to one model axis (a span end slides along its edge) */
   axis?: 'x' | 'y';
   bad?: boolean;

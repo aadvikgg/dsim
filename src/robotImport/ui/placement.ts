@@ -26,6 +26,9 @@ export interface MechHandleDef {
   /** points: the release heights the sim accepts */
   zMin?: number;
   zMax?: number;
+  /** a turretless launcher's point also has a FACING (`mech.shooterYawDeg`): the direction it
+   *  fires now, degrees CCW from forward */
+  facingDeg?: number;
 }
 
 /** a plain-language check on a placement */
@@ -50,6 +53,7 @@ export function mechHandlesFor(game: GameId, spec: RobotSpec): MechHandleDef[] {
     edge: h.edge,
     zMin: h.zMin,
     zMax: h.zMax,
+    facingDeg: h.facingDeg,
   }));
 }
 
@@ -58,6 +62,8 @@ export function mechRobotToModel(mech: ImportedMech, origin: Vec2): ImportedMech
   const out: ImportedMech = {};
   const pt = (p: { x: number; y: number; z: number }) => ({ x: p.x + origin.x, y: p.y + origin.y, z: p.z });
   if (mech.shooter) out.shooter = pt(mech.shooter);
+  // a direction, so a shift of origin leaves it as it is
+  if (mech.shooterYawDeg !== undefined) out.shooterYawDeg = mech.shooterYawDeg;
   if (mech.shooter2) out.shooter2 = pt(mech.shooter2);
   if (mech.place) out.place = pt(mech.place);
   if (mech.intakes) {
@@ -87,6 +93,11 @@ export function defaultMechFor(game: GameId, spec: RobotSpec, origin: Vec2, have
     } else if (def.field !== 'intake') {
       const p = have?.[def.field] ?? d[def.field];
       if (p) out[def.field] = p;
+      // the FACING rides with its point: the player's if they turned it, else the game's
+      if (def.field === 'shooter' && def.facingDeg !== undefined && p) {
+        const yaw = have?.shooterYawDeg ?? d.shooterYawDeg ?? def.facingDeg;
+        out.shooterYawDeg = yaw;
+      }
     }
   }
   if (intakes.length) out.intakes = intakes;

@@ -233,6 +233,13 @@ export function bbScoreModeMirror(kind: BbScoreMode): NonNullable<RobotSpec['sco
   return kind === 'fixed' ? 'dumper' : kind;
 }
 
+/** does this launcher stand a FLYWHEEL HEAD on the deck — a turret (its head turns on a ring) or a
+ * FIXED launcher (the same head, bolted)? What the deck dressing, the held-element layout and the
+ * front marks keep clear of. */
+export function bbHasHead(launcher: BbLauncherSpec): boolean {
+  return isTurreted(launcher.kind) || launcher.kind === 'fixed';
+}
+
 /** is this a FIXED launcher — one flywheel head bolted to an edge, aimed by turning the robot? */
 export function bbIsFixed(launcher: BbLauncherSpec): boolean {
   return launcher.kind === 'fixed';

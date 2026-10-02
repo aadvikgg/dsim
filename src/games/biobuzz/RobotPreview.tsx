@@ -20,6 +20,7 @@ import { BB_MODE_LABELS } from './labels';
 import { BB_PLACE_MARK_R, bbBoxTubeGlyph } from './parts';
 import { EDGE_ANGLE, EDGE_DIR, EDGE_PERP, type BbMountPos, bbMouthFrame, bbShooterEdgeOf, edgeGeom, turretLocal, turretRadius } from './mounts';
 import { dumperFrame } from './drawRobot';
+import { bbFixedFacing, bbFixedLocal } from './robot';
 import { bbFootprint, bbMouths, bbPlacePointLocal } from './robot';
 
 /** dimension-label type size, in the viewBox's inch units */
@@ -262,7 +263,7 @@ export function BiobuzzRobotPreview({
    * inner rim, the same SHAPE cue the in-match sprite gives it (the preview has no alliance, so the
    * accent token stands in for the alliance colour there).
    */
-  const turretEl = (pos: BbMountPos, nectar: boolean) => {
+  const turretEl = (pos: BbMountPos, nectar: boolean, fixedFaceDeg?: number) => {
     const t = turretLocal(spec, pos); // the SAME point the sim launches from
     const gap = BB_LAUNCH_PLATE_GAP;
     const plate = 0.42;
@@ -270,8 +271,16 @@ export function BiobuzzRobotPreview({
     const y0 = tR + BB_LAUNCH_PLATE_OVERHANG; // plate rear
     const y1 = -y0; // ...and the muzzle end
     const wheelY = -tR * 0.6; // the flywheel: past the feed hole, before the muzzle
+    // A FIXED shooter: the same head on a square riser, turned to face out of its edge. A robot-
+    // frame CCW angle is a NEGATIVE svg rotation once ROBOT_FRAME has put the front up.
+    const fixed = fixedFaceDeg !== undefined;
+    const side = Math.max(1.2, tR * 1.3);
     return (
-      <g key={`t-${pos}`} transform={`translate(${-t.y},${-t.x})`}>
+      <g key={`t-${pos}`} transform={`translate(${-t.y},${-t.x})${fixed ? ` rotate(${-fixedFaceDeg})` : ''}`}>
+        {fixed ? (
+          <rect x={-side / 2} y={-side / 2} width={side} height={side} fill={COLORS.mat} stroke={stroke} strokeWidth={0.35} />
+        ) : (
+        <>
         {/* the SLEW RING it turns on, toothed like the sprite's */}
         <circle
           cx={0}
@@ -299,6 +308,8 @@ export function BiobuzzRobotPreview({
         {nectar ? <circle cx={0} cy={0} r={tR - 0.75} fill="none" stroke={accent} strokeWidth={0.32} /> : null}
         {/* the FEED HOLE an element rises through, dead centre on the turret axis */}
         <circle cx={0} cy={0} r={BB_POLLEN_R + 0.15} fill={COLORS.mat} stroke={stroke} strokeWidth={0.2} />
+        </>
+        )}
         {/* THE SHOOTER HEAD: two parallel PLATES with a flywheel between them, no barrel */}
         {[1, -1].map((sg) => (
           <rect
@@ -363,6 +374,8 @@ export function BiobuzzRobotPreview({
         {turretEl(launcher.mount, false)}
         {turretEl(launcher.mount2 ?? launcher.mount, true)}
       </g>
+    ) : launcher.kind === 'fixed' ? (
+      turretEl(launcher.mount, false, (bbFixedFacing(spec) * 180) / Math.PI)
     ) : (
       turretEl(launcher.mount, false)
     );
@@ -572,7 +585,9 @@ function ImportedBiobuzzPreview({ spec, size, fluid, caption }: { spec: RobotSpe
   const r = turretRadius(spec);
   const turrets = bbIsTurreted(launcher)
     ? [launcher.mount, ...(launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount2] : [])].map((m) => ({ ...turretLocal(spec, m), r }))
-    : [];
+    : launcher.kind === 'fixed'
+      ? [(({ x, y }) => ({ x, y, r }))(bbFixedLocal(spec))] // the FIXED shooter's release
+      : [];
   // a dumper releases along a LINE (`dumperFrame`, the sim's `bbImportLaunchLine`)
   const lines = [];
   if (launcher.kind === 'dumper') {

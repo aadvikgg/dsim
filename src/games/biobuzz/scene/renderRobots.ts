@@ -95,7 +95,7 @@ import {
   bbHopperCap,
   type BbHeadDims,
 } from '../config';
-import { bbIntakeKindOf, bbIsTurreted, bbLauncherOf, bbLiftOf, type BbLauncherSpec } from '../mechs';
+import { bbHasHead, bbIntakeKindOf, bbIsTurreted, bbLauncherOf, bbLiftOf, type BbLauncherSpec } from '../mechs';
 import {
   BB_END_BAR_H,
   BB_FRONT_ARROW_T,
@@ -109,7 +109,7 @@ import {
   bbRailSegments,
   type BbKeepOut,
 } from '../parts';
-import { bbFlowerInReach, bbMouths, bbMuzzleLocal, bbPlacePointLocal } from '../robot';
+import { bbFixedFacing, bbFixedHood, bbFixedLocal, bbFlowerInReach, bbMouths, bbMuzzleLocal, bbPlacePointLocal } from '../robot';
 import { bbDumpZ, bbDumperFrame, bbImportTurretAxleZ } from '../importMech';
 import { bbSpecKey } from '../specKey';
 import {
@@ -3084,6 +3084,56 @@ export function buildTurret(spec: RobotSpec, mountPos: BbMountPos, which: 0 | 1 
 }
 
 /**
+ * A FIXED SHOOTER — the turret's own head with no slew ring under it, bolted at its edge cell
+ * (`turretLocal`, pulled inboard exactly as a turret there is), facing straight out of that edge
+ * (`bbFixedFacing`) at the build's hood angle (`bbFixedHood`). The SAME head on the same axle, so
+ * its drawn lip is the sim's release (`bbFixedLocal` reads `bbMuzzleLocal` at that pitch): one
+ * muzzle, two drawings, the turret's rule. Where the ring was, a square riser of the ring's height
+ * carries it, so the head stands where a turret's does. Nothing on it moves, so `sync` never
+ * poses it — it is not in `turretHeads` / `turretPitches`.
+ *
+ * `lip` (an IMPORT) puts the head so its muzzle lands on the placed lip at the placed height.
+ */
+export function buildFixedShooter(spec: RobotSpec, lip?: { x: number; y: number; z: number }): THREE.Group {
+  const group = new THREE.Group();
+  const H = bbHead(0);
+  const launcher = bbLauncherOf(spec, 0);
+  const face = bbFixedFacing(spec);
+  const hood = bbFixedHood(spec);
+  const muzzle = bbMuzzleLocal(hood, 0);
+  group.name = 'bb-fixed-shooter';
+  if (lip) {
+    // the axis sits `back` behind the lip along the facing; the whole head rides up or down so its
+    // lip is at the placed height, the placeholder turret's own bargain
+    group.position.set(lip.x + Math.cos(face) * muzzle.back, lip.y + Math.sin(face) * muzzle.back, BB_DECK_Z + (lip.z - muzzle.z));
+  } else {
+    const local = turretLocal(spec, launcher.mount);
+    group.position.set(local.x, local.y, BB_DECK_Z);
+  }
+  const ring = turretRadius(spec);
+  const side = Math.max(1.2, ring * 1.3);
+  const riserGeo = framePart(`fixedRiser:${side.toFixed(4)}`, () => [boxAt(side, side, BB_TURRET_RING_H, 0, 0, BB_TURRET_RING_H / 2)]);
+  const riser = new THREE.Mesh(riserGeo, solidMat(TURRET_RING, 0.4, 0.5));
+  riser.name = 'bb-fixed-riser';
+  riser.rotation.z = face;
+  group.add(cast(riser, 'dark'));
+  const head = new THREE.Group();
+  head.name = 'bb-fixed-head';
+  head.rotation.z = face;
+  const axle = new THREE.Group();
+  axle.name = 'bb-fixed-axle';
+  axle.position.set(H.axleX, 0, BB_TURRET_AXLE_Z - BB_DECK_Z);
+  addFixedShooter(head, axle, H, 0);
+  const pitch = buildHoodNode(H, 0);
+  pitch.name = 'bb-fixed-pitch';
+  pitch.rotation.y = -hood;
+  axle.add(pitch);
+  head.add(axle);
+  group.add(head);
+  return group;
+}
+
+/**
  * ⚠️ **HOW FAR THROUGH ITS THROW A CATAPULT'S ARM IS, AS A PURE FUNCTION OF SIM STATE.**
  *
  * 0 at rest, 1 at the top of the fling. `lastFireAt` is stamped on the tick the bucket leaves
@@ -3320,6 +3370,8 @@ export function buildRobotGroup(
     const d = buildDumper(spec, launcher);
     group.add(d);
     group.userData.dumpArm = d.userData.dumpArm;
+  } else if (launcher.kind === 'fixed') {
+    group.add(buildFixedShooter(spec));
   }
   // A BUILT ROBOT'S HOOD STARTS WHERE A SPAWNED ONE DOES — `BB_TURRET_PITCH_REST`, an elevation the
   // aim solve actually produces. The match's `sync` overwrites it on its first frame; the builder
@@ -3432,7 +3484,7 @@ function buildImportedRobot(spec: RobotSpec, imp: ImportedRobot, id: number, all
     group.userData.spinWheels = spin;
 
     // WHICH END IS THE FRONT — `bbFrontMarks`' language, on the hull
-    const rings = bbIsTurreted(launcher)
+    const rings = bbHasHead(launcher)
       ? [launcher.mount, ...(launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount2] : [])].map((m) => ({ ...turretLocal(spec, m), r: turretRadius(spec) }))
       : [];
     const marks = importedFrontMarkGeometries(imp.hull, deckZ, Math.min(BB_END_BAR_H, 0.9), BB_FRONT_ARROW_T, rings);
@@ -3472,6 +3524,9 @@ function buildImportedRobot(spec: RobotSpec, imp: ImportedRobot, id: number, all
       const d = buildDumper(spec, launcher, { ...bbDumperFrame(spec, edge), z: bbDumpZ(spec) });
       group.add(d);
       group.userData.dumpArm = d.userData.dumpArm;
+    } else if (launcher.kind === 'fixed') {
+      // the FIXED shooter with its muzzle on the sim's release (`bbFixedLocal`: the placed lip)
+      group.add(buildFixedShooter(spec, bbFixedLocal(spec)));
     }
     for (const p of pitches) p.rotation.y = -BB_TURRET_PITCH_REST;
     if (lift) {
