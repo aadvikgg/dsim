@@ -401,6 +401,19 @@ import { ELEMENT_RADIUS_TOL_IN } from '../../src/games/biobuzz/scene/renderEleme
 import { FINISHES, ROBOT_FAMILY_FINISH, VENUE_FLOOR_FINISH, finishF0, type DetailKind, type FinishId } from '../../src/games/biobuzz/graphics/finishes';
 import { detailData, detailTexture } from '../../src/games/biobuzz/scene/renderSurfaceKit';
 import { probeBoxFor, probeGains } from '../../src/games/biobuzz/scene/renderSurfaceProbe';
+// -- IMPORTED ROBOTS (robot import, rendering lane), in their own import block ----------------
+import { buildBiobuzzRobots, updateBiobuzzRobots } from '../../src/games/biobuzz/scene/renderRobots';
+import {
+  IMPORTED_MESH_TEMPLATE_CAP,
+  importedMeshKey,
+  importedMeshSlots,
+  installImportedMeshForTests,
+  onImportedMeshChange,
+} from '../../src/games/biobuzz/scene/renderImported';
+import { IMPORTED_MESH_TO_ROBOT, registerImportedAssets } from '../../src/render/importedAssets';
+import { coerceImported, importedWheels, polyBounds, polyPointDepth } from '../../src/sim/imported';
+import { coerceSpec } from '../../src/sim/spawn';
+import { buildBoxesGlb, IMPORT_FIXTURE_BOXES, IMPORT_FIXTURE_HEIGHT, IMPORT_FIXTURE_HULL } from './fixtures/importGlb';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIOBUZZ_DIR = join(root, 'src', 'games', 'biobuzz');
@@ -446,6 +459,42 @@ const WIND_FIX_LOW: THREE.Group | null = await parseShippedGlb('field-low.glb');
 /** and the SCORING ELEMENTS. `elements.glb` is a separate asset from a separate pipeline
  * (`scripts/field-cad/elements.mjs`) but the same pinned STEP, so it decodes the same way. */
 const ELEMENTS_GLB_SCENE: THREE.Group | null = await parseShippedGlb('elements.glb');
+
+/**
+ * AN IMPORTED ROBOT'S MESH, THROUGH THE REAL PATH — once, at module load, for the same reason the
+ * field is: the lane function is synchronous and the parse is not. A synthetic GLB
+ * (`fixtures/importGlb.ts`) is LENT to the asset seam the way the editor lends a draft, and
+ * `importedMeshKey` — the rebuild key's mesh half — is read at each step. `importedRobotChecks`
+ * asserts on what was seen.
+ */
+const IMPORT_PROBE_ID = '1a2b3c4d5e6f7a8b';
+async function importedMeshProbe(): Promise<{ keys: string[]; told: number; spec: RobotSpec }> {
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 20; i++) await new Promise<void>((r) => setTimeout(r, 0));
+  };
+  const spec = coerceSpec(
+    {
+      ...BB_DEFAULT_SPEC,
+      imported: { v: 1, id: IMPORT_PROBE_ID, hull: IMPORT_FIXTURE_HULL, heightIn: IMPORT_FIXTURE_HEIGHT },
+    },
+    BB_DEFAULT_SPEC,
+    'biobuzz',
+  );
+  let told = 0;
+  const off = onImportedMeshChange((id) => {
+    if (id === IMPORT_PROBE_ID) told++;
+  });
+  const keys: string[] = [importedMeshKey(spec)];
+  await settle();
+  keys.push(importedMeshKey(spec)); // nothing on this device: still the placeholder
+  registerImportedAssets(IMPORT_PROBE_ID, { mesh: new Blob([buildBoxesGlb(IMPORT_FIXTURE_BOXES)], { type: 'model/gltf-binary' }) });
+  keys.push(importedMeshKey(spec)); // a mesh lent: a NEW slot, loading
+  await settle();
+  keys.push(importedMeshKey(spec)); // parsed
+  off();
+  return { keys, told, spec };
+}
+const IMPORT_PROBE = await importedMeshProbe();
 
 function walkTs(dir: string): string[] {
   const out: string[] = [];
@@ -1721,6 +1770,194 @@ export function renderChecks(check: Check): void {
   hoodPlateChecks(check);
   freeCamChecks(check);
   driverEyeChecks(check);
+  importedRobotChecks(check);
+}
+
+/**
+ * IMPORTED ROBOTS IN 3D (`docs/robot-import-plan.md` §1; `scene/renderImported.ts`). Built by the
+ * ONE generator, keyed by the ONE key plus the device's mesh state, and freed without touching
+ * what a parsed mesh template shares. The asset seam's own cache rules are in the shared smoke.
+ */
+function importedRobotChecks(check: Check): void {
+  const hadDoc = 'document' in globalThis;
+  const stubCtx = new Proxy({}, { get: () => () => ({ addColorStop(): void {}, width: 10 }) });
+  if (!hadDoc) (globalThis as { document?: unknown }).document = { createElement: () => ({ width: 0, height: 0, getContext: () => stubCtx, style: {} }) };
+  try {
+    const desc = (id: string, extra: Record<string, unknown> = {}) =>
+      coerceImported({ v: 1, id, hull: IMPORT_FIXTURE_HULL, heightIn: IMPORT_FIXTURE_HEIGHT, ...extra })!;
+    const mk = (id: string, extra: Record<string, unknown> = {}, descExtra: Record<string, unknown> = {}): RobotSpec =>
+      coerceSpec({ ...BB_DEFAULT_SPEC, ...extra, imported: desc(id, descExtra) }, BB_DEFAULT_SPEC, 'biobuzz');
+    const turretTube = { bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'back' }, intake: { kind: 'sweeper' } } };
+    const meshesOf = (g: THREE.Object3D): THREE.Mesh[] => {
+      const out: THREE.Mesh[] = [];
+      g.traverse((o) => {
+        if ((o as THREE.Mesh).isMesh) out.push(o as THREE.Mesh);
+      });
+      return out;
+    };
+    const insideHull = (hull: { x: number; y: number }[], g: THREE.Object3D): number => {
+      // the WORST depth (most negative = furthest outside) over every vertex, robot frame
+      g.updateMatrixWorld(true);
+      let worst = Infinity;
+      const v = new THREE.Vector3();
+      for (const m of meshesOf(g)) {
+        const pos = m.geometry.getAttribute('position');
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+          worst = Math.min(worst, polyPointDepth(hull, { x: v.x, y: v.y }));
+        }
+      }
+      return worst;
+    };
+
+    // ── THE PLACEHOLDER (no mesh on this device) ──────────────────────────────────────────
+    const a = mk('a0a0a0a0a0a0a0a0', turretTube);
+    const imp = a.imported!;
+    check('imported 3D: the mesh half of the key is EMPTY for a standard robot', importedMeshKey(BB_DEFAULT_SPEC) === '');
+    check('imported 3D: an import without a mesh keys as the placeholder', importedMeshKey(a).endsWith(':hull'), importedMeshKey(a));
+    const g = buildRobotGroup(a, 1, 'red', 'high');
+    g.updateMatrixWorld(true);
+    const hullMesh = g.getObjectByName('robot:1:hull:0') as THREE.Mesh | undefined;
+    const tower = g.getObjectByName('robot:1:tower:0') as THREE.Mesh | undefined;
+    const hb = polyBounds(imp.hull);
+    const box = hullMesh ? new THREE.Box3().setFromObject(hullMesh) : null;
+    check('imported 3D placeholder: the hull prism spans the hull\'s box, solid from 0.5 in to the deck',
+      !!box && Math.abs(box.min.x - hb.minX) < 1e-6 && Math.abs(box.max.x - hb.maxX) < 1e-6 && Math.abs(box.min.y - hb.minY) < 1e-6 &&
+        Math.abs(box.max.y - hb.maxY) < 1e-6 && Math.abs(box.min.z - 0.5) < 1e-6 && Math.abs(box.max.z - BB_DECK_Z) < 1e-6,
+      box ? `${box.min.toArray()} → ${box.max.toArray()}` : 'missing');
+    const tb = tower ? new THREE.Box3().setFromObject(tower) : null;
+    check('imported 3D placeholder: ABOVE the deck it is an open tower to heightIn, not a brick',
+      !!tb && Math.abs(tb.max.z - imp.heightIn) < 1e-6 && Math.abs(tb.min.z - BB_DECK_Z) < 1e-6 && tower!.geometry.getAttribute('position').count < 2000,
+      tb ? `${tb.min.z} → ${tb.max.z}` : 'missing');
+    check('imported 3D placeholder: the prism and the tower never leave the hull',
+      !!hullMesh && !!tower && insideHull(imp.hull, hullMesh) > -1e-6 && insideHull(imp.hull, tower) > -1e-6);
+    const wheels = importedWheels(imp);
+    const wheelNodes = [0, 1, 2, 3].map((i) => g.getObjectByName(`robot:wheel:${i}`));
+    check('imported 3D placeholder: four wheels, at importedWheels (FL, FR, BL, BR)',
+      wheelNodes.every((w, i) => !!w && Math.hypot(w.position.x - wheels[i].x, w.position.y - wheels[i].y) < 1e-9));
+    const signs = ['left', 'right'].map((s) => g.getObjectByName(`robot:1:sign:${s}`));
+    check('imported 3D placeholder: both ROBOT SIGNS stand on the hull\'s flanks, just outside it (R401)',
+      signs.every((s) => !!s && polyPointDepth(imp.hull, { x: s.position.x, y: s.position.y }) < 0 && polyPointDepth(imp.hull, { x: s.position.x, y: s.position.y }) > -0.1) &&
+        signs[0]!.position.y > 0 && signs[1]!.position.y < 0);
+    check('imported 3D placeholder: the generator\'s own mechanisms are on it, with the standard sync handles',
+      (g.userData.turretHeads as unknown[]).length === 1 && (g.userData.intakeRollers as unknown[]).length > 0 && !!g.userData.tube && !g.getObjectByName('robot:1:mesh'));
+    check('imported 3D placeholder: the front bar and the deck arrow are there',
+      !!g.getObjectByName('robot:1:frontbar') && !!g.getObjectByName('robot:1:arrow'));
+    const untagged = meshesOf(g).filter((m) => !m.userData.bbFamily).map((m) => m.name || '(anon)');
+    check('imported 3D placeholder: every part carries a family tag (the physical twins apply to it)', untagged.length === 0, untagged.join(', '));
+    const glow = meshesOf(g).filter((m) => (Array.isArray(m.material) ? m.material : [m.material]).some((mt) => {
+      const e = (mt as THREE.MeshStandardMaterial).emissive;
+      return !!e && e.r + e.g + e.b > 0;
+    }));
+    check('imported 3D placeholder: no part glows', glow.length === 0, glow.map((m) => m.name).join(', '));
+    // BANDS: each band is its own prism to the deck, and its own open tower above it
+    const b = mk('b0b0b0b0b0b0b0b0', {}, {
+      heightIn: 16,
+      bands: [
+        { z0: 0, z1: 5, hull: IMPORT_FIXTURE_HULL },
+        { z0: 5, z1: 16, hull: [{ x: -7, y: -2 }, { x: -3, y: -2 }, { x: -3, y: 2 }, { x: -7, y: 2 }] },
+      ],
+    });
+    const gb = buildRobotGroup(b, 1, 'red', 'high');
+    const t1 = gb.getObjectByName('robot:1:tower:1') as THREE.Mesh | undefined;
+    const t1b = t1 ? new THREE.Box3().setFromObject(t1) : null;
+    check('imported 3D placeholder: a BAND above the deck is an open tower over that band\'s own hull, to its own top',
+      !!t1b && t1b.min.x >= -7 - 1e-6 && t1b.max.x <= -3 + 1e-6 && t1b.max.y <= 2 + 1e-6 && Math.abs(t1b.max.z - 16) < 1e-6 && Math.abs(t1b.min.z - 5) < 1e-6 &&
+        !!gb.getObjectByName('robot:1:hull:0'),
+      t1b ? `${t1b.min.toArray()} → ${t1b.max.toArray()}` : 'missing');
+    // THE KEY: the descriptor is in bbSpecKey; the mesh state is not
+    check('imported 3D: bbSpecKey moves when the hull moves inside the same bounding box (the descriptor is geometry)',
+      bbSpecKey(mk('c0c0c0c0c0c0c0c0')) !== bbSpecKey(mk('c0c0c0c0c0c0c0c0', {}, { wheels: [{ x: 4, y: 5 }, { x: 4, y: -5 }, { x: -5, y: 5 }, { x: -5, y: -5 }] })));
+    check('imported 3D: bbSpecKey does NOT carry the device\'s mesh state', !bbSpecKey(a).includes(':hull') && !bbSpecKey(a).includes(':mesh'));
+
+    // ── THE MESH (the async probe at module load drove the real GLTFLoader path) ─────────────
+    const keys = IMPORT_PROBE.keys;
+    check('imported 3D mesh: the key reads placeholder until a mesh is lent, then MESH once the parse lands — and the preview was told',
+      keys[0].endsWith(':hull') && keys[1].endsWith(':hull') && keys[2].endsWith(':hull') && keys[3].endsWith(':mesh') && keys[1] !== keys[2] && IMPORT_PROBE.told >= 1,
+      keys.join(' · '));
+    const probeSpec = { ...IMPORT_PROBE.spec, ...turretTube } as RobotSpec;
+    const pspec = coerceSpec(probeSpec, BB_DEFAULT_SPEC, 'biobuzz');
+    const gm = buildRobotGroup(pspec, 1, 'blue', 'high');
+    gm.updateMatrixWorld(true);
+    const meshNode = gm.getObjectByName('robot:1:mesh');
+    check('imported 3D mesh: the group wears the MESH and none of the placeholder (no prism, tower, wheels, intake, tube)',
+      !!meshNode && !gm.getObjectByName('robot:1:hull:0') && !gm.getObjectByName('robot:1:tower:0') && !gm.getObjectByName('robot:wheel:0') &&
+        !gm.userData.intakeRollers && !gm.userData.tube);
+    check('imported 3D mesh: its root carries the stored-frame matrix (glTF metres → robot inches)',
+      !!meshNode && meshNode.matrix.toArray().every((v, i) => Math.abs(v - IMPORTED_MESH_TO_ROBOT[i]) < 1e-12) && meshNode.matrixAutoUpdate === false);
+    const mb = meshNode ? new THREE.Box3().setFromObject(meshNode) : null;
+    check('imported 3D mesh: the fixture lands where it was modelled (robot inches, +x front, +z up)',
+      !!mb && Math.abs(mb.min.x + 7.8) < 1e-4 && Math.abs(mb.max.x - 9.8) < 1e-4 && Math.abs(mb.min.y + 7.8) < 1e-4 && Math.abs(mb.max.y - 7.8) < 1e-4 &&
+        Math.abs(mb.min.z) < 1e-4 && Math.abs(mb.max.z - 14) < 1e-4,
+      mb ? `${mb.min.toArray().map((v) => v.toFixed(3))} → ${mb.max.toArray().map((v) => v.toFixed(3))}` : 'missing');
+    const meshParts = meshNode ? meshesOf(meshNode) : [];
+    const led = meshParts.find((m) => m.name === 'led' || m.parent?.name === 'led');
+    const ledMat = led ? (led.material as THREE.MeshStandardMaterial) : null;
+    check('imported 3D mesh: a part the file asked to GLOW is drawn dark (robot parts never glow)', !!ledMat && ledMat.emissive.r + ledMat.emissive.g + ledMat.emissive.b === 0);
+    check('imported 3D mesh: its meshes carry NO family tag, so the physical-materials swap leaves them alone',
+      meshParts.length >= IMPORT_FIXTURE_BOXES.length && meshParts.every((m) => !m.userData.bbFamily));
+    check('imported 3D mesh: a turret it cannot aim gets the AIM SIGHT on the standard sync handles, plus both signs',
+      (gm.userData.turretHeads as THREE.Object3D[]).length === 1 && (gm.userData.turretHeads as THREE.Object3D[])[0].name === 'bb-turret-head' &&
+        (gm.userData.turretPitches as THREE.Object3D[]).length === 1 && !!gm.getObjectByName('robot:1:sign:left') && !!gm.getObjectByName('robot:1:sign:right'));
+    // DISPOSAL: the per-robot parts go, the template's shared resources do not
+    const templateGeo = meshParts[0]?.geometry;
+    let templateFreed = false;
+    templateGeo?.addEventListener('dispose', () => (templateFreed = true));
+    const signMat = (gm.getObjectByName('robot:1:sign:left') as THREE.Mesh | undefined)?.material as THREE.Material | undefined;
+    let signFreed = false;
+    signMat?.addEventListener('dispose', () => (signFreed = true));
+    const users = (): number => importedMeshSlots().filter(([k, s]) => k.startsWith(IMPORT_PROBE_ID) && s === 'ready').reduce((n, [, , u]) => n + u, 0);
+    const before = users();
+    disposeRobotGroup(gm);
+    const after = users();
+    disposeRobotGroup(gm);
+    check('imported 3D mesh: disposing the group frees its own parts, NOT the template it cloned, and hands the reference back (idempotent)',
+      !!templateGeo && !templateFreed && signFreed && before === after + 1 && users() === after && after >= 0, `users ${before} → ${after} → ${users()}`);
+    // the placeholder's own prism IS the robot's, and goes with it
+    let prismFreed = false;
+    hullMesh?.geometry.addEventListener('dispose', () => (prismFreed = true));
+    disposeRobotGroup(g);
+    check('imported 3D placeholder: disposing it frees its own prism', prismFreed);
+
+    // ── THE MATCH: `sync` swaps the placeholder for the mesh on the frame after it lands ──────
+    const c = mk('d0d0d0d0d0d0d0d0', turretTube);
+    const world = createBiobuzzWorld('free', 5, [{ id: 0, alliance: 'red', spec: c, assists: {} as never, startIndex: 0 }]);
+    const robots = buildBiobuzzRobots();
+    updateBiobuzzRobots(robots, world);
+    const first = robots.group.getObjectByName('robot:0');
+    const firstPrism = first?.getObjectByName('robot:0:hull:0') as THREE.Mesh | undefined;
+    let swappedOut = false;
+    firstPrism?.geometry.addEventListener('dispose', () => (swappedOut = true));
+    updateBiobuzzRobots(robots, world);
+    const steady = robots.group.getObjectByName('robot:0') === first;
+    installImportedMeshForTests(world.robots[0].spec, new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.1, 0.3), new THREE.MeshStandardMaterial()));
+    updateBiobuzzRobots(robots, world);
+    const second = robots.group.getObjectByName('robot:0');
+    check('imported 3D match: sync builds the placeholder, keeps it while nothing changes, and swaps to the mesh the frame after it lands (freeing the old group)',
+      !!firstPrism && steady && !!second && second !== first && !!second.getObjectByName('robot:0:mesh') && swappedOut);
+    robots.dispose();
+    // THE TEMPLATE CAP: unworn templates past the cap are freed, least recently used first
+    const freed: boolean[] = [];
+    for (let i = 0; i < IMPORTED_MESH_TEMPLATE_CAP + 3; i++) {
+      const geo = new THREE.BoxGeometry(1, 1, 1);
+      const k = freed.length;
+      freed.push(false);
+      geo.addEventListener('dispose', () => (freed[k] = true));
+      installImportedMeshForTests(mk(`e0e0e0e0e0e0e0${String(10 + i)}`), new THREE.Mesh(geo, new THREE.MeshStandardMaterial()));
+      importedMeshKey(mk(`e0e0e0e0e0e0e0${String(10 + i)}`));
+    }
+    importedMeshKey(mk('e0e0e0e0e0e0e0ff')); // one more slot: the cap is enforced when a slot is made
+    check(`imported 3D: at most ${IMPORTED_MESH_TEMPLATE_CAP} unworn templates stay resident, and the evicted ones are freed`,
+      importedMeshSlots().length <= IMPORTED_MESH_TEMPLATE_CAP + 1 && freed[0] && !freed[freed.length - 1],
+      `${importedMeshSlots().length} slots, freed ${freed.map((f) => (f ? 1 : 0)).join('')}`);
+
+    // ── THE PREVIEW keys and re-keys the same way (source checks: it has no DOM here) ────────
+    const previewSrc = readFileSync(join(SCENE_DIR, 'renderPreview.ts'), 'utf8');
+    check('imported 3D preview: setSpec keys on bbSpecKey + alliance + the mesh state, and re-keys itself when a mesh lands',
+      previewSrc.includes('${bbSpecKey(next)}|${nextAlliance}|${importedMeshKey(next)}') && /onImportedMeshChange\(/.test(previewSrc));
+  } finally {
+    if (!hadDoc) delete (globalThis as { document?: unknown }).document;
+  }
 }
 
 /**

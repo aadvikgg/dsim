@@ -28,6 +28,7 @@ import {
 } from './renderCore';
 import { createEnvironment, type BbEnvironment } from './renderEnvironment';
 import { bbWheelDetail, buildRobotGroup, disposeRobotGroup, type BbWheelDetail } from './renderRobots';
+import { importedMeshKey, onImportedMeshChange } from './renderImported';
 
 /**
  * THE ROBOT-BUILDER TURNTABLE (`docs/roadmap.md` item 1) — a small 3D scene that shows ONE robot,
@@ -503,17 +504,20 @@ export const createRobotPreviewScene: RobotPreviewFactory = (host, options) => {
   function buildHeightEnvelope(spec: RobotSpec): THREE.LineSegments {
     const hl = spec.length / 2;
     const hw = spec.width / 2;
-    const h = bbDeployedHeightIn(spec);
-    const corners: [number, number][] = [
-      [hl, hw],
-      [hl, -hw],
-      [-hl, -hw],
-      [-hl, hw],
-    ];
+    // an IMPORT's envelope is its hull, up to its measured top
+    const h = spec.imported ? spec.imported.heightIn : bbDeployedHeightIn(spec);
+    const corners: [number, number][] = spec.imported
+      ? spec.imported.hull.map((p): [number, number] => [p.x, p.y])
+      : [
+          [hl, hw],
+          [hl, -hw],
+          [-hl, -hw],
+          [-hl, hw],
+        ];
     const pts: number[] = [];
     corners.forEach(([x, y], i) => {
       pts.push(x, y, 0, x, y, h); // the upright
-      const [nx, ny] = corners[(i + 1) % 4];
+      const [nx, ny] = corners[(i + 1) % corners.length];
       pts.push(x, y, h, nx, ny, h); // the top rail
     });
     const geo = new THREE.BufferGeometry();
@@ -691,6 +695,18 @@ export const createRobotPreviewScene: RobotPreviewFactory = (host, options) => {
     );
   }
 
+  // AN IMPORT'S MESH LANDS BETWEEN TWO REACT RENDERS: `setSpec` is only called when React hands a
+  // spec, so the scene re-keys itself when the parse settles and swaps the placeholder for it
+  teardown.push(
+    onImportedMeshChange(() => {
+      if (disposed || !builtSpec?.imported) return;
+      const k = `${bbSpecKey(builtSpec)}|${alliance}|${importedMeshKey(builtSpec)}`;
+      if (k === key) return;
+      key = k;
+      rebuild(builtSpec);
+    }),
+  );
+
   applyQuality();
   if (opts.animate !== false) {
     if (typeof IntersectionObserver === 'function') {
@@ -720,7 +736,9 @@ export const createRobotPreviewScene: RobotPreviewFactory = (host, options) => {
     element: canvas,
     setSpec(next: RobotSpec, nextAlliance: Alliance): void {
       if (disposed) return;
-      const nextKey = `${bbSpecKey(next)}|${nextAlliance}`;
+      // an IMPORT adds its mesh state, so the placeholder swaps for the mesh when it lands — the
+      // match's `sync` keys the same way
+      const nextKey = `${bbSpecKey(next)}|${nextAlliance}|${importedMeshKey(next)}`;
       // the FIT is arithmetic over three numbers and depends only on the dimensions, so it is
       // re-run unconditionally; the GROUP is the expensive half and only a key change earns one
       fit(next);
