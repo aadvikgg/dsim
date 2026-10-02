@@ -1,5 +1,5 @@
 import { STORED_MESH_TO_ROBOT, TOP_IMAGE_PX } from '../robotImport/types';
-import { robotToTopPixel, topImageFrame, topPixelToRobot, type TopImageFrame } from '../robotImport/geometry';
+import { robotToTopPixel, topImageFrame, topPixelToRobot, type TopImageFrame } from '../robotImport/topFrame';
 
 /**
  * IMPORTED ROBOT VISUALS — the one place a renderer asks for an imported robot's pictures

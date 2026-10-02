@@ -15,7 +15,6 @@ import type { ImportedBand, ImportedEdge, ImportedMech, ImportedRobot, Vec2 } fr
 import {
   INCHES_PER_UNIT,
   LENGTH_UNITS,
-  TOP_IMAGE_PX,
   UP_AXES,
   type ImportCheck,
   type ImportMeasurement,
@@ -1252,38 +1251,7 @@ export function buildDescriptor(input: { id: string; measurement: ImportMeasurem
   return out;
 }
 
-// ---- the top image's frame -------------------------------------------------------------
+// ---- the top image's frame: `./topFrame.ts` (a leaf, so the renderers read it without
+// pulling this module into the main chunk) ----------------------------------------------------
 
-export interface TopImageFrame {
-  /** robot-local point at the image centre, inches */
-  cx: number;
-  cy: number;
-  /** inches the square image spans */
-  sideIn: number;
-  inPerPx: number;
-  px: number;
-}
-
-/**
- * The top-down PNG's mapping, from the descriptor's hull alone (so a renderer recomputes it from
- * `spec.imported.hull` and nothing else). Centre = the hull's box centre; side = the larger box
- * side plus 0.5 in a side. Front = image up, robot left = image left.
- */
-export function topImageFrame(hull: readonly Vec2[], px = TOP_IMAGE_PX): TopImageFrame {
-  const b = bbox(hull);
-  const ok = Number.isFinite(b.minX);
-  const cx = ok ? (b.minX + b.maxX) / 2 : 0;
-  const cy = ok ? (b.minY + b.maxY) / 2 : 0;
-  const sideIn = (ok ? Math.max(b.maxX - b.minX, b.maxY - b.minY) : ROBOT_MAX_IN) + 1;
-  return { cx, cy, sideIn, inPerPx: sideIn / px, px };
-}
-
-/** robot-local inches → image pixel (continuous, origin top-left) */
-export function robotToTopPixel(p: Vec2, f: TopImageFrame): { u: number; v: number } {
-  return { u: f.px / 2 - (p.y - f.cy) / f.inPerPx, v: f.px / 2 - (p.x - f.cx) / f.inPerPx };
-}
-
-/** image pixel → robot-local inches */
-export function topPixelToRobot(u: number, v: number, f: TopImageFrame): Vec2 {
-  return { x: f.cx + (f.px / 2 - v) * f.inPerPx, y: f.cy + (f.px / 2 - u) * f.inPerPx };
-}
+export { robotToTopPixel, topImageFrame, topPixelToRobot, type TopImageFrame } from './topFrame';
