@@ -1,4 +1,4 @@
-import type { Alliance, Artifact, RobotCommand, RobotState, Vec2, World } from '../../types';
+import type { Alliance, Artifact, RobotCommand, RobotSpec, RobotState, Vec2, World } from '../../types';
 import * as C from '../../config';
 import { clamp, hyp, nextRandom, rot, wrapAngle } from '../../math';
 import { solveArtifacts, type SweepFrom } from '../../sim/physicsEngine';
@@ -55,6 +55,8 @@ import {
   bbSlewTurret,
   bbTurretRelease,
   bbFixedRelease,
+  bbFixedFacing,
+  bbFootprint,
   bbTurretOnTarget,
   bbTurretSolution,
   mouthAxes,
@@ -1298,6 +1300,56 @@ export function bbFixedShotEnters(
 ): boolean {
   const rel = bbFixedRelease(r, flyExitSpeed(r));
   return bbFlightEnters(hive, r.alliance, rel.origin, rel.z, rel.vel, dt, trace);
+}
+
+/** one band per BUILD (`bbFixedBand`) — a pure function of the spec, measured once */
+const FIXED_BAND_CACHE = new Map<string, readonly [number, number] | null>();
+
+/**
+ * WHERE A FIXED LAUNCHER SCORES FROM — the range of distances (robot centre to cell centre, on the
+ * cell's mouth axis, the robot facing it, parked, the wheel at its first setpoint) from which the
+ * shot enters a settled up-cell: the run nearest the cell, or `null` when it scores from nowhere.
+ * Measured by running `bbFixedShotEnters` itself at every inch, so it is the fire gate's own
+ * answer and not a second ballistics. The AI stands in it (`ai/policy.ts`); smoke prints it.
+ *
+ * Cached per build, keyed on everything the release reads. Pure, so the cache cannot make two
+ * machines disagree.
+ */
+export function bbFixedBand(spec: RobotSpec): readonly [number, number] | null {
+  const l = bbLauncherOf(spec, BB_HOOD_DEFAULT_DEG);
+  if (l.kind !== 'fixed') return null;
+  const key = JSON.stringify([spec.length, spec.width, l, spec.flywheel, spec.imported?.hull, spec.imported?.mech, spec.imported?.heightIn]);
+  const hit = FIXED_BAND_CACHE.get(key);
+  if (hit !== undefined) return hit;
+  const hive: BiobuzzState['hives'][Alliance] = { up: 'north', contents: [], tips: 0, tipping: 0, released: false };
+  const cell = hiveCellTarget('blue', 'north');
+  const face = bbFixedFacing(spec);
+  const rpm = spec.flywheel?.rpm[0] ?? 0;
+  // ...and only where the robot fits on the field: past the wall is a pose nobody can drive to
+  const rear = bbFootprint(spec).rear;
+  let lo = -1;
+  let hi = -1;
+  for (let d = 4; cell.pos.y + d + rear <= BB_HALF_Y; d++) {
+    const r = {
+      id: -1,
+      alliance: 'blue',
+      spec,
+      pos: { x: cell.pos.x, y: cell.pos.y + d },
+      heading: -Math.PI / 2 - face,
+      vel: { x: 0, y: 0 },
+      angVel: 0,
+      flyRpm: rpm,
+    } as unknown as RobotState;
+    if (bbFixedShotEnters(hive, r, C.SIM_DT)) {
+      if (lo < 0) lo = d;
+      hi = d;
+    } else if (lo >= 0) {
+      break;
+    }
+  }
+  const band = lo < 0 ? null : ([lo, hi] as const);
+  FIXED_BAND_CACHE.set(key, band);
+  return band;
 }
 
 /**

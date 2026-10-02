@@ -2011,13 +2011,16 @@ export const BB_HOOD_MAX_DEG = 85;
  * one arc the wheel and the hood throw, and it scores only from where that arc meets the cell.
  *
  * HOOD TRAVEL is the turret head's own pitch range above `BB_FIXED_HOOD_MIN_DEG` (below 30° no
- * arc a kit wheel throws rises 45 in to the HIVE opening). The kit robot's hood is not published:
- * `BB_FIXED_HOOD_DEFAULT_DEG` is APPROX, chosen with the shared `FLY_EXIT_EFFICIENCY` so the kit's
- * setpoint scores from a distance a driver can hold (the ROBOT lane's FIXED block measures it).
+ * arc a kit wheel throws rises 45 in to the HIVE opening). The kit robot's guide angle is not
+ * published, so `BB_FIXED_HOOD_DEFAULT_DEG` is APPROX: with the shared `FLY_EXIT_EFFICIENCY`, the
+ * kit setpoint (2679 rpm, 96 mm) throws 212 in/s, and at 77° that lands from 26–46 in (robot centre
+ * to cell centre, on the mouth axis — the FIXED lane measures it), a band with both edges on the
+ * field. At the DECODE kit's 70° the same wheel scores from 37 in out to the far wall, and below
+ * ~2450 rpm no arc reaches the 53.4-in opening at all.
  */
 export const BB_FIXED_HOOD_MIN_DEG = 30;
 export const BB_FIXED_HOOD_MAX_DEG = 80;
-export const BB_FIXED_HOOD_DEFAULT_DEG = 70;
+export const BB_FIXED_HOOD_DEFAULT_DEG = 77;
 /** the kit launcher: one 96-mm wheel on a 1:1 motor at 1250 ticks/s (28 PPR ⇒ 2679 rpm). The feed
  * is a continuous windmill whose rate is not published; 0.3 s an element is APPROX. */
 export const BB_FIXED_FLY_DEFAULT: FlywheelSpec = { mode: 'fixed', rpm: [2679], wheelMm: 96, feedS: 0.3 };
