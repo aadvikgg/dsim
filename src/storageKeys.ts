@@ -171,8 +171,9 @@ export const STORAGE_KEYS: readonly StorageKeyEntry[] = [
     storage: 'indexeddb',
     category: 'necessary',
     purpose:
-      'Robots you imported from CAD: a simplified 3D model of each, its pictures, and the setup that makes it drive like the real one. The models stay on this device; only a robot’s measurements travel with your settings. When you play an imported robot in a custom or LAN room, its top picture (and, in BIOBUZZ, a lighter copy of its model) is also sent to the other people in that room, kept in memory only for as long as the room lasts.',
-    retention: 'Until you delete a robot from your imported robots or clear your browser data.',
+      'Robots you imported from CAD: a simplified 3D model of each, its pictures, and the setup that makes it drive like the real one. An import you have not saved yet is kept here too, so a reload does not lose it. The models stay on this device; only a robot’s measurements travel with your settings. When you play an imported robot in a custom or LAN room, its top picture (and, in BIOBUZZ, a lighter copy of its model) is also sent to the other people in that room, kept in memory only for as long as the room lasts.',
+    retention:
+      'Until you delete a robot from your imported robots or clear your browser data. An unsaved import goes when you save or discard it, or after 30 days.',
   },
   {
     key: ZENITH_AUTOS_KEY,

@@ -69,6 +69,11 @@ const ROUTE_META: Record<string, RouteMeta> = {
     description:
       'Set drivetrain, mass, motor RPM, flywheel inertia, intake and starting position, and rebind your controls.',
   },
+  robotimport: {
+    title: 'Import a robot',
+    description:
+      'Import your robot from CAD (STEP, GLB, STL, OBJ, 3MF or PLY) and drive it with its real footprint, gearing and weight.',
+  },
   records: {
     title: 'Leaderboards & records',
     description:

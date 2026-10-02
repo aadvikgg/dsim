@@ -31,7 +31,8 @@ import { moduleFor } from '../games';
 import { activeZenithAuto } from '../auto/library';
 import { seasonFor } from '../seasons';
 import { useCoarsePointer } from './useCoarsePointer';
-import type { Alliance, DrivetrainType } from '../types';
+import type { Alliance, DrivetrainType, RobotSpec } from '../types';
+import { coerceAssists, PLAYER_ASSISTS } from '../sim/spawn';
 import { initPhysics3d, physics3dReady } from '../games/biobuzz/sim3d/engine';
 import { getCameraPref, getViewPref, subscribeCameraPref, subscribeViewPref, type CameraPref } from '../games/biobuzz/graphics/store';
 import { requestFreeCamReset } from '../games/biobuzz/graphics/freeCam';
@@ -264,6 +265,14 @@ interface Props {
    * `GameModule.tutorial` ignores the flag entirely and plays an ordinary practice.
    */
   tutorial?: boolean;
+  /**
+   * THE ROBOT IMPORTER'S TEST DRIVE: free drive with THIS robot, which is not the active one (an
+   * import that may never be saved). Frozen at mount like `tutorial`, applied to the run only and
+   * never persisted: free drive, this spec and its own assists, the named start anchor (a custom
+   * pose was set for another chassis), and no other robots on the field. Free drive is never
+   * recorded, so nothing leaves the device.
+   */
+  testDrive?: RobotSpec;
 }
 
 export function GameView({
@@ -280,6 +289,7 @@ export function GameView({
   onQueueAgain,
   onBackToLobby,
   tutorial = false,
+  testDrive,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // BIOBUZZ 3D SEAM: the box a 3D scene mounts its own canvas into, UNDER the 2D one
@@ -399,6 +409,8 @@ export function GameView({
    * would describe a run that is already going.
    */
   const [runTutorial] = useState(() => tutorial && !session);
+  /** the importer's robot, frozen at mount the same way */
+  const [driveSpec] = useState(() => (session ? undefined : testDrive));
 
   useEffect(() => {
     let cancelled = false;
@@ -435,7 +447,16 @@ export function GameView({
        */
       let effectiveSettings = runTutorial
         ? { ...settings, mode: 'free' as const, practiceSeats: {} }
-        : settings;
+        : driveSpec
+          ? {
+              ...settings,
+              mode: 'free' as const,
+              spec: driveSpec,
+              assists: coerceAssists(driveSpec.assists, PLAYER_ASSISTS),
+              startPose: null,
+              practiceSeats: {},
+            }
+          : settings;
       let physicsFallbackNotice: string | undefined;
       if (need3d && !physics3dReady()) {
         try {
@@ -462,7 +483,7 @@ export function GameView({
        */
       let zenithAuto: GameControllerZenithAuto | undefined;
       const activeAuto =
-        !session && !runTutorial && moduleFor(settings.game).zenithAutos ? activeZenithAuto(settings.game) : null;
+        !session && !runTutorial && !driveSpec && moduleFor(settings.game).zenithAutos ? activeZenithAuto(settings.game) : null;
       if (activeAuto) {
         try {
           zenithAuto = { ...activeAuto, module: await import('./zenithEditor') };
@@ -823,8 +844,9 @@ export function GameView({
           field out from under every one of them (`SceneInsets`, `games/module.ts`); nothing
           visual reads it. See `GameController.refreshHudInsets` for what is NOT marked and why. */}
       <div className="game-buttons" data-hud-band>
-        <button className="game-btn" onClick={onExit} title="Menu (Esc)">
-          <span aria-hidden="true">◄</span> MENU
+        {/* a TEST DRIVE goes back to the importer, and the button says so */}
+        <button className="game-btn" onClick={onExit} title={driveSpec ? 'Back to the importer (Esc)' : 'Menu (Esc)'}>
+          <span aria-hidden="true">◄</span> {driveSpec ? 'EDITOR' : 'MENU'}
         </button>
         {/* RESET is a LOCAL rebuild — meaningless (and desyncing) in lockstep, so
             solo only. In multiplayer use REMATCH on the results screen (host). */}

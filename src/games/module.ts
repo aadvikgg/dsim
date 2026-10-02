@@ -290,6 +290,13 @@ export interface GameBuilderProps {
   alliance?: Alliance;
   startIndex?: number;
   startPose?: StartPose | null;
+  /**
+   * THE ROBOT IMPORTER renders the builder for an imported robot, whose length, width, mass and
+   * height come from its CAD file and its scale. `true` hides those dials; every mechanism control
+   * stays, mount pickers included (a mount says WHICH edge an intake rides, and the importer's
+   * placement editor says WHERE along it). Absent ⇒ the full builder, as before.
+   */
+  hideFrame?: boolean;
 }
 
 /** props for `GameModule.Preview` — matches `RobotPreview` / `ChainRobotPreview` */

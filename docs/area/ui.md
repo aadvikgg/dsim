@@ -306,6 +306,30 @@ Controls screen stands the layer down the same way while a rebind is armed
   rebindable, so a navigation layer that ate the arrows would either steal a driving control or
   need a runtime conflict check against `effectiveBindings` on every keystroke.
 
+### Screens with their own step rail, and things you drag
+
+- **LB/RB step through `[data-padnav-sections]` when a screen names one** (`sectionStep` in
+  `PadNavLayer.tsx`). Without it, LB/RB step through the list that holds focus, and from a
+  control in a body that list is the PAGE rail, so RB on the importer's Model step left for
+  Records. The importer's `nav.ds-tabs` is the first user; a wizard or tabbed editor that adds
+  one gets the same behaviour from any control on the screen.
+- **A draggable thing on a 2D map is a real `<button>`** laid over the drawing by percent, so
+  keyboard, screen reader and pad reach it as an ordinary control. Keyboard: arrows move a
+  fixed step (Shift a finer one), Home puts it back, each press commits. Pad: A GRABS it
+  (`suspendPadNav('handle')`, the layer stops reading the stick and D-pad), the D-pad steps on
+  `PAD_SLIDER_REPEAT`, the stick moves at a rate, A drops, B restores the pre-grab position,
+  and the status line under the map names the buttons in `PAD_GLYPHS`. Pointer: the drawing
+  follows the drag and the move commits on release. `src/robotImport/ui/useHandleGrab.ts` +
+  `TopDownMap.tsx` are the reference; `scripts/importpad.cjs` proves all three inputs.
+- ⚠️ **Several key presses can land inside one React render.** A handler that computes "move
+  from the current position" off a prop reads the SAME stale prop for each, and two presses
+  move once. Keep the last emitted position in a ref until the props catch up (`moved` in
+  `TopDownMap.tsx`).
+- **A pad walkthrough needs a window that paints.** `requestAnimationFrame` does not run in a
+  hidden browser tab, and the layer polls the pad on rAF, so a stubbed gamepad in a background
+  tab does nothing at all. `scripts/importpad.cjs` stubs `navigator.getGamepads` in an
+  OFFSCREEN Electron window, which keeps painting; copy it for a new screen.
+
 ## Configure — the six sections, and the three rules that hold them together
 
 `src/ui/Configure.tsx` routes six sections at `/configure/<key>`. **The ARRAY is the order on
@@ -664,6 +688,27 @@ next step **REBUILDS** the world and stages that one, exactly as `startMatch`/`r
 - **`.ds-sr` is the ONE visually-hidden utility** (`shell.css`). Use it for a spoken name
   beside a glyph or a keycap, a live region's text, a table caption. Do not write another
   clip-rect rule for a single component.
+  ⚠️ **It is `position: absolute`, so it needs a positioned ancestor INSIDE `.ds-app`.** The app
+  scrolls in `.ds-app`; `html` and `body` are `overflow: hidden`. A `.ds-sr` with no
+  positioned ancestor is placed against the page at its static spot, outside `.ds-app`'s clip,
+  so one 1,500px down a long screen made the ROOT 660px taller than the window. Nothing shows
+  until something scrolls the root — `scrollIntoView` does, overflow hidden or not, and every
+  pad focus move calls it — and then the whole window is blank below the first screenful. A
+  long screen's own wrapper takes `position: relative` (`.ds-import` does). Check with
+  `document.documentElement.scrollHeight === innerHeight` on the screen scrolled to its end.
+- **A LAZY screen's sheet lives in `src/ui/<name>.css` and is imported by the lazy module**
+  (`importer.css` by `ImportEditor.tsx`), so Vite ships it with the chunk and `uiaudit` /
+  `uiindex` still read it. Its own prefix is exempt from `ds-outside-shell` the way `.ds-tut*`
+  is (`(?!tut|import)` in `uiaudit.mjs`); compounds of shared classes stay scoped under that
+  prefix (`.ds-import .ds-facts dd.warn`). A class the MAIN chunk draws (the robot page's import
+  thumbnail, the hero image) goes in `shell.css`.
+- **`.ds-facts` is the one label/value list** (it was `.ds-auto-facts`, the autos panel's;
+  the imported-robot panel and the importer's Model step use it too). A `dt`/`dd` grid, mono
+  values; do not write a per-panel one.
+- **A one-shot notice handed across screens is PEEKED while rendering and TAKEN in an effect**
+  (`useRobotNotice`). StrictMode renders twice and throws one away; a `useState` initialiser
+  that consumed the notice consumed it in the discarded render, and "Saved Ironclad." never
+  showed.
 - **`.ds-badge` is the one inline status tag** (`shell.css`): neutral on `--ds-tile`, mono
   `--ds-t-xs` caps, pill. Tones `.accent` / `.ok` / `.warn` / `.danger` / `.staff` colour the
   TEXT and EDGE only; `.count` is the one filled form. Never `--ds-red` (that is an alliance,

@@ -109,6 +109,51 @@ The picture and mesh live on the owner's device, so a custom or LAN room relays 
 - **The relayed mesh must be what the exporter writes and nothing more.** The relay's GLB check (`validateMeshGlb`) is an allowlist sized to `exportGlbStored`'s output: no glTF extensions, no images or textures, only POSITION/NORMAL/TANGENT/COLOR_0/TEXCOORD_0-1 attributes, nodes with a mesh, children and a transform. If the bake ever writes something new (a material extension, quantised attributes), add it to `VISUAL_GLB_EXTENSIONS` or the key lists WITH a check of its fields, or every relayed mesh is refused and viewers see outlines.
 - **Robot ids are unique within a room.** A seat may not hold an id another seat holds (`IMPORT_ID_TAKEN`). An import of a SHARE FILE should therefore mint a new id (`duplicateRobot` does), or two teammates who loaded the same file cannot sit in one room until one duplicates it.
 
+## The importer UI (`src/robotImport/ui/`)
+
+Route `/<game>/configure/robot/import[/<id>]` (`App.tsx` matches it BEFORE the configure section
+pattern, or `import` reads as a section name). Four steps: Model, Drivetrain, Mechanisms, Review.
+
+**Two halves, two chunks.** The robot page is in `main`; the editor is lazy.
+
+| main (the robot page, the lobby, Modes) | lazy (`ImportEditor-*.js`, route `importerui`) |
+|---|---|
+| `pageCopy.ts` (row, panel, dialog strings), `handoff.ts` (files handed to the editor, the one-shot notice, the `dsim-robot-library` BroadcastChannel), `useLibrary.ts`, `ImportedRobots.tsx` (row, panel, actions) | `ImportEditor.tsx` and the four steps, `copy.ts` (every editor string), `editorModel.ts`, `placement.ts`, `draftStore.ts`, `TopDownMap.tsx`, `PreviewPane.tsx`, `useHandleGrab.ts`, `src/ui/importer.css` |
+| reached by `import()` on a click: `LibraryDialogs.tsx`, `exportRobot.ts`, `shareFile.ts` | |
+
+- ⚠️ **A main-side file must not import `geometry.ts` or `ui/copy.ts`.** Rollup puts a module
+  imported by `main` wholly in `main`, so one static import moved the measurement code (8 KB)
+  and the editor's strings into every page load. The robot page uses `polyBounds` from
+  `src/sim/imported.ts` and `pageCopy.ts`. A smoke check greps for it.
+- **The editor works in the MODEL frame** (wheels, handles, the map); `ImportedMech` is stored
+  ROBOT-local. `placement.ts` converts (`mechRobotToModel`, and `mechModelToRobot` in
+  `geometry.ts` on the way out) and wraps lane 2's `mechHandles` / `defaultImportedMech` /
+  `validateImportedMech`. The mount pickers (`intakeMount` …) still decide WHICH edges exist;
+  the map only places them. A player's placement is never moved by a later default.
+- **Re-opening a saved robot re-reads its STORED mesh**, not the source file (the library does
+  not keep it), so the setup is units `m`, up `+y`, quarter turns 0, and the placements are the
+  saved ones converted back to the model frame.
+- **Drafts.** `decodesim.robots` v2 adds `drafts` and `draftModels`. Key
+  `<game>:<editId | new>`. The document is written 800 ms after the last edit; the parsed model
+  once. A draft is deleted on save, on Discard, and with its robot; `listDrafts` prunes any older
+  than `DRAFT_MAX_AGE_MS` (30 days). The robot page's add card turns into Resume import while
+  one exists.
+- ⚠️ **Review blocks what `coerceImported` would refuse.** A spec whose import `coerceImported`
+  drops (a side under `IMPORT_MIN_SIDE`, an area under `IMPORT_MIN_AREA`, a sliver) saves fine
+  and then plays as its parametric fallback with no word said. `reviewItems` blocks whenever the
+  built spec has no `imported`, so a new refusal there is covered without a new item.
+- ⚠️ **`computeBands` gives up above 1.5 × the 18 in cube** (`BAND_MAX_HEIGHT_IN`). Its cost
+  grows with the cube of the slice count; a model in the wrong units (381 in tall) took 42 s
+  and froze the editor between two clicks on Units. A robot that tall is refused anyway.
+- **Test drive** passes the draft's spec to `GameView` (`testDrive`), frozen at mount: free
+  drive, its own assists, the default start, no other robots, no Zenith auto. Leaving the
+  match returns to the editor route, and the draft is flushed first, so nothing is lost.
+- **The preview takes a fresh `<canvas>` per controller.** Re-using one after `dispose()`
+  (which forces a context loss) threw `Cannot read properties of null (reading 'precision')`
+  on the next mount. A lost context falls back to the top-down map.
+- **The pictures come from the engine**: `bake` on save, and for a shared `.dsim.glb` added as it is,
+  `renderTop` / `renderThumb` on its parts moved by `STORED_MESH_TO_ROBOT`. Never a UI-side render.
+
 ## Proving it
 
 - `npm test` runs the DOM-free half (a block at the end of `scripts/smoke.ts`): the catalogue,
@@ -120,3 +165,22 @@ The picture and mesh live on the owner's device, so a custom or LAN room relays 
   each baked GLB to check the stored frame round-trips, and writes the outputs to
   `$ROBOT_IMPORT_OUT`. Fixtures (`scripts/fixtures/robot-import/`) are regenerated by
   `npm run robot-import:fixtures`; each format uses a different unit and up axis on purpose.
+- The UI's DOM-free half is the `import UI …` checks in the same smoke block: the copy rules,
+  the review list per game (an ordinary robot passes, a 0.5 in one blocks), the draft key, the
+  wheel mirror, and source pins on the test drive, the route order and the pad rail.
+- `scripts/importshots.cjs` photographs every editor state at 1440×900, 1100×720 and 390×844 in
+  both themes, in an OFFSCREEN Electron window, into `scratch/importshots/<sha>/` with an
+  `index.html` sheet. `scripts/importpad.cjs` walks the editor by stubbed gamepad and then by
+  real key events and asserts each step. Both need `npx vite --port 5194 --strictPort` running
+  and `env -u ELECTRON_RUN_AS_NODE npx electron scripts/<file>`.
+- `scripts/importprobe.cjs` measures the UI's cost against a PRODUCTION build (`npx vite preview
+  --port 4173`), cold cache, long tasks observed from before the first script. Measured
+  2026-10-01 (desktop, software GL): six imports add no long task to the robot page; the empty
+  editor fetches its chunk and `geometry-*.js` (the measurement code it runs) but not the engine;
+  the 18 KB GLB fixture reaches its first frame in ~200 ms with no long task; 150k triangles:
+  first frame 524 ms, longest task 142 ms (budget 200); re-opening a saved import 147 ms the
+  first time, 24 ms warm; ten editor trips: heap flat after GC, no "Too many active WebGL
+  contexts".
+  ⚠️ **Past ~250k triangles the longest task breaks 200 ms**: 368k gave 307 ms, nearly all of it
+  `simplifyModel` (meshopt on the main thread). Moving the simplifier into a worker, as the STEP
+  reader already is, is the fix if big exports turn out to be common.

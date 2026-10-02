@@ -185,12 +185,18 @@ function routeFor(file, buf) {
   if (/^renderSurfaces-[^/]*\.js$/.test(base)) return 'surfaces';
   // THE ROBOT IMPORTER, by FILENAME (see the route table). `engineLoader-*.js` exists only in the
   // measurement build, where the loader is an entry of its own; in the app it is inlined.
-  if (/^(importerEngine|engineLoader)-[^/]*\.js$/.test(base)) return 'importer';
+  // `geometry-*.js` is the measurement code (`src/robotImport/geometry.ts`) once the editor and the
+  // engine both import it: Rollup splits it into a chunk the two share, fetched with the engine.
+  if (/^(importerEngine|engineLoader|geometry)-[^/]*\.js$/.test(base)) return 'importer';
   if (/^(stepWorker|stepReader)-[^/]*\.js$/.test(base) || /^occt-import-js[^/]*\.wasm$/.test(base)) return 'step';
   // THE ROBOT LIBRARY (`src/robotImport/library.ts`, IndexedDB), by FILENAME: the renderers' asset
   // seam (`src/render/importedAssets.ts`) reaches it with a dynamic `import()` the first time an
   // imported robot is drawn, so it is its own small chunk rather than a cost in `main`.
   if (/^library-[^/]*\.js$/.test(base)) return 'library';
+  // THE IMPORTER'S UI (lane 4): the editor route, and what the robot page reaches by `import()` on a
+  // click (the share-file reader and writer, the export, the library dialogs). By FILENAME, before
+  // the content scans: none of them carries three.js, so they would otherwise land in `other`.
+  if (/^(ImportEditor|shareFile|draftStore|LibraryDialogs|exportRobot)-[^/]*\.js$/.test(base)) return 'importerui';
   // Vite's preload helper is split out only when a SECOND entry shares it (the measurement
   // build); in the app it is part of the entry chunk, so it is billed there
   if (/^preload-helper-[^/]*\.js$/.test(base)) return 'main';
@@ -540,7 +546,11 @@ const BASELINE = {
   // move into a chunk the two zones share (178.86, routed `scene` by its marker) and
   // `renderScene-*.js` drops to 49.67, so the route measures 228.53 against 226.55 without the
   // importer: +1.98 of import/export glue and two separately compressed files, inside tolerance.
-  importer: { gzip: 61.88 * 1000 },
+  // 2026-10-01 (lane 4, with lanes 2, 6 and 7 merged): 62.81 = `importerEngine-*.js` 54.57 + the
+  // shared `geometry-*.js` 8.24 (the measurement code, which the editor imports too). The feature
+  // branch alone measured 61.75 with geometry inside the engine chunk; the +1.06 is the preview's
+  // camera presets and collision layer.
+  importer: { gzip: 62.81 * 1000 },
   // 2026-10-01: NEW. `occt-import-js-*.wasm` 3110.91 (OpenCascade, 7.6 MB raw), `stepWorker-*.js`
   // 21.95 (the worker with occt's glue) and `stepReader-*.js` 0.42. Fetched only when a STEP file is
   // dropped; every other import, and every player who never imports a robot, pays nothing.
@@ -550,6 +560,13 @@ const BASELINE = {
   // import branches, the asset seam, FootprintSvg) and +2.86 in `scene` (`renderImported.ts`),
   // both inside tolerance against the robot-import branch measured the same minute.
   library: { gzip: 1.85 * 1000 },
+  // 2026-10-01: NEW, the importer's UI (lane 4). `ImportEditor-*.js` 18.75 (the steps, the top-down
+  // editor, the preview host, drafts, the review checks), and what the robot page `import()`s on a
+  // click: `shareFile-*.js` 1.38, `LibraryDialogs-*.js` 0.75 and `exportRobot-*.js` 0.66. Fetched
+  // when a player opens the importer or acts on an imported robot. What the robot page itself
+  // carries for imports (the row, the panel, the notice, the test-drive and lobby wiring) is in
+  // `main`: +4.53 KB against the feature branch at 5d0e6aa5 (1017.05 -> 1021.58).
+  importerui: { gzip: 21.55 * 1000 },
   other: { gzip: 1 * 1000 },
 };
 

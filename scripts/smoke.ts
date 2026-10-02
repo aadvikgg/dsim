@@ -33360,5 +33360,103 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
   }
 }
 
+/**
+ * THE IMPORTER UI'S DOM-FREE HALF (lane 4: `src/robotImport/ui/`). The copy keeps the house rules,
+ * the review list blocks what `coerceImported` would refuse (and passes an ordinary robot), the
+ * wheel mirror is a mirror, and the wiring the screens depend on is still there: the test drive's
+ * run settings, LB/RB scoped to the step rail, and no geometry or editor strings in the main chunk.
+ */
+{
+  const { COPY, upLabel, where } = await import('../src/robotImport/ui/copy');
+  const { PAGE_COPY } = await import('../src/robotImport/ui/pageCopy');
+  const strings: string[] = [];
+  const collect = (o: Record<string, unknown>): void => {
+    for (const v of Object.values(o)) {
+      if (typeof v === 'string') strings.push(v);
+      else if (typeof v === 'function') {
+        const f = v as (...a: unknown[]) => unknown;
+        // numbers first (a length is `.toFixed`), words for the rest
+        let out: unknown;
+        try {
+          out = f(1.5, 2.25, 3);
+        } catch {
+          out = f('X', 'Y', 'Z');
+        }
+        strings.push(String(out));
+      }
+      else if (Array.isArray(v)) v.flat(2).forEach((x) => typeof x === 'string' && strings.push(x));
+      else if (v && typeof v === 'object') collect(v as Record<string, unknown>);
+    }
+  };
+  collect(COPY as unknown as Record<string, unknown>);
+  collect(PAGE_COPY as unknown as Record<string, unknown>);
+  const bad = strings.filter((s) => /'|\.\.\.|\s-\s|"/.test(s));
+  check('import UI copy: typographic punctuation, no dash doing a full stop’s job', bad.length === 0, bad.slice(0, 3).join(' | '));
+  const failures2 = strings.filter((s) => /^Could not|Something went wrong|Oops|please/i.test(s));
+  check('import UI copy: failures say Couldn’t … and never pad', failures2.length === 0, failures2.join(' | '));
+  check('import UI copy: the up axis minus is U+2212, and a signed position reads as words', upLabel('-z') === '−Z' && where(-2, -3.25) === '2.0 in back, 3.3 in right' && where(1, 2, 3) === '1.0 in forward, 2.0 in left, 3.0 in high');
+}
+{
+  const { reviewItems, blocks, moveWheel, rectangleWheels, buildSpec, draftKey, baseName } = await import('../src/robotImport/ui/editorModel');
+  const { defaultImportSetup } = await import('../src/robotImport/geometry');
+  const { coerceSpec, DEFAULT_SPEC } = await import('../src/sim/spawn');
+  const box = (l: number, w: number) => [
+    { x: -l / 2, y: -w / 2 },
+    { x: l / 2, y: -w / 2 },
+    { x: l / 2, y: w / 2 },
+    { x: -l / 2, y: w / 2 },
+  ];
+  const meas = (l: number, w: number, h: number, checks: { code: string; level: 'block' | 'warn' | 'info'; message: string }[] = []) => ({
+    units: 'in', unitsDetected: true, up: '+z', upDetected: true, upMargin: 1, yaw: 0, sourceToModel: [],
+    size: { length: l, width: w, height: h }, hull: box(l, w), hullRawVerts: 4, hullDeviation: 0,
+    wheels: { wheels: rectangleWheels(box(l, w)), contacts: [], note: '' }, wheelsUsed: rectangleWheels(box(l, w)),
+    wheelSource: 'detected', origin: { x: 0, y: 0 }, heightIn: h, trisIn: 12, checks,
+  }) as never;
+  for (const game of ['decode', 'chain', 'biobuzz'] as const) {
+    const doc = {
+      v: 1, key: draftKey(game, null), game, id: '0123456789abcdef', editId: null, step: 0,
+      setup: defaultImportSetup({ massLb: 30 }), detected: null, mech: null,
+      spec: coerceSpec(DEFAULT_SPEC, undefined, game), source: null, savedModel: false, created: null, sourceName: null, updated: 0,
+    } as never;
+    const ok = buildSpec(doc, meas(16, 14, 15));
+    check(`import UI review: an ordinary 16 × 14 in robot carries its import and blocks nothing — ${game}`, !!ok.spec.imported && blocks(reviewItems(meas(16, 14, 15), ok, game)) === 0, reviewItems(meas(16, 14, 15), ok, game).filter((i) => i.level === 'block').map((i) => i.text).join(' | '));
+    const tiny = meas(0.6, 0.5, 0.6);
+    check(`import UI review: ⚠️ a footprint under the sim’s 6-in floor BLOCKS (coerceImported would drop it) — ${game}`, reviewItems(tiny, buildSpec(doc, tiny), game).some((i) => i.id === 'tiny' && i.level === 'block'));
+  }
+  check('import UI: the draft key names the game and the robot, a new import is `new`', draftKey('chain', null) === 'chain:new' && draftKey('biobuzz', 'abc') === 'biobuzz:abc');
+  check('import UI: a robot is named after its file, cut to the name field’s 24', baseName('my_robot_v3.step') === 'my robot v3' && baseName('a'.repeat(40) + '.glb').length === 24);
+  const hull = box(16, 14);
+  const w0 = rectangleWheels(hull);
+  const moved = moveWheel(w0, 0, { x: 6, y: 5 }, true, hull);
+  check('import UI wheels: with Mirror on, front-left moves front-right to the mirror point', moved[0].x === 6 && moved[0].y === 5 && moved[1].x === 6 && moved[1].y === -5 && moved[2].x === w0[2].x);
+  const lone = moveWheel(w0, 3, { x: -6, y: -4 }, false, hull);
+  check('import UI wheels: with Mirror off, only the dragged wheel moves', lone[3].x === -6 && lone[2].x === w0[2].x && lone[2].y === w0[2].y);
+}
+{
+  const gv = readFileSync('src/ui/GameView.tsx', 'utf8').replace(/\r\n/g, '\n');
+  check(
+    'import UI test drive: free drive, the draft spec, its own assists, the named anchor, no other robots — frozen at mount',
+    /const \[driveSpec\] = useState\(\(\) => \(session \? undefined : testDrive\)\)/.test(gv) &&
+      /mode: 'free' as const,\s*spec: driveSpec,\s*assists: coerceAssists\(driveSpec\.assists, PLAYER_ASSISTS\),\s*startPose: null,\s*practiceSeats: \{\},/.test(gv),
+  );
+  const app = readFileSync('src/ui/App.tsx', 'utf8').replace(/\r\n/g, '\n');
+  check('import UI test drive: leaving it goes back to the importer, not home', /if \(drive\) \{\s*setTestDrive\(null\);\s*navigate\('robotimport', \{ sub: drive\.back \}\);/.test(app));
+  check('import UI route: /configure/robot/import is matched BEFORE the configure section match', app.indexOf("at('robotimport'") > 0 && app.indexOf("at('robotimport'") < app.indexOf("return at('configure'"));
+  const pad = readFileSync('src/ui/PadNavLayer.tsx', 'utf8');
+  check('import UI pad: LB/RB step through a [data-padnav-sections] container when a screen names one', /querySelectorAll<HTMLElement>\('\[data-padnav-sections\]'\)/.test(pad));
+  const ed = readFileSync('src/robotImport/ui/ImportEditor.tsx', 'utf8');
+  check('import UI pad: the step rail is that container', /data-padnav-sections/.test(ed));
+  // the main chunk must not pull the editor's half in: geometry.ts (shared with the lazy engine, so
+  // it lands whole wherever it is imported) and the editor's strings
+  const mainSide = ['src/ui/Menu.tsx', 'src/robotImport/ui/ImportedRobots.tsx', 'src/robotImport/ui/LibraryDialogs.tsx', 'src/robotImport/ui/useLibrary.ts', 'src/robotImport/ui/handoff.ts', 'src/robotImport/ui/exportRobot.ts', 'src/robotImport/ui/pageCopy.ts'];
+  const leaks = mainSide.filter((f) => /from '\.\.?\/(?:\.\.\/)*(?:robotImport\/)?(?:geometry|ui\/copy|copy|ImportEditor|editorModel)'|robotImport\/ui\/copy'/.test(readFileSync(f, 'utf8')));
+  check('import UI bundle: the robot page’s files import neither geometry.ts nor the editor’s copy or code', leaks.length === 0, leaks.join(', '));
+  const row = readFileSync('src/robotImport/ui/ImportedRobots.tsx', 'utf8');
+  check(
+    'import UI bundle: the robot page reaches the library dialogs and the export by import() on a click, never statically',
+    !/^import [^;]*from '\.\/(?:LibraryDialogs|exportRobot)'/m.test(row) && /import\('\.\/LibraryDialogs'\)/.test(row) && /import\('\.\/exportRobot'\)/.test(row),
+  );
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

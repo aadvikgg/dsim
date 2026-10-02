@@ -36,6 +36,14 @@ import { setShellState } from './shellState';
  * it takes `AdminAnalytics`'s own `lazy()` with it as a nested chunk.
  */
 const Admin = lazy(() => import('./Admin').then((m) => ({ default: m.Admin })));
+/**
+ * THE ROBOT IMPORT EDITOR (`/configure/robot/import[/<id>]`), lazy for the reason `Admin` is: it
+ * is a screen most players never open, and the engine behind it (three.js, the loaders) is lazier
+ * still — the editor fetches it only on the first file. `bundleaudit` routes the chunk to `importer`.
+ */
+const ImportEditor = lazy(() => import('../robotImport/ui/ImportEditor'));
+import { coerceAssists, PLAYER_ASSISTS } from '../sim/spawn';
+import type { RobotSpec } from '../types';
 import { Announcements } from './Announcements';
 import { AccountReset } from './AccountReset';
 import { AccountSync } from './AccountSync';
@@ -119,6 +127,9 @@ type Screen =
   | 'home'
   | 'modes'
   | 'configure'
+  /** `/configure/robot/import` and `/configure/robot/import/<id>`: the robot import editor. A screen
+   *  of its own, not a Configure section, so its preview has the page's whole width. */
+  | 'robotimport'
   | 'records'
   | 'lobby'
   | 'discordlobbies'
@@ -210,6 +221,8 @@ function screenSuffix(screen: Screen, a: RouteArgs): string {
       return '/modes';
     case 'configure':
       return `/configure/${isConfigureSection(a.sub) ? a.sub : 'robot'}`;
+    case 'robotimport':
+      return `/configure/robot/import${a.sub ? `/${a.sub}` : ''}`;
     case 'records':
       return a.sub === 'career' ? '/records/career' : '/records';
     case 'profile':
@@ -277,6 +290,9 @@ function parseScreen(rest: string): { screen: Screen } & RouteArgs {
   const profile = rest.match(/^\/profile\/(.+)$/);
   if (profile) return at('profile', { username: decodeURIComponent(profile[1]) });
 
+  // BEFORE the configure match, which would read `/configure/robot/import` as the robot section
+  const robotImport = rest.match(/^\/configure\/robot\/import(?:\/([0-9a-f]{16}))?\/?$/);
+  if (robotImport) return at('robotimport', { sub: robotImport[1] ?? null });
   const configure = rest.match(/^\/configure(?:\/([^/]+))?/);
   if (configure) return at('configure', { sub: configure[1] ?? 'robot' });
   const records = rest.match(/^\/records(?:\/([^/]+))?/);
@@ -388,6 +404,7 @@ function navFor(screen: Screen): ShellNav {
     case 'lan':
       return 'play';
     case 'configure':
+    case 'robotimport':
       return 'configure';
     case 'records':
       return 'records';
@@ -1676,6 +1693,13 @@ export function App() {
   const exitGame = (): void => {
     leaveSession();
     setTutorialRun(false);
+    // A TEST DRIVE goes back to the importer it came from, which finds its draft intact
+    const drive = testDriveRef.current;
+    if (drive) {
+      setTestDrive(null);
+      navigate('robotimport', { sub: drive.back });
+      return;
+    }
     navigate('home');
   };
 
@@ -1703,6 +1727,14 @@ export function App() {
   const [pendingStart, setPendingStart] = useState<(() => void) | null>(null);
   /** the next `/game` mount runs the TUTORIAL (see `startTutorial`), cleared on the way out. */
   const [tutorialRun, setTutorialRun] = useState(false);
+  /**
+   * THE IMPORTER'S TEST DRIVE: free drive with the robot being imported, which is NOT the active
+   * robot (it may never be saved). React state for the tutorial's reason: not a preference, not
+   * synced, gone on a reload. `back` is the editor route to return to (a library id, or null).
+   */
+  const [testDrive, setTestDrive] = useState<{ spec: RobotSpec; back: string | null } | null>(null);
+  const testDriveRef = useRef(testDrive);
+  testDriveRef.current = testDrive;
   // a scheduled server restart is live (admin notice): don't let anyone START a new
   // game / queue — they'd just get dropped by the restart. People already in a game
   // are untouched (this only guards the start actions). Info notices don't block.
@@ -1746,6 +1778,24 @@ export function App() {
     else if (lockedOut) setStartBlocked(true);
     else if (restartPending) setStartBlocked(true);
     else if (!startOk) setBadStart(true);
+    else if (newVersion) setPendingStart(() => go);
+    else go();
+  };
+
+  /**
+   * THE IMPORTER'S TEST DRIVE (`ImportEditor`): free drive with the robot being imported.
+   *
+   * Every `guardStart` guard but ONE: start-pose legality. The run spawns on the named anchor
+   * (`GameView` clears `startPose` for it), so a custom pose tuned for another chassis is not in
+   * play and must not block it.
+   */
+  const startTestDrive = (spec: RobotSpec, back: string | null): void => {
+    const go = (): void => {
+      setTestDrive({ spec, back });
+      navigate('game');
+    };
+    if (loadActiveGame()) setBlockedByActive(true);
+    else if (lockedOut || restartPending) setStartBlocked(true);
     else if (newVersion) setPendingStart(() => go);
     else go();
   };
@@ -1920,6 +1970,7 @@ export function App() {
         onSettingsChange={update}
         editLayout={editMobileLayout}
         tutorial={tutorialRun}
+        testDrive={testDrive?.spec}
         onRestartRun={sessionKind === 'record' && !sessionCoop ? restartRun : undefined}
         onWatchReplay={(r) => {
           setReplayObj(r);
@@ -2203,6 +2254,7 @@ export function App() {
       {screen === 'modes' && (
         <ModeSelect
           game={settings.game}
+          importedActive={!!settings.spec.imported}
           multiplayer={multiplayer}
           signedIn={signedIn}
           activeGame={activeGame ? { kind: activeGame.kind } : null}
@@ -2362,9 +2414,28 @@ export function App() {
           onChange={update}
           section={configureSection}
           onSection={(s) => navigate('configure', { sub: s })}
+          onImport={(id) => navigate('robotimport', { sub: id ?? null })}
           onEditTouchControls={editTouchControls}
           onTutorial={moduleFor(settings.game).tutorial ? startTutorial : undefined}
         />
+      )}
+
+      {screen === 'robotimport' && (
+        <LoadBoundary what="the robot importer" fallback={<p className="ds-loading">Loading the importer…</p>}>
+          <ImportEditor
+            key={`${settings.game}:${route.sub ?? 'new'}`}
+            settings={settings}
+            editId={route.sub}
+            onBack={() => navigate('configure', { sub: 'robot' })}
+            onSaved={(spec) => {
+              // a saved (or added) import becomes the active robot, as a picked card does
+              const cur = settingsRef.current;
+              update({ ...cur, spec, assists: coerceAssists(spec.assists, PLAYER_ASSISTS) });
+              navigate('configure', { sub: 'robot' });
+            }}
+            onTestDrive={(spec) => startTestDrive(spec, route.sub)}
+          />
+        </LoadBoundary>
       )}
 
       {screen === 'records' && (
