@@ -1,3 +1,14 @@
+# HANDOFF — 2026-10-02a (swerve pod order, SIM_VERSION 5)
+
+**State: pushed on `alpha` (92d87739).** `npm test` (shared 2877, BIOBUZZ 5399), `build`, `server:check`, `docaudit`, `bundleaudit` pass. **Server change** (`step()` output): needs `./scripts/fly-deploy.sh --alpha`. Not deployed. Not on `main`.
+
+- **Bug:** the traction loop in `updateRobot` read `moduleAngles[i]` (FL, FR, BL, BR) against `wheelLocals[i]` (FL, FR, BR, BL), so a swerve's two rear wheels resisted contact slip along each other's pod axes. The IK/FK, the three canvas `drawWheels` and BIOBUZZ 3D's pods already used FL, FR, BL, BR. No existing check caught it.
+- **Fix:** one order, `WHEEL_CORNERS` in `config.ts`. `wheelLocals`, the IK/FK, the traction loop, the canvas sprites and `buildWheels` derive from it. `wheelContacts` stays a perimeter walk (`WHEEL_PERIMETER`, same points; Chain's `beamRide` indexes it by pairs). The traction loop sums in perimeter order so non-swerve robots step bit-identically.
+- **Measured** (`scratch/swerve-measure.ts`, not committed; 11 scenarios × 5 drivetrains × DECODE / Chain / BIOBUZZ 2D / 3D, plus brawls): every non-swerve run and all of BIOBUZZ 3D digest-identical (3D never runs the traction loop). Swerve free-space drift and wobble unchanged in DECODE and BB2D (Chain strafing, where Chain's own terrain model leaves slip on the books, ends at −2.3° of yaw instead of −1.8). Spinning off a wall: clears it in 2.05 s, was 1.6 (DECODE; Chain 2.07/1.55, BB2D 1.90/1.47). X-locked swerve shoved off-centre from the side: yaw 7.9°, was 13.1. Spinning under a side push: shoved 3.1 in, was 5.1. Pushing a robot or ramming a wall: under 0.05 in and 0.05° of change.
+- **SIM_VERSION 4 → 5:** replays stamped 4 play as DRIFT. `SIM_PATCH` unchanged (monotonic).
+- **Checks:** shared smoke "pod order: …" (where each pod's angle acts, read back out of the traction force; a spin slides no tangent pod; each sprite draws pod i at wheel i); RENDER lane "pod i is BUILT at WHEEL_CORNERS[i]". With the bug put back, the traction and sprite checks fail and nothing else does.
+- **For `feat/robot-import`:** its `wheelLocals` converts `importedWheels` (FL, FR, BL, BR) to FL, FR, BR, BL. After merging this, return the import's wheels as-is; the conversion would bring the bug back for imported swerves.
+
 # HANDOFF — 2026-10-01b (Zenith host: `newAuto` and `hostBuild` in `open`)
 
 **State: branch `feat/zenith-host-newauto-hostbuild`, built on `fix/zenith-host-library-safety` (merge that first), for a PR into `alpha`.** Client only, no server deploy. Not on `main`.
