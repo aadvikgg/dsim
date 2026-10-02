@@ -17,7 +17,7 @@ import { DRIVETRAIN_LABELS } from '../../ui/labelData';
 import { bbox, buildDescriptor, q64 } from '../geometry';
 import { driveReadout, driveRpmFor, importedDriveFields } from '../drive';
 import type { ImportCheck, ImportMeasurement, ImportSetup, LengthUnit, LibrarySource, UpAxis } from '../types';
-import { validateMechFor } from './adapters';
+import { validateMechFor } from './placement';
 import { COPY } from './copy';
 
 export const STEP_COUNT = 4;
@@ -61,20 +61,6 @@ export function baseName(file: string): string {
 /** extra lb a game adds to the mass floor (the same value `coerceSpec` uses) */
 export function extraMassFloor(game: GameId, spec: RobotSpec): number {
   return game === 'chain' ? chainMassFloorBump(spec) : 0;
-}
-
-/** robot-local mechanism placements → the MODEL frame (the inverse of `mechModelToRobot`) */
-export function mechRobotToModel(mech: ImportedMech, origin: Vec2): ImportedMech {
-  const out: ImportedMech = {};
-  if (mech.shooter) out.shooter = { x: mech.shooter.x + origin.x, y: mech.shooter.y + origin.y, z: mech.shooter.z };
-  if (mech.place) out.place = { x: mech.place.x + origin.x, y: mech.place.y + origin.y, z: mech.place.z };
-  if (mech.intakes) {
-    out.intakes = mech.intakes.map((m) => {
-      const lateral = m.edge === 'front' || m.edge === 'back' ? origin.y : origin.x;
-      return { edge: m.edge, from: m.from + lateral, to: m.to + lateral };
-    });
-  }
-  return out;
 }
 
 export interface Built {

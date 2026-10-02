@@ -185,7 +185,9 @@ function routeFor(file, buf) {
   if (/^renderSurfaces-[^/]*\.js$/.test(base)) return 'surfaces';
   // THE ROBOT IMPORTER, by FILENAME (see the route table). `engineLoader-*.js` exists only in the
   // measurement build, where the loader is an entry of its own; in the app it is inlined.
-  if (/^(importerEngine|engineLoader)-[^/]*\.js$/.test(base)) return 'importer';
+  // `geometry-*.js` is the measurement code (`src/robotImport/geometry.ts`) once the editor and the
+  // engine both import it: Rollup splits it into a chunk the two share, fetched with the engine.
+  if (/^(importerEngine|engineLoader|geometry)-[^/]*\.js$/.test(base)) return 'importer';
   if (/^(stepWorker|stepReader)-[^/]*\.js$/.test(base) || /^occt-import-js[^/]*\.wasm$/.test(base)) return 'step';
   // THE ROBOT LIBRARY (`src/robotImport/library.ts`, IndexedDB), by FILENAME: the renderers' asset
   // seam (`src/render/importedAssets.ts`) reaches it with a dynamic `import()` the first time an
@@ -544,9 +546,11 @@ const BASELINE = {
   // move into a chunk the two zones share (178.86, routed `scene` by its marker) and
   // `renderScene-*.js` drops to 49.67, so the route measures 228.53 against 226.55 without the
   // importer: +1.98 of import/export glue and two separately compressed files, inside tolerance.
-  // 2026-10-01 (lane 4): 61.88 -> 54.44, measured in the APP build now that the editor reaches the
-  // loader. The measurement build's chunk also carried glue the app build shares out.
-  importer: { gzip: 54.44 * 1000 },
+  // 2026-10-01 (lane 4, with lanes 2, 6 and 7 merged): 62.81 = `importerEngine-*.js` 54.57 + the
+  // shared `geometry-*.js` 8.24 (the measurement code, which the editor imports too). The feature
+  // branch alone measured 61.75 with geometry inside the engine chunk; the +1.06 is the preview's
+  // camera presets and collision layer.
+  importer: { gzip: 62.81 * 1000 },
   // 2026-10-01: NEW. `occt-import-js-*.wasm` 3110.91 (OpenCascade, 7.6 MB raw), `stepWorker-*.js`
   // 21.95 (the worker with occt's glue) and `stepReader-*.js` 0.42. Fetched only when a STEP file is
   // dropped; every other import, and every player who never imports a robot, pays nothing.
@@ -556,14 +560,12 @@ const BASELINE = {
   // import branches, the asset seam, FootprintSvg) and +2.86 in `scene` (`renderImported.ts`),
   // both inside tolerance against the robot-import branch measured the same minute.
   library: { gzip: 1.85 * 1000 },
-  // 2026-10-01: NEW, the importer's UI (lane 4). `ImportEditor-*.js` 26.23 (the editor: the steps,
-  // the top-down editor, the preview host, drafts, the review checks, and the measurement code it
-  // shares with the engine), `library-*.js` 2.14 and `shareFile-*.js` 1.38, both `import()`ed by the
-  // robot page. Fetched when a player opens the importer or acts on an imported robot. What the
+  // 2026-10-01: NEW, the importer's UI (lane 4). `ImportEditor-*.js` 18.50 (the steps, the top-down
+  // editor, the preview host, drafts, the review checks) and `shareFile-*.js` 1.38, which the robot
+  // page `import()`s to export. Fetched when a player opens the importer or exports a robot. What the
   // robot page itself carries for imports (the row, the panel, the dialogs, the test-drive wiring)
-  // is in `main`: +5.94 KB measured against 485ff5df (994.30), 1.2 of it the lane 2 placement
-  // fallbacks in `adapters.tsx` that go when lane 2's own functions replace them.
-  importerui: { gzip: 29.75 * 1000 },
+  // is in `main`: +4.69 KB against the feature branch at 89aa8323 (1014.33 -> 1019.02).
+  importerui: { gzip: 19.88 * 1000 },
   other: { gzip: 1 * 1000 },
 };
 

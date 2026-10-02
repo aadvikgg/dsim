@@ -4969,23 +4969,6 @@ tr.lb-detail td {
   max-height: 150px;
   object-fit: contain;
 }
-/* an imported robot's FOOTPRINT, when this device has no picture of it (a synced robot): chrome,
-   drawn in the panel's own tokens. In field inches, hence the hairline stroke widths. */
-.ds-import-footprint .hull {
-  fill: var(--ds-tile);
-  stroke: var(--ds-ink-dim);
-  stroke-width: 0.2;
-}
-.ds-import-footprint .wheel {
-  fill: var(--ds-ink-dim);
-}
-.ds-import-footprint .nose {
-  fill: none;
-  stroke: var(--ds-mut);
-  stroke-width: 0.3;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
 /* the 2D schematics: DECODE draws a `<canvas>` with both sides inline, the other two an `<svg>`.
    Box both square and let the drawing keep its own ratio (see `.ds-hero-view canvas`). */
 .ds-robot-card-thumb svg,

@@ -6,7 +6,9 @@ import { RobotCard } from '../../ui/RobotCard';
 import { teamLine } from '../../ui/robotLabels';
 import { standardRobotFor } from '../../settings';
 import { PAGE_COPY as COPY, FORMAT_LABEL } from './pageCopy';
-import { FootprintPicture, bbox } from './adapters';
+import { FootprintSvg } from '../../ui/FootprintSvg';
+import { polyBounds as bbox } from '../../sim/imported';
+import { invalidateImportedAssets } from '../../render/importedAssets';
 import { libraryChanged, onRobotNotice, peekRobotNotice, postRobotNotice, takeRobotNotice } from './handoff';
 import { ConfirmDialog, RenameDialog } from './LibraryDialogs';
 import { exportLibraryRobot } from './exportRobot';
@@ -77,7 +79,7 @@ export function ImportedRow({
                 {view.thumbs[e.id] ? (
                   <img className="ds-import-thumb" src={view.thumbs[e.id]} alt="" />
                 ) : e.spec.imported ? (
-                  <FootprintPicture hull={e.spec.imported.hull} wheels={e.spec.imported.wheels} size={88} />
+                  <FootprintSvg imported={e.spec.imported} drivetrain={e.spec.drivetrain} size={88} />
                 ) : null}
               </span>
             }
@@ -233,6 +235,7 @@ export function useImportedActions({
     if (!r.ok) return setError(r.message);
     if (active === entry.id) applySpec({ ...settings.spec, name });
     setError(null);
+    invalidateImportedAssets(entry.id);
     libraryChanged();
   };
 
@@ -244,6 +247,7 @@ export function useImportedActions({
     await deleteDraft(`${entry.game}:${entry.id}`);
     if (active === entry.id) applySpec(standardRobotFor(settings));
     setError(null);
+    invalidateImportedAssets(entry.id);
     libraryChanged();
   };
 

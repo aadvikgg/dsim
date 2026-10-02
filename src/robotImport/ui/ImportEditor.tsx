@@ -11,7 +11,8 @@ import { defaultImportSetup, transformParts } from '../geometry';
 import { getRobot, newRobotId, putRobot } from '../library';
 import { readShareFile, type SharePayload } from '../shareFile';
 import { STORED_MESH_TO_ROBOT, type ImportSetup, type LibraryRobot } from '../types';
-import { defaultMechFor, mechHandlesFor, registerDraftAssets, validateMechFor } from './adapters';
+import { defaultMechFor, mechHandlesFor, mechRobotToModel, validateMechFor } from './placement';
+import { invalidateImportedAssets, registerImportedAssets, unregisterImportedAssets } from '../../render/importedAssets';
 import { COPY } from './copy';
 import { DrivetrainStep } from './DrivetrainStep';
 import { dropDraft, flushDraft, keepDraft, liveDraft, restoreDraft, type LiveDraft } from './draftStore';
@@ -22,7 +23,6 @@ import {
   buildSpec,
   draftKey,
   driveNumbers,
-  mechRobotToModel,
   moveWheel,
   rectangleWheels,
   reviewItems,
@@ -263,6 +263,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
             setError({ text: r.message });
             return;
           }
+          invalidateImportedAssets(s.imported!.id);
           libraryChanged();
           postRobotNotice(COPY.added(s.name));
           onSaved(s);
@@ -394,7 +395,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   // placements default in once there is a footprint, and again when a mechanism appears
   useEffect(() => {
     if (!doc || !m || !built || m.hull.length < 3) return;
-    const next = defaultMechFor(game, built.spec, m.hull, m.heightIn, doc.mech);
+    const next = defaultMechFor(game, built.spec, m.origin, doc.mech);
     if (JSON.stringify(next) !== JSON.stringify(doc.mech)) update((d) => ({ ...d, mech: next }));
   }, [doc, m, built, game, update]);
 
@@ -475,6 +476,9 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         return;
       }
       await dropDraft(key);
+      // the draft's lent pictures go, and the renderers read the library's copy from now on
+      unregisterImportedAssets(cur.doc.id);
+      invalidateImportedAssets(cur.doc.id);
       libraryChanged();
       postRobotNotice(COPY.saved(spec.name));
       onSaved(spec);
@@ -485,7 +489,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
       const spec = finalSpec();
       const b = await ensureBaked();
       if (!spec || !b) return;
-      registerDraftAssets(spec.imported!.id, { top: b.top, mesh: b.mesh });
+      // lent to the renderers until the draft is saved or discarded (lane 6's asset seam)
+      registerImportedAssets(spec.imported!.id, { top: b.top, mesh: b.mesh });
       flushDraft(key);
       focusOnReturn = 'ri-testdrive';
       onTestDrive(spec);
@@ -504,7 +509,9 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const discard = async (): Promise<void> => {
     setDialog(null);
     gen.current++;
+    const id = draftRef.current?.doc.id;
     await dropDraft(key);
+    if (id) unregisterImportedAssets(id);
     onBack();
   };
 

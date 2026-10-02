@@ -30,7 +30,8 @@ import { OptRow, ToggleRow } from './OptRow';
 import { BuiltinMechRows } from './builderMechs';
 import { useLibrary } from '../robotImport/ui/useLibrary';
 import { ImportedPanel, ImportedRow, useImportedActions, useRobotNotice } from '../robotImport/ui/ImportedRobots';
-import { FootprintPicture, bbox as importBox } from '../robotImport/ui/adapters';
+import { FootprintSvg } from './FootprintSvg';
+import { polyBounds as importBox } from '../sim/imported';
 import { handOffFiles } from '../robotImport/ui/handoff';
 import { PAGE_COPY as IMPORT_COPY } from '../robotImport/ui/pageCopy';
 import { rangeFill } from './rangeFill';
@@ -547,7 +548,7 @@ export function Menu({ settings, onChange, onImport }: Props) {
                 importedThumb ? (
                   <img className="ds-import-hero-img" src={importedThumb} alt="" />
                 ) : (
-                  <FootprintPicture hull={spec.imported.hull} wheels={spec.imported.wheels} size={150} />
+                  <FootprintSvg imported={spec.imported} drivetrain={spec.drivetrain} size={150} />
                 )
               ) : Preview ? (
                 // `allow3d`: this is ONE preview on screen and it is the whole point of the

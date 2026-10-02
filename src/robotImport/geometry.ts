@@ -1201,6 +1201,7 @@ export const robotToModel = (p: Vec2, origin: Vec2): Vec2 => ({ x: p.x + origin.
 export function mechModelToRobot(mech: ImportedMech, origin: Vec2): ImportedMech {
   const out: ImportedMech = {};
   if (mech.shooter) out.shooter = { x: q64(mech.shooter.x - origin.x), y: q64(mech.shooter.y - origin.y), z: q64(mech.shooter.z) };
+  if (mech.shooter2) out.shooter2 = { x: q64(mech.shooter2.x - origin.x), y: q64(mech.shooter2.y - origin.y), z: q64(mech.shooter2.z) };
   if (mech.place) out.place = { x: q64(mech.place.x - origin.x), y: q64(mech.place.y - origin.y), z: q64(mech.place.z) };
   if (mech.intakes) {
     out.intakes = mech.intakes.map((m) => {
@@ -1253,7 +1254,7 @@ export function buildDescriptor(input: { id: string; measurement: ImportMeasurem
   }
   if (input.mech) {
     const mech = mechModelToRobot(input.mech, o);
-    if (mech.shooter || mech.place || mech.intakes?.length) out.mech = mech;
+    if (mech.shooter || mech.shooter2 || mech.place || mech.intakes?.length) out.mech = mech;
   }
   return out;
 }

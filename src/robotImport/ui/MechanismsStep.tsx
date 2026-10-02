@@ -4,7 +4,7 @@ import { moduleFor } from '../../games';
 import { BuiltinMechRows } from '../../ui/builderMechs';
 import { rangeFill } from '../../ui/rangeFill';
 import { q64 } from '../geometry';
-import type { MechCheck, MechHandleDef } from './adapters';
+import type { MechCheck, MechHandleDef } from './placement';
 import { COPY } from './copy';
 import { edgeRange } from './editorModel';
 import { NumberField } from './NumberField';
@@ -65,8 +65,8 @@ export function MechanismsStep({
       handles.push({ key: `${d.key}:from`, label: `${d.label}, end`, ...e.a, shape: 'end', axis: e.axis, bad: bad.has(d.key) });
       handles.push({ key: `${d.key}:to`, label: `${d.label}, other end`, ...e.b, shape: 'end', axis: e.axis, bad: bad.has(d.key) });
       handles.push({ key: `${d.key}:mid`, label: d.label, ...e.mid, shape: 'mid', axis: e.axis, bad: bad.has(d.key) });
-    } else {
-      const p = d.field === 'shooter' ? mech.shooter : mech.place;
+    } else if (d.field !== 'intake') {
+      const p = mech[d.field];
       if (p) handles.push({ key: d.key, label: d.label, x: p.x, y: p.y, z: p.z, shape: 'point', bad: bad.has(d.key) });
     }
   }
@@ -94,7 +94,8 @@ export function MechanismsStep({
       onMech({ ...mech, intakes });
       return;
     }
-    const field = def.field === 'shooter' ? 'shooter' : 'place';
+    const field = def.field;
+    if (field === 'intake') return;
     const old = mech[field];
     if (!old) return;
     onMech({ ...mech, [field]: { x: q64(p.x), y: q64(p.y), z: old.z } });
@@ -141,13 +142,15 @@ export function MechanismsStep({
         </div>
       );
     }
-  } else if (selDef) {
-    const field = selDef.field === 'shooter' ? 'shooter' : 'place';
+  } else if (selDef && selDef.field !== 'intake') {
+    const field = selDef.field;
     const p = mech[field];
     if (p) {
       status = selCheck?.text ?? COPY.placed(selDef.label, p.x, p.y, p.z);
       const set = (patch: Partial<{ x: number; y: number; z: number }>): void => onMech({ ...mech, [field]: { ...p, ...patch } });
-      const top = Math.max(0.25, Math.round(heightIn * 4) / 4);
+      // the release heights the game accepts (lane 2), else the floor to the top of the robot
+      const zLo = Math.max(0, selDef.zMin ?? 0);
+      const top = Math.max(zLo + 0.25, Math.round(Math.min(heightIn, selDef.zMax ?? heightIn) * 4) / 4);
       controls = (
         <div className="ds-fields">
           <NumberField label={COPY.forward} unit="in" value={p.x} min={-12} max={12} step={0.25} onCommit={(x) => set({ x })} />
@@ -159,12 +162,12 @@ export function MechanismsStep({
             <input
               className="ds-range"
               type="range"
-              min={0}
+              min={zLo}
               max={top}
               step={0.25}
-              value={Math.min(top, p.z)}
+              value={Math.max(zLo, Math.min(top, p.z))}
               aria-valuetext={`${p.z.toFixed(2)} inches`}
-              style={rangeFill(Math.min(top, p.z), 0, top)}
+              style={rangeFill(Math.max(zLo, Math.min(top, p.z)), zLo, top)}
               onChange={(e) => set({ z: Number(e.target.value) })}
             />
           </label>
