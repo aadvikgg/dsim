@@ -801,8 +801,15 @@ export function detectWheels(contactXY: ArrayLike<number>, edges: ArrayLike<numb
  * the volume each band's hull wastes over the slices inside it. Returned only when they save at
  * least `BAND_MIN_SAVING` of the one-prism volume; MODEL frame.
  */
+/** the tallest model bands are computed for (the 18-in cube with room for a units guess near it) */
+const BAND_MAX_HEIGHT_IN = ROBOT_MAX_IN * 1.5;
+
 export function computeBands(modelParts: readonly MeshPart[], heightIn: number, maxBands = MAX_BANDS): ImportedBand[] | null {
-  if (!(heightIn > BAND_SLICE_IN * 2)) return null;
+  // ONLY FOR A ROBOT-SIZED MODEL. The DP below is cubic in the slice count, and a model read in the
+  // wrong units (an mm export taken as inches is 380 in tall: 762 slices) took 42 s on the main
+  // thread, freezing the editor on one Units click. Such a model is blocked as oversize anyway,
+  // and bands are never saved for it.
+  if (!(heightIn > BAND_SLICE_IN * 2) || heightIn > BAND_MAX_HEIGHT_IN) return null;
   const S = Math.ceil(heightIn / BAND_SLICE_IN);
   const slicePts: number[][] = Array.from({ length: S }, () => []);
   const sliceZ = (s: number): number => Math.min(heightIn, s * BAND_SLICE_IN);
@@ -848,7 +855,7 @@ export function computeBands(modelParts: readonly MeshPart[], heightIn: number, 
   // hull area of slices i..j, memoised
   const memo = new Map<number, number>();
   const unionArea = (i: number, j: number): number => {
-    const key = i * 1024 + j;
+    const key = i * (S + 1) + j;
     const hit = memo.get(key);
     if (hit !== undefined) return hit;
     const pts: number[] = [];
