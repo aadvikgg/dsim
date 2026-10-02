@@ -15,6 +15,9 @@ import { ToggleRow } from './OptRow';
 
 type AutoModule = typeof import('./zenithEditor');
 
+/** the notice while Zenith's window is open; its `onClosed` clears exactly this line */
+const ZENITH_OPEN_NOTICE = 'Zenith is open in another window. Save there to bring the auto back here.';
+
 /**
  * THE AUTONOMOUS SECTION of Configure ▸ Match (docs/area/autos.md): the player's Zenith autos
  * for this game, a preview of the selected one planned for their alliance and build, and the
@@ -176,9 +179,15 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
         setNotice({ bad: false, text: `Saved ${name} from Zenith.` });
       },
       onLeftOut: setLeftOut,
+      // the popup closed: drop the "open in another window" line and the session's left-out
+      // sentence, but keep a notice something else has put there since (a save, an import)
+      onClosed: () => {
+        setNotice((n) => (n?.text === ZENITH_OPEN_NOTICE ? null : n));
+        setLeftOut(null);
+      },
     });
     if (error) setLeftOut(null);
-    setNotice(error ? { bad: true, text: error } : { bad: false, text: 'Zenith is open in another window. Save there to bring the auto back here.' });
+    setNotice(error ? { bad: true, text: error } : { bad: false, text: ZENITH_OPEN_NOTICE });
   }
 
   /** run the selected auto headless and draw what the robot really drove over the plan */

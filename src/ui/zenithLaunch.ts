@@ -26,6 +26,8 @@ export interface LaunchOptions {
    * their waypoints clash with the file it was sent (`hostLibraryView`), or null when none was.
    */
   onLeftOut?(sentence: string | null): void;
+  /** the Zenith window went away (closed, or replaced by a later launch), so "open in another window" is stale */
+  onClosed?(): void;
 }
 
 /** Returns null when Zenith opened, or the sentence to show when it could not. */
@@ -94,6 +96,7 @@ export function launchZenith(o: LaunchOptions): string | null {
       const wp = waypointsForSave(own, state.sent, text);
       return runAutoHeadless({ game, spec: settings.spec, setup: { auto: text, ...(wp ? { waypoints: wp } : {}) } }).trace;
     },
+    ...(o.onClosed ? { onClosed: o.onClosed } : {}),
   });
   if (!session) return `Couldn’t open Zenith. Allow pop-ups for this site, or open ${ZENITH_URL} yourself.`;
   return null;

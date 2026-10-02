@@ -3,7 +3,7 @@
 **State: branch `feat/zenith-host-newauto-hostbuild`, built on `fix/zenith-host-library-safety` (merge that first), for a PR into `alpha`.** Client only, no server deploy. Not on `main`.
 
 - **What:** the two optional `open` fields of Zenith's host protocol. New in Zenith sends the library (left-out autos excepted) with `newAuto: true`, so Zenith names the new auto clear of them and starts it at the merged file's `start`; every `open` carries `hostBuild`.
-- **`HOST_BUILD` = 1** in `src/ui/zenithOpen.ts` (DOM-free, with `PROTOCOL`, the project types and `openMessage`). Raise it by one with any change to what `open` carries. Zenith's DSIM row sets no `minBuild` yet; setting it is Zenith's side.
+- **`HOST_BUILD` = 1** in `src/ui/zenithOpen.ts` (DOM-free, with `PROTOCOL`, the project types and `openMessage`). Raise it by one with any change to what `open` carries. Zenith's DSIM row sets `minBuild: 1` (Zenith PR #55), so Zenith requires DSIM build 1 and asks the user to reload an older DSIM page before editing.
 - **Naming:** Zenith's `new-auto-2` is stored as `new-auto-2` (no second rename); a left-out auto's name Zenith could not see is renamed once (`freeAutoName` counts on from the root, so never `new-auto-2-2`).
 - **Checks:** AUTO lane "AUTO host open …" and the naming saves.
 - **Not done:** a real-browser run against a local Zenith.
