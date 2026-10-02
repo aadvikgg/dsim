@@ -108,6 +108,12 @@ in Zenith on that auto makes its file the base. Equal poses are not a clash. Zen
 no waypoints, so a save stores the auto's OWN file unchanged plus only the names its text uses that
 the own file lacks, from the file the session sent (`waypointsForSave`): a pose it had never moves.
 At 12 autos Import and New in Zenith stay in the panel, disabled, with the reason (`LIBRARY_FULL`).
+⚠️ **NEW IN ZENITH SENDS THE LIBRARY WITH `newAuto: true`** (not an empty `autos`), so Zenith names the new
+auto clear of every auto sent (`new-auto-2`, …) and DSIM keeps that name; only a left-out auto's name,
+which Zenith could not see, is renamed, once. **Every `open` carries `hostBuild: HOST_BUILD`**
+(`src/ui/zenithOpen.ts`, with the message builder): Zenith says "DSIM is out of date" when a page's build
+is below the minimum it expects. ⚠️ Raise `HOST_BUILD` by one in the same commit as any change to what
+DSIM sends in `open`.
 
 ## Traces
 

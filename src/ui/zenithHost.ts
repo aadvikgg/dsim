@@ -17,29 +17,15 @@
  * Nothing secret is ever posted.
  */
 
+import { openMessage, PROTOCOL, type ZenithOpen } from './zenithOpen';
+
+export type { ZenithOpen, ZenithProject } from './zenithOpen';
+
 /** the public Zenith web app; a deployment (or `npm run dev` beside Zenith's) sets VITE_ZENITH_URL */
 export const ZENITH_URL: string = import.meta.env.VITE_ZENITH_URL || 'https://libraries.horizon36596.org/zenith/app/';
 
-const PROTOCOL = 'zenith-host/1';
-
 export function zenithOrigin(): string {
   return new URL(ZENITH_URL, window.location.href).origin;
-}
-
-export interface ZenithProject {
-  name: string;
-  hostLabel?: string;
-  robot: unknown;
-  field: unknown;
-  waypoints?: unknown;
-  /** auto name -> file text */
-  autos: Record<string, string>;
-}
-
-/** what one `open` carries: the project, and the auto to open first */
-export interface ZenithOpen {
-  project: ZenithProject;
-  open?: string;
 }
 
 export interface ZenithSessionOptions {
@@ -93,16 +79,10 @@ export function openZenith(o: ZenithSessionOptions): ZenithSession | null {
   };
   const sendOpen = (): void => {
     opened = true;
-    const { project, open } = o.project();
-    post({
-      type: 'open',
-      protocol: PROTOCOL,
-      project,
-      ...(open ? { open } : {}),
-      readOnlyRobot: true,
-      capabilities: { simulate: !!o.onRun },
-    });
-    if (o.trace !== undefined && open && open === o.traceAuto) post({ type: 'trace', auto: open, trace: o.trace });
+    const sent = o.project();
+    const { open } = sent;
+    post(openMessage(sent, !!o.onRun));
+    if (o.trace !== undefined && !sent.newAuto && open && open === o.traceAuto) post({ type: 'trace', auto: open, trace: o.trace });
   };
 
   const onMessage = (e: MessageEvent): void => {

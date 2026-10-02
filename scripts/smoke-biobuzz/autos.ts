@@ -25,6 +25,7 @@ import { DEFAULT_ASSISTS } from '../../src/sim/spawn';
 import { defaultSettings, practiceSetups, switchGame } from '../../src/settings';
 import { AUTO_LIBRARY_MAX, LIBRARY_FULL, autoTooLarge, type AutoLibraryEntry, type GameAutoLibrary } from '../../src/auto/library';
 import {
+  freeAutoName,
   hostLibraryView,
   LIBRARY_FULL_SAVE,
   leftOutSentence,
@@ -34,6 +35,7 @@ import {
   type HostLibraryView,
   type HostSaveState,
 } from '../../src/auto/hostLibrary';
+import { HOST_BUILD, openMessage } from '../../src/ui/zenithOpen';
 import { autoHudLine, autoPreNotice } from '../../src/ui/autoHud';
 import type { GameAutoStatus } from '../../src/game';
 import { BB_STARTER_BOTS } from '../../src/games/biobuzz/presets';
@@ -908,6 +910,52 @@ export function autoChecks(check: Check): void {
       !refused.ok && refused.error === LIBRARY_FULL_SAVE && edited.ok && edited.entry.id === 'f3',
       !refused.ok ? refused.error : 'stored',
     );
+    // NEW IN ZENITH sends the library with `newAuto`, and every `open` carries `hostBuild`
+    const project = { name: 'DSIM', robot: {}, field: {}, autos: { 'a-auto': a.auto } };
+    const asNew = openMessage({ project, newAuto: true, open: 'a-auto' }, true);
+    const asEdit = openMessage({ project, open: 'a-auto' }, false);
+    check(
+      'AUTO host open: a new auto says `newAuto` and no `open`; an edit says `open`; both carry a whole `hostBuild`',
+      asNew.newAuto === true && !('open' in asNew) && asEdit.open === 'a-auto' && !('newAuto' in asEdit) &&
+        asNew.hostBuild === HOST_BUILD && asEdit.hostBuild === HOST_BUILD && Number.isSafeInteger(HOST_BUILD) && HOST_BUILD >= 0 &&
+        asNew.protocol === 'zenith-host/1',
+      JSON.stringify({ asNew: { ...asNew, project: undefined }, asEdit: { ...asEdit, project: undefined } }),
+    );
+    const newView = hostLibraryView(library(c, b, a), null);
+    check(
+      'AUTO host open: a new auto is sent the library, its base the file most autos agree with (the newer clashing one left out)',
+      Object.keys(newView.autos).length === 2 && newView.leftOut.length === 1 && newView.leftOut[0].name === 'c-auto' && samePose(points(newView).start, START),
+      JSON.stringify({ autos: Object.keys(newView.autos), leftOut: newView.leftOut.map((l) => l.name) }),
+    );
+    // Zenith's own naming (`freshAutoName` in its host backend): `new-auto`, else `new-auto-2`, …
+    const zenithName = (taken: string[]): string => {
+      if (!taken.includes('new-auto')) return 'new-auto';
+      let i = 2;
+      while (taken.includes(`new-auto-${i}`)) i += 1;
+      return `new-auto-${i}`;
+    };
+    const withNew = library(entry('x', 'new-auto', ['start'], wp({ start: START })), a);
+    const sentNew = hostLibraryView(withNew, null);
+    const named = zenithName(Object.keys(sentNew.autos));
+    const stNew = fresh(sentNew);
+    const first = planHostSave(withNew, stNew, named, autoText(named, ['start']));
+    check(
+      'AUTO host save: the name Zenith gives a new auto is kept, not renamed a second time',
+      named === 'new-auto-2' && first.ok && first.target === 'new-auto-2' && first.entry.id === undefined,
+      first.ok ? first.target : first.error,
+    );
+    // ...unless it is a left-out auto's name, which Zenith could not see: renamed once
+    const hidden = library(entry('y', 'new-auto', ['start'], wp({ start: OTHER_START })), a);
+    const sentHidden = hostLibraryView(hidden, a);
+    const hiddenName = zenithName(Object.keys(sentHidden.autos));
+    const once = planHostSave(hidden, fresh(sentHidden), hiddenName, autoText(hiddenName, ['start']));
+    check(
+      'AUTO host save: a new auto under a left-out auto’s name is renamed once (new-auto-2), never new-auto-2-2',
+      hiddenName === 'new-auto' && once.ok && once.target === 'new-auto-2',
+      once.ok ? once.target : once.error,
+    );
+    const free = freeAutoName(library(entry('z', 'new-auto-2', ['start']), entry('w', 'new-auto-3', ['start'])), 'new-auto-2');
+    check('AUTO host save: a free name counts on from the root, Zenith’s scheme (new-auto-2 taken → new-auto-4)', free === 'new-auto-4', free);
     check(
       'AUTO library: the panel’s full-library reason and the save refusal both name the cap',
       LIBRARY_FULL.includes(`(${AUTO_LIBRARY_MAX})`) && LIBRARY_FULL_SAVE.includes(`(${AUTO_LIBRARY_MAX})`),

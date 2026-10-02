@@ -1,3 +1,13 @@
+# HANDOFF — 2026-10-01b (Zenith host: `newAuto` and `hostBuild` in `open`)
+
+**State: branch `feat/zenith-host-newauto-hostbuild`, built on `fix/zenith-host-library-safety` (merge that first), for a PR into `alpha`.** Client only, no server deploy. Not on `main`.
+
+- **What:** the two optional `open` fields of Zenith's host protocol. New in Zenith sends the library (left-out autos excepted) with `newAuto: true`, so Zenith names the new auto clear of them and starts it at the merged file's `start`; every `open` carries `hostBuild`.
+- **`HOST_BUILD` = 1** in `src/ui/zenithOpen.ts` (DOM-free, with `PROTOCOL`, the project types and `openMessage`). Raise it by one with any change to what `open` carries. Zenith's DSIM row sets no `minBuild` yet; setting it is Zenith's side.
+- **Naming:** Zenith's `new-auto-2` is stored as `new-auto-2` (no second rename); a left-out auto's name Zenith could not see is renamed once (`freeAutoName` counts on from the root, so never `new-auto-2-2`).
+- **Checks:** AUTO lane "AUTO host open …" and the naming saves.
+- **Not done:** a real-browser run against a local Zenith.
+
 # HANDOFF — 2026-10-01a (Zenith host: reloads, name clashes, a full library, merged waypoints)
 
 **State: branch `fix/zenith-host-library-safety`, for a PR into `alpha`.** `build`, `server:check`, `bundleaudit`, `docaudit`, `uiaudit` and the AUTO lane pass; see the PR for the full `npm test` run against the baseline (BIOBUZZ `fieldDims.gen.ts is exactly what emit-dims.mjs renders` and the machine-dependent `step3d`/reconcile timing checks fail on this machine on any tree). Client only, no server deploy. Not on `main`.
