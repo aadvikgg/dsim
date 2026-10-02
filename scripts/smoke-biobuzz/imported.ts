@@ -4,12 +4,13 @@ import { createBiobuzzWorld } from '../../src/games/biobuzz/spawn';
 import { biobuzzStep } from '../../src/games/biobuzz/step';
 import { step3d } from '../../src/games/biobuzz/sim3d/step3d';
 import { import3dShapes } from '../../src/games/biobuzz/sim3d/bodies';
-import { probeFullReconcileMs } from '../../src/games/biobuzz/sim3d/predict';
+import { createLightPredictor, probeFullReconcileMs } from '../../src/games/biobuzz/sim3d/predict';
 import { bbAimHeading, bbMouths, bbPlacePointLocal, bbTurretRelease, bbTurretSolution, mouthAxes } from '../../src/games/biobuzz/robot';
 import { bbAimTarget, bbCellSideOf, bbDumpShotEnters, bbPretendHive, bbTurretShotEnters } from '../../src/games/biobuzz/play';
 import { hiveCellTarget } from '../../src/games/biobuzz/elements';
 import { BB_PLACE_REACH, BB_POLLEN_R, bbLiftPlaceLocal, PREDICT_FULL_BUDGET_MS } from '../../src/games/biobuzz/config';
 import { polyFeature } from '../../src/sim/imported';
+import { BB_G402_CROSS_IN, bbIntrusion } from '../../src/games/biobuzz/penalties';
 import { SIM_DT } from '../../src/config';
 import { rot } from '../../src/math';
 import type { ImportedRobot, RobotSpec, RobotState, Vec2, World } from '../../src/types';
@@ -74,6 +75,113 @@ export function importedChecks(check: Check): void {
         `mouth v ${ax.vc} ± ${ax.half}; in ${inMouth.held}, beside ${beside.held} (depth ${depth.toFixed(2)})`,
       );
     }
+  }
+
+  // ---- G402: an import's depth is its frame's deepest point, not a box centred on its origin ----
+  // (integration review 2026-10-02, finding 1). The origin is the wheelbase centre, so the hull
+  // is off-centre: the old `length/2 × width/2` box billed a robot wholly on its own half and let
+  // a long side cross unseen.
+  {
+    const LONG: ImportedRobot = { v: 1, id: 'b2b2b2b2b2b2b2b2', hull: [{ x: -6, y: -8 }, { x: 12, y: -8 }, { x: 12, y: 8 }, { x: -6, y: 8 }], heightIn: 14 };
+    const ASYM: ImportedRobot = { v: 1, id: 'b3b3b3b3b3b3b3b3', hull: [{ x: -8, y: -4 }, { x: 8, y: -4 }, { x: 8, y: 9 }, { x: -8, y: 9 }], heightIn: 14 };
+    for (const physics of ['2d', '3d'] as const) {
+      // blue import facing +x, its 6-in REAR toward the line, hull min-x at 0.5 (own half); a
+      // standard red robot drives into it in AUTO
+      const w = createBiobuzzWorld('match', 8, [setup(0, 'blue', { ...SWEEP, imported: LONG }), setup(1, 'red', {})], undefined, physics);
+      w.balls.length = 0;
+      w.match.phase = 'auto';
+      w.match.phaseTimeLeft = 25;
+      w.match.preCountdown = undefined;
+      const blue = w.robots[0];
+      const red = w.robots[1];
+      blue.heading = 0;
+      blue.pos = { x: 6.5, y: 40 };
+      red.heading = 0;
+      red.pos = { x: -16, y: 40 };
+      blue.vel = { x: 0, y: 0 };
+      red.vel = { x: 0, y: 0 };
+      const depth0 = bbIntrusion(blue);
+      const ram = cmd({ driveY: 0.5, leftDrive: 0.5, rightDrive: 0.5 });
+      const onBlue: string[] = [];
+      const onRed: string[] = [];
+      for (let t = 0; t < 90; t++) {
+        w.events.length = 0;
+        biobuzzStep(w, SIM_DT, new Map([[0, cmd({})], [1, ram]]));
+        for (const e of w.events) {
+          if (!/G402/.test(e)) continue;
+          // the event names the BENEFICIARY: a foul on blue reads "RED +20"
+          if (/RED \+/.test(e)) onBlue.push(`t${t}`);
+          if (/BLUE \+/.test(e)) onRed.push(`t${t}`);
+        }
+      }
+      check(
+        `import ${physics}: G402 never bills an off-centre import wholly on its own half when it is rammed; the rammer that crossed is billed`,
+        depth0 === 0 && onBlue.length === 0 && onRed.length > 0,
+        `blue depth at rest ${depth0.toFixed(2)}, billed blue ${onBlue.join(',') || 'never'}, billed red ${onRed.join(',') || 'never'}`,
+      );
+    }
+    // the other direction: a long FLANK toward the line. asymL turned to face +y puts its 9-in
+    // left flank toward −x; at x = 6 it is 3 in over blue's line (the box said 6.5 − 6 = 0.5)
+    const s = imported({ imported: ASYM });
+    const r = { spec: s, alliance: 'blue', pos: { x: 6, y: 20 }, heading: Math.PI / 2 } as unknown as RobotState;
+    const d = bbIntrusion(r);
+    check(
+      'import: G402 reads an import’s long flank across the line (depth = the deepest vertex of its frame), not a centred box',
+      Math.abs(d - 3) < 1e-6 && d > BB_G402_CROSS_IN,
+      `depth ${d.toFixed(4)} (cross threshold ${BB_G402_CROSS_IN})`,
+    );
+  }
+
+  // ---- 3D LIGHT predictor: an import is clamped and separated by its HULL ---------------------
+  // (integration review 2026-10-02, finding 4). LIGHT is the mode before the Auto probe finishes
+  // and the fallback on a slow machine. It read `robotExtents`, a box with a SYMMETRIC flank, so
+  // asymL (flanks 9 and 4) strafed into a wall was drawn 5 in off it, and 5.5 in off a robot it
+  // pushed against. Measured against the authority, the import must do no worse than a standard
+  // robot doing the same thing.
+  {
+    const ASYM: ImportedRobot = { v: 1, id: 'b3b3b3b3b3b3b3b3', hull: [{ x: -8, y: -4 }, { x: 8, y: -4 }, { x: 8, y: 9 }, { x: -8, y: 9 }], heightIn: 14 };
+    const lightError = (imp: ImportedRobot | null, remoteAt: Vec2 | null): number => {
+      const sp = imp ? { drivetrain: 'mecanum' as const, imported: imp } : { drivetrain: 'mecanum' as const, length: 16, width: 13 };
+      const setups = [setup(0, 'blue', sp, 0)];
+      if (remoteAt) setups.push(setup(1, 'blue', { drivetrain: 'tank', massLb: 42 }, 1));
+      const w = createBiobuzzWorld('free', 3, setups, undefined, '3d');
+      w.balls.length = 0;
+      const r = w.robots[0];
+      r.pos = remoteAt ? { x: 0, y: 0 } : { x: 0, y: -40 };
+      r.heading = 0;
+      r.vel = { x: 0, y: 0 };
+      if (remoteAt) {
+        w.robots[1].pos = { ...remoteAt };
+        w.robots[1].heading = 0;
+        w.robots[1].vel = { x: 0, y: 0 };
+      }
+      const strafe = cmd({ driveX: 1 }); // robot-centric: strafe RIGHT, toward −y
+      const cmds = new Map([[0, strafe], [1, cmd({})]]);
+      for (let t = 0; t < 30; t++) step3d(w, SIM_DT, cmds);
+      const light = createLightPredictor(w, 0);
+      light.reset(w, w.tick);
+      let worst = 0;
+      for (let t = 0; t < 80; t++) {
+        step3d(w, SIM_DT, cmds);
+        const p = light.step(strafe, new Map([[1, cmd({})]]));
+        worst = Math.max(worst, Math.hypot(p.pos.x - r.pos.x, p.pos.y - r.pos.y));
+      }
+      return worst;
+    };
+    const wallImp = lightError(ASYM, null);
+    const wallStd = lightError(null, null);
+    check(
+      'import 3D LIGHT: an asymmetric import strafed into a wall is predicted against it, within a standard robot’s error',
+      wallImp <= wallStd + 0.05 && wallImp < 0.5,
+      `worst error import ${wallImp.toFixed(2)} in, standard ${wallStd.toFixed(2)} in`,
+    );
+    const pushImp = lightError(ASYM, { x: 0, y: -24 });
+    const pushStd = lightError(null, { x: 0, y: -24 });
+    check(
+      'import 3D LIGHT: ...and strafed into a parked robot it is separated by its hull, within a standard robot’s error',
+      pushImp <= pushStd + 0.05 && pushImp < 1,
+      `worst error import ${pushImp.toFixed(2)} in, standard ${pushStd.toFixed(2)} in`,
+    );
   }
 
   // ---- 3D: the CAD bands are the height profile, not one prism to the top ---------------------

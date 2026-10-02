@@ -13,7 +13,7 @@ import {
 import { createWorld, DEFAULT_ASSISTS, DEFAULT_SPEC, PLAYER_ASSISTS, coerceAssists, coerceAutoPath, coerceSpec, coerceSetup, coerceStartPose } from '../src/sim/spawn';
 import { drawWheels } from '../src/games/chain/parts';
 import { sanitizePlayer, sanitizePlayerPatch } from '../src/net/sanitize';
-import { allianceDuo, derivedRole, savedStartCap } from '../src/ui/startPositions';
+import { allianceDuo, derivedRole, savedStartCap, startHandleReach } from '../src/ui/startPositions';
 import { queuedModes, queuedGames, queuesFor, anyoneQueued, widenHint } from '../src/ui/queueDepth';
 import { roomJoinRegion } from '../src/net/roomRegion';
 import { PRIMARY_HOSTS, primaryWsBase } from '../src/net/primaryHost';
@@ -461,7 +461,7 @@ import {
   CHAIN_PRISM,
   chainArmReach,
 } from '../src/games/chain/config';
-import { CHAIN_HOOKS_PER_GOAL, accelMultiplier, catalystRailHalf, catalystRailTarget, catalystMouth, catalystTrackTarget, chainEvalStart, chainStartExtents, chainHeadingFits, chainNearestFittingHeading, chainSnapStartPose, chainIntakeMouths, chainMirrorStart, chainSnapStart, chainStartLegal, hookPos, labAreas, onRingStand, ringStandBoxes, ringStands } from '../src/games/chain/state';
+import { CHAIN_HOOKS_PER_GOAL, accelMultiplier, catalystRailHalf, catalystRailTarget, catalystMouth, catalystTrackTarget, chainEvalStart, chainFitAnchor, chainStartExtents, chainHeadingFits, chainNearestFittingHeading, chainSnapStartPose, chainIntakeMouths, chainMirrorStart, chainSnapStart, chainStartLegal, hookPos, labAreas, onRingStand, ringStandBoxes, ringStands } from '../src/games/chain/state';
 import {
   CHAIN_CATALYSTS,
   CHAIN_CATALYST_TYPES,
@@ -500,6 +500,7 @@ import {
   IMPORT_QUANTUM,
   coerceImported,
   importedHalfDiag,
+  polyAtPose,
   polyBounds,
   polyCentroid,
   polyFeature,
@@ -32114,6 +32115,153 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
     const b = once();
     check(`imported mechanisms: four imports with placed mechanisms play deterministically — ${g} (two runs, one hash; nothing non-finite; something was intaken)`, a.h === b.h && a.finite && a.held > 0, `${a.h} / ${b.h}, held ${a.held}`);
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// IMPORTED ROBOTS: INTEGRATION (review 2026-10-02) — off-centre hulls where the sim core meets
+// each game's own rules (Chain beams and starts, the start editors, the DECODE tutorial, the
+// Zenith robot file) and the library's id rule across two devices. The hulls are the review's.
+// ════════════════════════════════════════════════════════════════════════════
+
+/** the review's test hulls, robot-local inches, +x forward. The origin (the wheelbase centre)
+ *  is OFF the middle of most of them, which is the whole point. */
+const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
+  nose: IMP_NOSE,
+  diamond: IMP_DIAMOND,
+  longFront: { v: 1, id: '1111111111111111', hull: [{ x: -6, y: -8 }, { x: 12, y: -8 }, { x: 12, y: 8 }, { x: -6, y: 8 }], heightIn: 14 },
+  longRear: { v: 1, id: '2222222222222222', hull: [{ x: -12, y: -8 }, { x: 6, y: -8 }, { x: 6, y: 8 }, { x: -12, y: 8 }], heightIn: 14 },
+  asymL: { v: 1, id: '3333333333333333', hull: [{ x: -8, y: -4 }, { x: 8, y: -4 }, { x: 8, y: 9 }, { x: -8, y: 9 }], heightIn: 14 },
+  sq18: { v: 1, id: '5555555555555555', hull: [{ x: -9, y: -9 }, { x: 9, y: -9 }, { x: 9, y: 9 }, { x: -9, y: 9 }], heightIn: 14 },
+};
+
+// ---- Chain Reaction: a beam blocks an import at the hull's extent TOWARD it ----------------
+{
+  const LONG = IMP_REVIEW_HULLS.longFront;
+  const run = (patch: Partial<RobotSpec>, heading: number) => {
+    const spec = coerceSpec({ ...DEFAULT_SPEC, ...patch, groundClearance: 0.5, drivetrain: 'tank' }, DEFAULT_SPEC, 'chain');
+    const w = createChainWorld('free', 5, [{ id: 0, alliance: 'blue', spec, assists: { fieldCentric: false, aimAssist: false, autoIntake: false, autoFire: false }, startIndex: 0 }]);
+    w.balls.length = 0;
+    const r = w.robots[0];
+    r.pos = { x: 40, y: -22 };
+    r.heading = heading;
+    r.vel = { x: 0, y: 0 };
+    const toward = Math.sin(heading) > 0 ? 1 : -1; // drive toward +y (the beam on y = 0)
+    const m = new Map<number, RobotCommand>([[0, { driveX: 0, driveY: 0.6 * toward, rotate: 0, leftDrive: 0.6 * toward, rightDrive: 0.6 * toward, intake: false, fire: false }]]);
+    let jump = 0;
+    let prev = r.pos.y;
+    for (let t = 0; t < 240; t++) {
+      simModuleFor('chain').step(w, SIM_DT, m);
+      jump = Math.max(jump, prev - r.pos.y);
+      prev = r.pos.y;
+    }
+    return { jump, gap: -0.5 - polyBounds(robotHullWorld(r)).maxY };
+  };
+  const rear = run({ imported: LONG }, -Math.PI / 2);
+  const front = run({ imported: LONG }, Math.PI / 2);
+  const std = run({ length: 18, width: 16 }, -Math.PI / 2);
+  check(
+    'imports/chain beam: a hull with a short rear, driven rear-first into a beam it cannot cross, is held at the beam (no jump bigger than a standard chassis takes)',
+    rear.jump <= std.jump + 1e-9 && rear.jump < 1 && rear.gap >= 0 && rear.gap < 1,
+    `rear-first jump ${rear.jump.toFixed(2)} gap ${rear.gap.toFixed(2)}; front-first jump ${front.jump.toFixed(2)} gap ${front.gap.toFixed(2)}; standard jump ${std.jump.toFixed(2)}`,
+  );
+  check('imports/chain beam: ...and front-first the same', front.jump < 1 && front.gap >= 0 && front.gap < 1, `jump ${front.jump.toFixed(2)} gap ${front.gap.toFixed(2)}`);
+}
+
+// ---- Chain Reaction starts: an import's anchors are FITTED to its off-centre hull ----------
+{
+  const bad: string[] = [];
+  const standLost: string[] = [];
+  for (const [name, imp] of Object.entries(IMP_REVIEW_HULLS)) {
+    const spec = coerceSpec({ ...DEFAULT_SPEC, imported: imp }, DEFAULT_SPEC, 'chain');
+    for (const alliance of ['blue', 'red'] as const) {
+      for (let idx = 0; idx < CHAIN_START_POSES.length; idx++) {
+        const w = createChainWorld('free', 7, [{ id: 0, alliance, spec, assists: { ...DEFAULT_ASSISTS }, startIndex: idx }]);
+        const r = w.robots[0];
+        const p0 = { x: r.pos.x, y: r.pos.y };
+        const b = polyBounds(robotHullWorld(r));
+        // the REAL hull, completely inside an own-side Lab square (touching counts, G04)
+        const s = alliance === 'red' ? -1 : 1;
+        const x0 = Math.min(b.minX * s, b.maxX * s);
+        const x1 = Math.max(b.minX * s, b.maxX * s);
+        const inLab = x0 >= CHAIN_HALF_X - CHAIN_LAB - 1e-6 && x1 <= CHAIN_HALF_X + 1e-6 &&
+          ((b.minY >= CHAIN_HALF_Y - CHAIN_LAB - 1e-6 && b.maxY <= CHAIN_HALF_Y + 1e-6) || (b.maxY <= -CHAIN_HALF_Y + CHAIN_LAB + 1e-6 && b.minY >= -CHAIN_HALF_Y - 1e-6));
+        const hs = CHAIN_RINGSTAND_BOX / 2;
+        const pen = Math.max(0, ...ringStandBoxes().map((c) => Math.min(b.maxX - (c.x - hs), c.x + hs - b.minX, b.maxY - (c.y - hs), c.y + hs - b.minY)));
+        const m = new Map<number, RobotCommand>([[0, { driveX: 0, driveY: 0, rotate: 0, leftDrive: 0, rightDrive: 0, intake: false, fire: false }]]);
+        for (let t = 0; t < 30; t++) simModuleFor('chain').step(w, SIM_DT, m);
+        const moved = hyp(r.pos.x - p0.x, r.pos.y - p0.y);
+        if (!inLab || pen > 1e-6 || moved > 0.05) bad.push(`${name} ${alliance} #${idx} lab=${inLab} pen=${pen.toFixed(2)} moved=${moved.toFixed(2)}`);
+        if (onRingStand(CHAIN_START_POSES[idx].pos) && !onRingStand(p0)) standLost.push(`${name} ${alliance} #${idx}`);
+      }
+    }
+  }
+  check('imports/chain starts: at EVERY anchor, both alliances, every review hull starts completely in its Lab, clear of the ring-stand solid, and does not move on tick one', bad.length === 0, bad.join('; '));
+  check('imports/chain starts: a STAND anchor still starts an import at the stand (the descent is armed), turning it a quarter if its hull needs to', standLost.length === 0, standLost.join('; '));
+
+  // the review's three cases, against the rule the editor colours with
+  const sp = (name: string) => coerceSpec({ ...DEFAULT_SPEC, imported: IMP_REVIEW_HULLS[name] }, DEFAULT_SPEC, 'chain');
+  check(
+    'imports/chain starts: the raw LAB anchor is NOT legal for a long nose (it would start outside the Lab), the fitted one is',
+    !chainStartLegal(sp('longFront'), CHAIN_START_POSES[0].pos, 180) &&
+      (() => {
+        const f = chainFitAnchor(sp('longFront'), { x: 57, y: 57, headingDeg: 180 }, 'blue');
+        return chainStartLegal(sp('longFront'), f, f.headingDeg);
+      })(),
+  );
+  const found = (name: string, a: 'blue' | 'red') => {
+    let n = 0;
+    for (let x = 48; x <= 72; x += 0.5) for (let y = 48; y <= 72; y += 0.5) if (chainStartLegal(sp(name), { x, y }, 180, a)) n++;
+    return n;
+  };
+  check(
+    'imports/chain starts: an 18-in hull with its origin 3 in off the middle HAS legal custom poses (the editor can save one) — longFront and longRear, both alliances',
+    chainHeadingFits(sp('longFront'), 180) && chainHeadingFits(sp('longRear'), 180) && found('longFront', 'blue') > 0 && found('longRear', 'blue') > 0 && found('longFront', 'red') > 0 && found('longRear', 'red') > 0,
+    `${found('longFront', 'blue')} / ${found('longRear', 'blue')} poses at 180°`,
+  );
+  // RED SEES THE HULL MIRRORED: a pose that is legal for red's asymL and not for blue's
+  const asym = sp('asymL');
+  const pose = { x: 57, y: 54, headingDeg: 180 };
+  const redLegal = chainStartLegal(asym, pose, 180, 'red');
+  const blueLegal = chainStartLegal(asym, pose, 180, 'blue');
+  const w = createChainWorld('match', 3, [{ id: 0, alliance: 'red', spec: asym, assists: { ...DEFAULT_ASSISTS }, startIndex: 0, startPose: pose }]);
+  const r = w.robots[0];
+  const hb = polyBounds(robotHullWorld(r));
+  check(
+    'imports/chain starts: red is judged on its hull MIRRORED (a reflection is not a rotation): a red-legal pose spawns where it was placed, with the real hull in the Lab',
+    redLegal && !blueLegal && Math.abs(r.pos.x + pose.x) < 1e-9 && Math.abs(r.pos.y - pose.y) < 1e-9 && hb.minY >= CHAIN_HALF_Y - CHAIN_LAB - 1e-6 && hb.maxY <= CHAIN_HALF_Y + 1e-6,
+    `red ${redLegal} blue ${blueLegal}; spawned (${r.pos.x.toFixed(2)}, ${r.pos.y.toFixed(2)}), hull y ${hb.minY.toFixed(2)}…${hb.maxY.toFixed(2)}`,
+  );
+  check('imports/chain starts: the module predicate passes the alliance through', simModuleFor('chain').startLegal!(asym, 'red', pose) && !simModuleFor('chain').startLegal!(asym, 'blue', pose));
+  // whatever the custom snap returns is legal, for every review hull that fits at all, both alliances
+  const snapBad: string[] = [];
+  for (const name of Object.keys(IMP_REVIEW_HULLS)) {
+    if (name === 'sq18') continue;
+    for (const a of ['blue', 'red'] as const) {
+      for (const p of [{ x: 0, y: 0, headingDeg: 180 }, { x: 71, y: 71, headingDeg: 0 }, { x: 60, y: -60, headingDeg: 45 }, { x: 50, y: 66, headingDeg: 90 }]) {
+        const s = chainSnapStartPose(sp(name), p, a);
+        if (!chainStartLegal(sp(name), s, s.headingDeg, a)) snapBad.push(`${name} ${a} (${p.x},${p.y},${p.headingDeg})`);
+      }
+    }
+  }
+  check('imports/chain starts: the snap lands every review hull on a pose its own rule calls legal', snapBad.length === 0, snapBad.join('; '));
+  // an 18 × 18 hull has no room for the clearance margin (a standard chassis is capped at 17 for
+  // this): it is never legal, and the snap seats it FLUSH rather than in the post
+  const big = sp('sq18');
+  const flush = chainSnapStartPose(big, { x: 57, y: 57, headingDeg: 180 });
+  const fb = polyBounds(polyAtPose(big.imported!.hull, flush, dcos(Math.PI), dsin(Math.PI)));
+  const post = CHAIN_HALF_X - CHAIN_RINGSTAND_BOX; // the stand's inner faces
+  const lab = CHAIN_HALF_X - CHAIN_LAB;
+  check(
+    'imports/chain starts: an 18 × 18 hull is never legal, and its snap is flush against the ring stand, not in it',
+    found('sq18', 'blue') === 0 && (fb.maxX <= post + 1e-6 || fb.maxY <= post + 1e-6) && fb.minX >= lab - 1e-6 && fb.minY >= lab - 1e-6,
+    `hull x ${fb.minX.toFixed(2)}…${fb.maxX.toFixed(2)} y ${fb.minY.toFixed(2)}…${fb.maxY.toFixed(2)}`,
+  );
+  // the spawn and the editor read the one fit
+  const rd = (f: string) => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  check(
+    'imports/chain starts: the spawn and the start editor both place an imported anchor with chainFitAnchor',
+    /chainFitAnchor\(spec, \{ x: p\.pos\.x/.test(rd('src/games/chain/spawn.ts')) && /chainFitAnchor\(spec, anchorPose, alliance\)/.test(rd('src/ui/ChainStartEditor.tsx')),
+  );
 }
 
 // ════════════════════════════════════════════════════════════════════════════

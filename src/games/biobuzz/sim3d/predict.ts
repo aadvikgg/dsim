@@ -4,7 +4,8 @@ import { updateRobot } from '../../../sim/robot';
 import { robotsEnabled } from '../../../sim/match';
 import { chassisInertia } from '../../../sim/robot';
 import { shoveMass } from '../../../sim/drivetrain';
-import { robotExtents, squareUpRobotsWalls } from '../../../sim/physics';
+import { robotExtents, robotHullWorld, squareUpRobotsWalls } from '../../../sim/physics';
+import { polySatGap, rotatedPolyBounds } from '../../../sim/imported';
 import { dcos, dsin } from '../../../math';
 import {
   BB3_CCD_SPEED,
@@ -217,9 +218,33 @@ function cloneRobot(r: RobotState): RobotState {
  * velocity into the wall is zeroed so the next tick does not push straight back into it.
  */
 function clampToField(r: RobotState): void {
-  const fe = robotExtents(r);
   const c = dcos(r.heading);
   const s = dsin(r.heading);
+  /**
+   * AN IMPORT: its HULL turned to the heading. `robotExtents` is the hull's box with a SYMMETRIC
+   * `half` (the larger flank both ways), and the origin is the wheelbase centre, not the box's
+   * middle — so an asymmetric import strafed into a wall was held 5 in off it, the larger flank's
+   * worth, and corrected on every snapshot (integration review 2026-10-02).
+   */
+  if (r.spec.imported) {
+    const b = rotatedPolyBounds(r.spec.imported.hull, c, s);
+    if (r.pos.x + b.maxX > BB_HALF_X) {
+      r.pos.x = BB_HALF_X - b.maxX;
+      if (r.vel.x > 0) r.vel.x = 0;
+    } else if (r.pos.x + b.minX < -BB_HALF_X) {
+      r.pos.x = -BB_HALF_X - b.minX;
+      if (r.vel.x < 0) r.vel.x = 0;
+    }
+    if (r.pos.y + b.maxY > BB_HALF_Y) {
+      r.pos.y = BB_HALF_Y - b.maxY;
+      if (r.vel.y > 0) r.vel.y = 0;
+    } else if (r.pos.y + b.minY < -BB_HALF_Y) {
+      r.pos.y = -BB_HALF_Y - b.minY;
+      if (r.vel.y < 0) r.vel.y = 0;
+    }
+    return;
+  }
+  const fe = robotExtents(r);
   // the footprint's half-extents projected onto the world axes: a box `front`/`rear` long and
   // `half` wide, rotated by the heading. `forward` is the offset of its centre from the origin.
   const hx = (fe.front + fe.rear) / 2;
@@ -276,24 +301,35 @@ function footprint(r: RobotState): { cx: number; cy: number; ux: number; uy: num
  * shallowest one is the normal.
  */
 function separateLight(a: RobotState, b: RobotState): void {
-  const A = footprint(a);
-  const B = footprint(b);
-  const dx = A.cx - B.cx;
-  const dy = A.cy - B.cy;
   let best = Infinity;
   let nx = 0;
   let ny = 0;
-  for (const [ax, ay] of [[A.ux, A.uy], [-A.uy, A.ux], [B.ux, B.uy], [-B.uy, B.ux]]) {
-    const ra = A.hx * Math.abs(A.ux * ax + A.uy * ay) + A.hy * Math.abs(-A.uy * ax + A.ux * ay);
-    const rb = B.hx * Math.abs(B.ux * ax + B.uy * ay) + B.hy * Math.abs(-B.uy * ax + B.ux * ay);
-    const d = dx * ax + dy * ay;
-    const overlap = ra + rb - Math.abs(d);
-    if (overlap <= 0) return; // a separating axis: not touching
-    if (overlap < best) {
-      best = overlap;
-      const sgn = d >= 0 ? 1 : -1; // the normal points from B to A
-      nx = ax * sgn;
-      ny = ay * sgn;
+  if (a.spec.imported || b.spec.imported) {
+    // a pair with an IMPORT: the two FOOTPRINT POLYGONS (the hull, or a standard robot's
+    // rectangle), every edge direction of both — the shared SAT the 2D contact fouls use. The
+    // centred box below is wrong for a hull whose origin is not its middle.
+    const sat = polySatGap(robotHullWorld(a), robotHullWorld(b));
+    if (sat.gap >= 0) return; // separated (or just touching): nothing to push
+    best = -sat.gap;
+    nx = -sat.nx; // `polySatGap`'s normal points from a to b; this one from B to A
+    ny = -sat.ny;
+  } else {
+    const A = footprint(a);
+    const B = footprint(b);
+    const dx = A.cx - B.cx;
+    const dy = A.cy - B.cy;
+    for (const [ax, ay] of [[A.ux, A.uy], [-A.uy, A.ux], [B.ux, B.uy], [-B.uy, B.ux]]) {
+      const ra = A.hx * Math.abs(A.ux * ax + A.uy * ay) + A.hy * Math.abs(-A.uy * ax + A.ux * ay);
+      const rb = B.hx * Math.abs(B.ux * ax + B.uy * ay) + B.hy * Math.abs(-B.uy * ax + B.ux * ay);
+      const d = dx * ax + dy * ay;
+      const overlap = ra + rb - Math.abs(d);
+      if (overlap <= 0) return; // a separating axis: not touching
+      if (overlap < best) {
+        best = overlap;
+        const sgn = d >= 0 ? 1 : -1; // the normal points from B to A
+        nx = ax * sgn;
+        ny = ay * sgn;
+      }
     }
   }
   const ma = shoveMass(a.spec, a.butterflyTank, a.powerDraw);
