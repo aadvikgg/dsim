@@ -23,6 +23,7 @@ import { simplifyParts } from './simplify';
 export { loadModel, pickModelFile, ImportError, MAX_FILE_BYTES } from './load';
 export type { LoadedModel, LoadProgress, LoadStage, ImportErrorCode } from './load';
 export { bake, exportGlb, renderTop, renderThumb, toRobotLocal } from './bake';
+export { liteMesh } from './lite';
 export type { BakeInput, BakeResult } from './bake';
 export { createPreview } from './preview';
 export type { PreviewController, PreviewState } from './preview';

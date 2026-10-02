@@ -39,7 +39,11 @@ export function toRobotLocal(modelParts: readonly MeshPart[], origin: Vec2): Mes
 
 /** robot-local parts → a GLB in the stored mesh frame */
 export async function exportGlb(robotParts: readonly MeshPart[]): Promise<ArrayBuffer> {
-  const stored = transformParts(robotParts, ROBOT_TO_STORED_MESH);
+  return exportGlbStored(transformParts(robotParts, ROBOT_TO_STORED_MESH));
+}
+
+/** parts ALREADY in the stored mesh frame → a GLB (`liteMesh` re-cuts a stored mesh without leaving it) */
+export async function exportGlbStored(stored: readonly MeshPart[]): Promise<ArrayBuffer> {
   const scene = new THREE.Scene();
   const group = buildMeshGroup(stored, 'dsim_robot');
   scene.add(group);

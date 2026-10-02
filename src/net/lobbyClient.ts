@@ -7,6 +7,7 @@ import { getAuthToken } from '../lib/authClient';
 import { setServerNotice } from './notice';
 import { applyPushedStatus } from './siteStatus';
 import { appChannel, appBuild } from './env';
+import { importVisuals } from './importVisualsClient';
 import {
   encodeMsg,
   decodeServerMsg,
@@ -121,6 +122,9 @@ export class LobbyClient {
     transport.onMessage((d) => this.onMessage(d));
     // a transient drop auto-reconnects (see below); only a give-up is terminal
     transport.onFail(() => this.handlers.closed?.());
+    // the imported-robot visuals relay rides this connection (docs/area/netcode.md, VISUALS RELAY);
+    // binding the transport a `ServerSession` already holds keeps what it has
+    importVisuals.bind(transport);
   }
 
   on<K extends keyof Handlers>(event: K, cb: Handlers[K]): void {
@@ -357,6 +361,7 @@ export class LobbyClient {
   }
 
   dispose(): void {
+    importVisuals.release(this.transport);
     this.transport.close();
   }
 
@@ -384,6 +389,9 @@ export class LobbyClient {
          taken, and it is re-sent on every reattach, which is exactly the two moments this has
          to fire. */
       this.sendPhysicsReady();
+      importVisuals.onWelcome(m.clientId); // a new seat on the room's side holds none of our uploads
+    } else if (m.t === 'visualReady' || m.t === 'visualChunk' || m.t === 'visualRefused') {
+      importVisuals.handle(m);
     } else if (m.t === 'lobby') {
       // a recycle that landed on a lobby rather than a session (the host recycled while
       // we were still coming back). The id is ours either way — take it, and the seat's
@@ -393,6 +401,7 @@ export class LobbyClient {
     } else if (m.t === 'roster') {
       this.players = m.players;
       this.hostId = m.hostId;
+      importVisuals.noteRoster(this.clientId, m.players);
       this.handlers.roster?.(m.players, m.hostId);
     } else if (m.t === 'matchStart') {
       this.handlers.matchStart?.(m);

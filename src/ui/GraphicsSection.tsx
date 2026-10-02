@@ -67,6 +67,7 @@ import {
   type FreeCamPreset,
 } from '../games/biobuzz/graphics/freeCam';
 import { installViewKey, viewKeyName } from '../games/biobuzz/graphics/viewKey';
+import { getShowOthersImported, setShowOthersImported, subscribeShowOthersImported } from '../net/importVisualsPref';
 import { OptRow, ToggleRow } from './OptRow';
 import { rangeFill } from './rangeFill';
 import { useCoarsePointer } from './useCoarsePointer';
@@ -661,6 +662,9 @@ export function GraphicsSection() {
 
   const [freeNav, setFreeNav] = useState(() => getFreeCamNav());
   useEffect(() => subscribeFreeCamNav(setFreeNav), []);
+
+  const [showImported, setShowImported] = useState(() => getShowOthersImported());
+  useEffect(() => subscribeShowOthersImported(setShowImported), []);
   /** FREE CAM (owner, 2026-09-21) is MOUSE-ONLY — two-finger orbit/pinch dolly would collide
    * with the on-screen drive sticks (`MobileControls`) reliably enough that it is left out
    * rather than shipped half-working, so the picker hides the option on a touch surface rather
@@ -719,6 +723,16 @@ export function GraphicsSection() {
               copies, because that is how a player already knows which one their hands want. */}
           {camera === 'free' && !touch && <FreeCamRows nav={freeNav} />}
           <DriverHeightRow value={driverHeight} onChange={setDriverHeightIn} />
+          {/* THE ONE PLACE A VIEWER OPTS OUT OF THE VISUALS RELAY (docs/area/netcode.md). Per device,
+              like everything on this screen: what a machine will download is a fact about the machine.
+              Each side names what it costs, which is the only reason a sub-line is here. */}
+          <ToggleRow
+            label="Show other players’ imported robots"
+            value={showImported}
+            onPick={setShowOthersImported}
+            onDesc="Downloads each robot’s picture, and its model in the BIOBUZZ 3D view"
+            offDesc="You see an outline instead. Nothing is downloaded"
+          />
         </div>
       </section>
 

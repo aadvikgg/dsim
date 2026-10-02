@@ -121,6 +121,8 @@ export const DISCORD_INSTANCE_KEY = 'decodesim.discordInstance.v1';
 export const ZENITH_AUTOS_KEY = 'decodesim.zenithAutos.v1';
 /** the IndexedDB database holding imported robots (`src/robotImport/library.ts`): mesh, pictures, setup */
 export const ROBOT_LIBRARY_DB = 'decodesim.robots';
+/** show other players’ imported robots as their real picture/model (default on), or as an outline — per device */
+export const IMPORT_VISUALS_KEY = 'decodesim.importVisuals';
 
 /**
  * THE INVENTORY, in the order the privacy page prints it: `necessary` first (the ones you
@@ -169,7 +171,7 @@ export const STORAGE_KEYS: readonly StorageKeyEntry[] = [
     storage: 'indexeddb',
     category: 'necessary',
     purpose:
-      'Robots you imported from CAD: a simplified 3D model of each, its pictures, and the setup that makes it drive like the real one. The models stay on this device; only a robot’s measurements travel with your settings.',
+      'Robots you imported from CAD: a simplified 3D model of each, its pictures, and the setup that makes it drive like the real one. The models stay on this device; only a robot’s measurements travel with your settings. When you play an imported robot in a custom or LAN room, its top picture (and, in BIOBUZZ, a lighter copy of its model) is also sent to the other people in that room, kept in memory only for as long as the room lasts.',
     retention: 'Until you delete a robot from your imported robots or clear your browser data.',
   },
   {
@@ -270,6 +272,14 @@ export const STORAGE_KEYS: readonly StorageKeyEntry[] = [
     category: 'preference',
     purpose:
       'The 3D quality preset for this machine. Kept per device rather than per account, because a graphics card is a property of the computer in front of you.',
+    retention: 'Until you clear your browser data.',
+  },
+  {
+    key: IMPORT_VISUALS_KEY,
+    storage: 'local',
+    category: 'preference',
+    purpose:
+      'Whether you see other players’ imported robots as the real thing (their picture, and their 3D model in BIOBUZZ) or as an outline. Off means nothing is downloaded for them.',
     retention: 'Until you clear your browser data.',
   },
   {
