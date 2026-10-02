@@ -86,6 +86,9 @@ export interface BiobuzzBuilderProps {
   spec: RobotSpec;
   /** apply a partial edit. The host re-coerces and re-renders; this component does not. */
   setSpec(patch: Partial<RobotSpec>): void;
+  /** the robot importer: no Length, Width, Mass or Height dials (they come from the CAD). The
+   *  hopper stays: how many POLLEN the robot holds is not in a CAD file. */
+  hideFrame?: boolean;
 }
 
 /**
@@ -263,7 +266,7 @@ function BbChassisMap({
   );
 }
 
-export function BiobuzzBuilder({ spec, setSpec }: BiobuzzBuilderProps) {
+export function BiobuzzBuilder({ spec, setSpec, hideFrame = false }: BiobuzzBuilderProps) {
   // THE TWO SLOTS, READ THROUGH THE CANONICAL RESOLVERS — never off the raw `scoreMode`/
   // `shooterMount`/`bbMech` fields directly, for the same reason `robot.ts` and `elements.ts`
   // don't either: `bbLauncherOf`/`bbLiftOf` are the ONE place "what launcher, and is there a
@@ -368,54 +371,58 @@ export function BiobuzzBuilder({ spec, setSpec }: BiobuzzBuilderProps) {
       {/* ---- FRAME: first, and re-clamped live by the mechanism blocks below it ---- */}
       <h3 className="ds-subh">Frame</h3>
       <div className="ds-fields">
-        <label className="ds-field">
-          <span className="cap">
-            Length <span className="val">{dialText(spec.length, BB_SIZE_STEP)}&quot;</span>
-          </span>
-          <input
-            className="ds-range"
-            type="range"
-            min={dials.length.min}
-            max={dials.length.max}
-            step={BB_SIZE_STEP}
-            value={spec.length}
-            aria-valuetext={`${dialText(spec.length, BB_SIZE_STEP)} inches`}
-            style={rangeFill(spec.length, dials.length.min, dials.length.max)}
-            onChange={(e) => setSpec({ length: Number(e.target.value) })}
-          />
-        </label>
-        <label className="ds-field">
-          <span className="cap">
-            Width <span className="val">{dialText(spec.width, BB_SIZE_STEP)}&quot;</span>
-          </span>
-          <input
-            className="ds-range"
-            type="range"
-            min={dials.width.min}
-            max={dials.width.max}
-            step={BB_SIZE_STEP}
-            value={spec.width}
-            aria-valuetext={`${dialText(spec.width, BB_SIZE_STEP)} inches`}
-            style={rangeFill(spec.width, dials.width.min, dials.width.max)}
-            onChange={(e) => setSpec({ width: Number(e.target.value) })}
-          />
-        </label>
-        <label className="ds-field">
-          <span className="cap">
-            Mass <span className="val">{dialText(spec.massLb, BB_MASS_STEP)} lb</span>
-          </span>
-          <input
-            className="ds-range"
-            type="range"
-            min={dials.mass.min}
-            max={dials.mass.max}
-            step={BB_MASS_STEP}
-            value={spec.massLb}
-            aria-valuetext={`${dialText(spec.massLb, BB_MASS_STEP)} pounds`}
-            style={rangeFill(spec.massLb, dials.mass.min, dials.mass.max)}
-            onChange={(e) => setSpec({ massLb: Number(e.target.value) })}
-          />
-        </label>
+        {!hideFrame && (
+          <>
+          <label className="ds-field">
+            <span className="cap">
+              Length <span className="val">{dialText(spec.length, BB_SIZE_STEP)}&quot;</span>
+            </span>
+            <input
+              className="ds-range"
+              type="range"
+              min={dials.length.min}
+              max={dials.length.max}
+              step={BB_SIZE_STEP}
+              value={spec.length}
+              aria-valuetext={`${dialText(spec.length, BB_SIZE_STEP)} inches`}
+              style={rangeFill(spec.length, dials.length.min, dials.length.max)}
+              onChange={(e) => setSpec({ length: Number(e.target.value) })}
+            />
+          </label>
+          <label className="ds-field">
+            <span className="cap">
+              Width <span className="val">{dialText(spec.width, BB_SIZE_STEP)}&quot;</span>
+            </span>
+            <input
+              className="ds-range"
+              type="range"
+              min={dials.width.min}
+              max={dials.width.max}
+              step={BB_SIZE_STEP}
+              value={spec.width}
+              aria-valuetext={`${dialText(spec.width, BB_SIZE_STEP)} inches`}
+              style={rangeFill(spec.width, dials.width.min, dials.width.max)}
+              onChange={(e) => setSpec({ width: Number(e.target.value) })}
+            />
+          </label>
+          <label className="ds-field">
+            <span className="cap">
+              Mass <span className="val">{dialText(spec.massLb, BB_MASS_STEP)} lb</span>
+            </span>
+            <input
+              className="ds-range"
+              type="range"
+              min={dials.mass.min}
+              max={dials.mass.max}
+              step={BB_MASS_STEP}
+              value={spec.massLb}
+              aria-valuetext={`${dialText(spec.massLb, BB_MASS_STEP)} pounds`}
+              style={rangeFill(spec.massLb, dials.mass.min, dials.mass.max)}
+              onChange={(e) => setSpec({ massLb: Number(e.target.value) })}
+            />
+          </label>
+          </>
+        )}
         {/* HOPPER sits with the FRAME, under the dimensions, because that is what sets it: the
             cap is footprint × archetype × intake mount (`bbStorageMax`), clamped to the owner's
             4-element cap (2026-09-12).
@@ -444,22 +451,24 @@ export function BiobuzzBuilder({ spec, setSpec }: BiobuzzBuilderProps) {
             collider is capped at it). It sits with LENGTH and WIDTH because it is the same kind
             of number. It stops at `BB3_HEIGHT_MAX` (18), R102's starting cube, so no build has
             to fold to start and there is no stow height to declare. */}
-        <label className="ds-field">
-          <span className="cap">
-            Height <span className="val">{dialText(deployed, 1)}&quot;</span>
-          </span>
-          <input
-            className="ds-range"
-            type="range"
-            min={BB3_HEIGHT_MIN}
-            max={BB3_HEIGHT_MAX}
-            step={1}
-            value={deployed}
-            aria-valuetext={`${dialText(deployed, 1)} inches`}
-            style={rangeFill(deployed, BB3_HEIGHT_MIN, BB3_HEIGHT_MAX)}
-            onChange={(e) => setSpec({ heightIn: Number(e.target.value) })}
-          />
-        </label>
+        {!hideFrame && (
+          <label className="ds-field">
+            <span className="cap">
+              Height <span className="val">{dialText(deployed, 1)}&quot;</span>
+            </span>
+            <input
+              className="ds-range"
+              type="range"
+              min={BB3_HEIGHT_MIN}
+              max={BB3_HEIGHT_MAX}
+              step={1}
+              value={deployed}
+              aria-valuetext={`${dialText(deployed, 1)} inches`}
+              style={rangeFill(deployed, BB3_HEIGHT_MIN, BB3_HEIGHT_MAX)}
+              onChange={(e) => setSpec({ heightIn: Number(e.target.value) })}
+            />
+          </label>
+        )}
       </div>
 
       {/* ---- INTAKE ---- */}

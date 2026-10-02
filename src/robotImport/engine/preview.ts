@@ -24,13 +24,20 @@ export interface PreviewState {
   mech: ImportedMech | null;
   size: { length: number; width: number; height: number } | null;
   showCube: boolean;
+  /** draw the shape physics uses: the footprint hull as a prism up to the model's height */
+  showCollision: boolean;
 }
+
+/** the editor's camera presets (lane 4) */
+export type PreviewView = 'iso' | 'top' | 'front' | 'side';
 
 export interface PreviewController {
   update(state: Partial<PreviewState>): void;
   resize(width: number, height: number): void;
   /** back to the default 3/4 view */
   resetView(): void;
+  /** one of the camera presets, framed on the model */
+  setView(view: PreviewView): void;
   dispose(): void;
 }
 
@@ -111,6 +118,7 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
     mech: null,
     size: null,
     showCube: true,
+    showCollision: false,
   };
 
   let frame = 0;
@@ -123,13 +131,23 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
   };
   controls.addEventListener('change', render);
 
-  const resetView = (): void => {
+  const resetView = (): void => setView('iso');
+  function setView(view: PreviewView): void {
     const h = state.size?.height ?? 12;
     controls.target.set(0, 0, h / 2);
-    camera.position.set(42, 34, 30 + h / 2);
+    // straight down needs an up that is not the view axis: front (+x) up on screen
+    camera.up.set(0, 0, 1);
+    if (view === 'top') {
+      camera.position.set(0.01, 0, 70 + h);
+      camera.up.set(1, 0, 0);
+    } else if (view === 'front') camera.position.set(62, 0, h / 2 + 4);
+    else if (view === 'side') camera.position.set(0, 62, h / 2 + 4);
+    else camera.position.set(42, 34, 30 + h / 2);
+    camera.lookAt(controls.target);
     controls.update();
+    camera.up.set(0, 0, 1);
     render();
-  };
+  }
 
   const rebuildOverlays = (): void => {
     disposeTree(overlays);
@@ -183,6 +201,12 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
         overlays.add(line([new THREE.Vector3(p.x, p.y, 0.05), new THREE.Vector3(p.x, p.y, p.z)], color));
       }
     }
+    if (state.showCollision && state.hull && state.hull.length >= 3 && state.size) {
+      const top = state.size.height;
+      const ring = (z: number): THREE.Vector3[] => state.hull!.map((p) => new THREE.Vector3(p.x, p.y, z));
+      overlays.add(line(ring(top), COLORS.hull, true));
+      for (const p of state.hull) overlays.add(line([new THREE.Vector3(p.x, p.y, z), new THREE.Vector3(p.x, p.y, top)], COLORS.hull));
+    }
     const over = !!state.size && Math.max(state.size.length, state.size.width, state.size.height) > CUBE_IN + 1 / 64;
     cubeMat.color.setHex(over ? COLORS.cubeOver : COLORS.cube);
     cube.visible = state.showCube;
@@ -221,6 +245,7 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
     update,
     resize,
     resetView,
+    setView,
     dispose(): void {
       if (frame) cancelAnimationFrame(frame);
       controls.removeEventListener('change', render);

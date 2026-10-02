@@ -14,9 +14,14 @@ import { ROBOT_LIBRARY_DB } from '../storageKeys';
 import type { GameId } from '../types';
 import type { LibraryEntry, LibraryRobot } from './types';
 
-const DB_VERSION = 1;
+/** 2 added the two DRAFT stores (lane 4, the editor): `drafts` holds an unfinished import's editor
+ *  state (keyPath `key`, index `game`), `draftModels` its simplified source-frame model, written
+ *  once per file so an edit rewrites only the small state row. */
+const DB_VERSION = 2;
 const ROBOTS = 'robots';
 const FILES = 'files';
+const DRAFTS = 'drafts';
+const DRAFT_MODELS = 'draftModels';
 const KINDS = ['mesh', 'top', 'thumb'] as const;
 type FileKind = (typeof KINDS)[number];
 const fileKey = (id: string, kind: FileKind): string => `${id}:${kind}`;
@@ -77,6 +82,11 @@ function openDb(): Promise<IDBDatabase | null> {
         s.createIndex('game', 'game', { unique: false });
       }
       if (!db.objectStoreNames.contains(FILES)) db.createObjectStore(FILES);
+      if (!db.objectStoreNames.contains(DRAFTS)) {
+        const d = db.createObjectStore(DRAFTS, { keyPath: 'key' });
+        d.createIndex('game', 'game', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(DRAFT_MODELS)) db.createObjectStore(DRAFT_MODELS);
     };
     req.onsuccess = () => {
       const db = req.result;
@@ -252,4 +262,75 @@ export function topFor(id: string): Promise<Blob | null> {
 /** the card thumbnail */
 export function thumbFor(id: string): Promise<Blob | null> {
   return fileFor(id, 'thumb');
+}
+
+// ---- drafts: an import the editor has not saved yet (lane 4) ---------------------------------
+//
+// Keyed `<game>:new` (a new import) or `<game>:<id>` (unsaved edits to a library robot). The state
+// row is small and rewritten on every edit (debounced by the editor); the model is the simplified
+// SOURCE-frame model, structured-cloned as is (typed arrays and all), written once per file. A
+// reload restores both, so corrections still re-run from the source exactly as before.
+
+/** an unfinished import's editor state. The editor owns the shape; the library stores it. */
+export interface DraftRecord {
+  key: string;
+  game: GameId;
+  updated: number;
+  [field: string]: unknown;
+}
+
+/** drafts older than this are dropped the next time the list is read */
+export const DRAFT_MAX_AGE_MS = 30 * 24 * 3600 * 1000;
+
+/** save a draft's state, and its model when `model` is given */
+export function putDraft(state: DraftRecord, model?: unknown): Promise<LibraryResult<void>> {
+  return withDb(async (db) => {
+    const stores = model === undefined ? [DRAFTS] : [DRAFTS, DRAFT_MODELS];
+    const tx = db.transaction(stores, 'readwrite');
+    tx.objectStore(DRAFTS).put(state);
+    if (model !== undefined) tx.objectStore(DRAFT_MODELS).put(model, state.key);
+    const e = await done(tx);
+    return e ? err(e) : ok(undefined);
+  });
+}
+
+/** a draft's state and model (null when either is missing) */
+export function getDraft(key: string): Promise<LibraryResult<{ state: DraftRecord; model: unknown } | null>> {
+  return withDb(async (db) => {
+    const tx = db.transaction([DRAFTS, DRAFT_MODELS], 'readonly');
+    const state = (await request(tx.objectStore(DRAFTS).get(key))) as DraftRecord | undefined;
+    if (!state) return ok(null);
+    const model = await request(tx.objectStore(DRAFT_MODELS).get(key));
+    return ok(model === undefined ? null : { state, model });
+  });
+}
+
+/** the drafts for one game, without their models; prunes the stale ones */
+export function listDrafts(game: GameId): Promise<LibraryResult<DraftRecord[]>> {
+  return withDb(async (db) => {
+    const tx = db.transaction([DRAFTS, DRAFT_MODELS], 'readwrite');
+    const store = tx.objectStore(DRAFTS);
+    const rows = (await request(store.index('game').getAll(game))) as DraftRecord[];
+    const now = Date.now();
+    const keep: DraftRecord[] = [];
+    for (const r of rows) {
+      if (now - r.updated > DRAFT_MAX_AGE_MS) {
+        store.delete(r.key);
+        tx.objectStore(DRAFT_MODELS).delete(r.key);
+      } else keep.push(r);
+    }
+    const e = await done(tx);
+    return e ? err(e) : ok(keep);
+  });
+}
+
+/** remove a draft and its model */
+export function deleteDraft(key: string): Promise<LibraryResult<void>> {
+  return withDb(async (db) => {
+    const tx = db.transaction([DRAFTS, DRAFT_MODELS], 'readwrite');
+    tx.objectStore(DRAFTS).delete(key);
+    tx.objectStore(DRAFT_MODELS).delete(key);
+    const e = await done(tx);
+    return e ? err(e) : ok(undefined);
+  });
 }

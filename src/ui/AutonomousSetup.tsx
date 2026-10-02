@@ -279,7 +279,7 @@ export function AutonomousSetup({ settings }: { settings: GameSettings }) {
               {status?.text}
             </div>
             {v && (
-              <dl className="ds-auto-facts">
+              <dl className="ds-facts">
                 <dt>Written for</dt>
                 <dd>{v.fileAlliance}{v.mirrored ? `, mirrored for ${settings.alliance.toUpperCase()}` : ''}</dd>
                 {v.warnings.length > 0 && (

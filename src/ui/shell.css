@@ -4956,6 +4956,36 @@ tr.lb-detail td {
   object-fit: cover;
   transform: scale(1.35);
 }
+/* AN IMPORTED ROBOT'S thumbnail is framed on the robot already (the importer's `renderThumb`
+   fits its bounding sphere), so it is shown whole rather than cropped like the 3D captures */
+.ds-robot-card-thumb img.ds-import-thumb {
+  object-fit: contain;
+  transform: none;
+}
+/* the hero's picture of an imported robot: the same thumbnail, at the hero's 150px */
+.ds-import-hero-img {
+  display: block;
+  max-width: 100%;
+  max-height: 150px;
+  object-fit: contain;
+}
+/* an imported robot's FOOTPRINT, when this device has no picture of it (a synced robot): chrome,
+   drawn in the panel's own tokens. In field inches, hence the hairline stroke widths. */
+.ds-import-footprint .hull {
+  fill: var(--ds-tile);
+  stroke: var(--ds-ink-dim);
+  stroke-width: 0.2;
+}
+.ds-import-footprint .wheel {
+  fill: var(--ds-ink-dim);
+}
+.ds-import-footprint .nose {
+  fill: none;
+  stroke: var(--ds-mut);
+  stroke-width: 0.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 /* the 2D schematics: DECODE draws a `<canvas>` with both sides inline, the other two an `<svg>`.
    Box both square and let the drawing keep its own ratio (see `.ds-hero-view canvas`). */
 .ds-robot-card-thumb svg,
@@ -6586,7 +6616,9 @@ a.ds-cta {
   background: color-mix(in srgb, var(--ds-red) 12%, var(--ds-panel));
   border-color: color-mix(in srgb, var(--ds-red) 40%, var(--ds-line));
 }
-.ds-auto-facts {
+/* THE dt/dd FACT LIST: a muted label column and its values. Born as the Autonomous preview's
+   `.ds-auto-facts`; renamed when the robot importer needed the same list on two more surfaces. */
+.ds-facts {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: var(--ds-s-1) var(--ds-s-3);
@@ -6594,11 +6626,11 @@ a.ds-cta {
   font-size: var(--ds-t-sm);
   line-height: var(--ds-lh-heading);
 }
-.ds-auto-facts dt {
+.ds-facts dt {
   color: var(--ds-mut);
   font-weight: 600;
 }
-.ds-auto-facts dd {
+.ds-facts dd {
   margin: 0;
   color: var(--ds-ink);
 }
