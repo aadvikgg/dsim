@@ -1,3 +1,19 @@
+# HANDOFF — 2026-10-02a (robot import: all lanes merged on `feat/robot-import`; integration fixes open)
+
+**State: on `feat/robot-import` only (semi-permanent branch off `alpha`, owner request). Not on `alpha` or `main`, nothing deployed.** At this commit: `npm test` (shared 3611, BIOBUZZ 5426), `build`, `server:check`, `test:workers` 149, `test:mm` 222, `bundleaudit` (baselines raised with reasons), `uiaudit`, `docaudit`, `contrast` pass. Server code changed, so merging to alpha needs an alpha redeploy.
+
+- **Built:** import from GLB/glTF/STEP/STL/OBJ/3MF/PLY (workers, no main-thread task over 50 ms up to 3.85 M triangles), auto units/up/front/wheels, FTC motor/gear/wheel drivetrain readout, mechanisms placed on the CAD, plain-language checks, test drive, library (rename/duplicate/delete/export `.glb` share file), hull collision and hull-aware fouls/starts, mechanisms on the hull in all three games, 2D/3D rendering, custom/LAN-room visuals relay, ranked/record/upload refusal on the server. Guide: `docs/area/robot-import.md`; contract: `docs/robot-import-plan.md`.
+- **OPEN, from the integration review** (`scratchpad` probes not committed; repro steps here):
+  1. HIGH: BIOBUZZ G402 `bbIntrusion` (`src/games/biobuzz/penalties.ts:956`) measures depth with a box centred on the origin; an off-centre hull fully on its own half gets billed (and a long side can cross 3 in unseen). Fix: for an import, depth = max over `chassisCorners(r)` along the line normal.
+  2. MEDIUM: Chain `beamBlock` (`src/games/chain/beams.ts:403`) uses max(half, front, rear) for an import, teleporting an off-centre hull up to 6.4 in. Fix: the extent toward the beam from `rotatedPolyBounds`.
+  3. MEDIUM: Chain starts (`chain/spawn.ts:56`, `chain/state.ts:511 chainStartExtents`) are symmetric: off-centre hulls start overlapping the ring stand or outside the Lab while `startLegal` says yes, and the editor finds no legal pose. Fix like BIOBUZZ `start.ts extents()`, route imported anchors through `chainSnapStartPose`.
+  4. MEDIUM: BIOBUZZ 3D LIGHT predictor (`sim3d/predict.ts:219-270`) clamps/separates an import as a symmetric box (5 in error at a wall). Fix: rotated hull bounds + `polySatGap`.
+  5. MEDIUM: on a second device, "Import the file" re-ids the synced active robot, so the first device then shows "Model not on this device" (ping-pong). Fix: match `sharedFrom` too in the Menu lookup (`src/ui/Menu.tsx:429`).
+  6. LOW: start editors draw `length × width` boxes and place the heading handle at `length/2 + 8` (`ChainStartEditor.tsx:192`, `StartPositionEditor.tsx:178`, `biobuzz/StartEditor.tsx:145`); Chain editor cache key lacks `imported`. DECODE tutorial `dropOneAhead(w, r, 14)` (`decode/tutorial.ts:115`) can land inside a long nose. Zenith robot file (`biobuzz/auto/index.ts:92`) uses a box and full-edge mouths.
+  7. Unconfirmed: video export may draw the silhouette for the first frames (assets load lazily); main/beta clients drop `spec.imported` on a settings save from those sites.
+- **Owner decisions:** imports simulate the starting configuration only (deploying intakes/lifts beyond the CAD are not modelled, except the BIOBUZZ ramp); the pre-existing swerve pod-order bug in the traction loop (fixing changes standard step output, so `SIM_VERSION`); whether imports ever reach ranked (no today).
+- **Not tested:** a real FTC robot CAD file (synthetic fixtures and generated stress models only).
+
 # HANDOFF — 2026-10-01a (robot import, branch `feat/robot-import`, IN PROGRESS)
 
 **State: on `feat/robot-import` only (semi-permanent feature branch off `alpha`, owner request). Not on `alpha` or `main`.** At `485ff5df`: `npm test` (shared 3145, BIOBUZZ 5384), `build`, `server:check`, `bundleaudit`, `docaudit`, `uiaudit` pass. Server code changed (lane 5), so nothing ships until the branch is merged and alpha is redeployed.

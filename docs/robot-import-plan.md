@@ -188,7 +188,13 @@ spec, setup, name }`. Parsing the extras needs no three.js (read the GLB header 
 - No competitor product names anywhere in the repo. No git stash/checkout/reset/clean.
   Electron captures run offscreen (`show:false`, `offscreen:true`).
 
-## 5. Lanes
+## 5. Lanes (all merged on `feat/robot-import` by 2026-10-02)
+
+Built as planned, plus three lanes the plan did not have: 6b (renderers read the sim's mechanism
+accessors, nothing else), 8 (main-chunk trim and the bundle baselines) and 9 (workers, so a
+multi-million-triangle CAD file never blocks the page), and a server-side review whose five fixes
+are merged (bounded coercion cost, a GLB allowlist, one import id per room, rolling relay budgets,
+caps re-read on rejoin). How it works now is in `docs/area/robot-import.md`; this table is history.
 
 | lane | owner | files | after |
 |---|---|---|---|
