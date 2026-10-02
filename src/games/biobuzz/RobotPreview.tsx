@@ -13,7 +13,9 @@ import {
   BB_SIDE_ROLLER_R,
   bbSideRollerY,
 } from './config';
-import { bbIntakeKindOf, bbLauncherOf, bbLiftOf } from './mechs';
+import { bbIntakeKindOf, bbIsTurreted, bbLauncherOf, bbLiftOf } from './mechs';
+import { FootprintSvg, importedFootprintLabel } from '../../ui/FootprintSvg';
+import { useImportedTopUrl } from '../../ui/useImportedAssets';
 import { BB_MODE_LABELS } from './labels';
 import { BB_PLACE_MARK_R, bbBoxTubeGlyph } from './parts';
 import { EDGE_ANGLE, type BbMountPos, bbMouthFrame, bbShooterEdgeOf, edgeGeom, turretLocal, turretRadius } from './mounts';
@@ -61,6 +63,9 @@ export function BiobuzzRobotPreview({
   /** print the dimension line under the robot (see the DECODE `RobotPreview`'s prop) */
   caption?: boolean;
 }) {
+  // AN IMPORTED ROBOT is its hull, not this schematic's box: the footprint, with the marks where
+  // this game's accessors put its mechanisms (the same ones the sprite and the sim read)
+  if (spec.imported) return <ImportedBiobuzzPreview spec={spec} size={size} fluid={fluid} caption={caption} />;
   const w = spec.width;
   const len = spec.length;
 
@@ -554,5 +559,29 @@ export function BiobuzzRobotPreview({
         </text>
       )}
     </svg>
+  );
+}
+
+/** the builder preview of an IMPORTED BIOBUZZ robot — see `ui/FootprintSvg.tsx` */
+function ImportedBiobuzzPreview({ spec, size, fluid, caption }: { spec: RobotSpec; size: number; fluid: boolean; caption: boolean }) {
+  const imp = spec.imported;
+  const image = useImportedTopUrl(imp?.id);
+  if (!imp) return null;
+  const launcher = bbLauncherOf(spec, BB_HOOD_DEFAULT_DEG);
+  const r = turretRadius(spec);
+  const turrets = bbIsTurreted(launcher)
+    ? [launcher.mount, ...(launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount2] : [])].map((m) => ({ ...turretLocal(spec, m), r }))
+    : [];
+  return (
+    <FootprintSvg
+      imported={imp}
+      drivetrain={spec.drivetrain}
+      marks={{ mouths: bbMouths(spec), turrets, place: bbPlacePointLocal(spec) }}
+      image={image}
+      size={size}
+      fluid={fluid}
+      caption={caption}
+      label={importedFootprintLabel(imp)}
+    />
   );
 }

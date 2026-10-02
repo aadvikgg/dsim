@@ -1,6 +1,16 @@
-import type { Artifact, RobotState, Vec2, World } from '../../types';
+import type { Artifact, ImportedRobot, RobotState, Vec2, World } from '../../types';
 import * as C from '../../config';
 import { drawDecal, ROBOT_TRIM, roundRect, tintColor } from '../../render/drawRobot';
+import {
+  clipToHull,
+  drawAimMark,
+  drawImportedBody,
+  drawImportedChevron,
+  drawImportedOutline,
+  drawMouthState,
+  hopperBarInHull,
+  traceHull,
+} from '../../render/drawImported';
 import { accentFill, clampCosmetics } from '../../cosmetics';
 import { footprintExtents } from '../../sim/field';
 import { drawChassisBody, drawChassisOutline, drawWheels } from './parts';
@@ -175,7 +185,8 @@ export function drawChainRobot(
     ctx.translate(r.pos.x, r.pos.y);
     ctx.rotate(r.heading);
     ctx.fillStyle = `rgba(0,0,0,${(0.3 * Math.min(1, ride.lift * 1.3)).toFixed(3)})`;
-    roundRect(ctx, -hl, -hw, r.spec.length, r.spec.width, C.CHASSIS_CORNER);
+    if (r.spec.imported) traceHull(ctx, r.spec.imported.hull);
+    else roundRect(ctx, -hl, -hw, r.spec.length, r.spec.width, C.CHASSIS_CORNER);
     ctx.fill();
     ctx.restore();
   }
@@ -183,6 +194,24 @@ export function drawChainRobot(
   ctx.save();
   ctx.translate(r.pos.x + ox, r.pos.y + oy);
   ctx.rotate(r.heading);
+
+  // AN IMPORTED ROBOT: its hull or its picture, then this game's dynamic layer from the same
+  // accessors (`drawImportedChain` below). The standard path that follows is untouched.
+  if (r.spec.imported) {
+    const pictured = drawImportedChain(ctx, r, r.spec.imported, intaking, accent, color, lift <= 0.15, world);
+    ctx.restore();
+    if (mode === 'turret' || mode === 'twinturret') {
+      if (pictured) {
+        const local = turretLocal(r.spec);
+        const cx = r.pos.x + Math.cos(r.heading) * local.x - Math.sin(r.heading) * local.y + ox;
+        const cy = r.pos.y + Math.sin(r.heading) * local.x + Math.cos(r.heading) * local.y + oy;
+        drawAimMark(ctx, cx, cy, r.turretHeading, turretRadius(r.spec), loaded);
+      } else {
+        drawTurret(ctx, r, loaded, ox, oy, mode === 'twinturret');
+      }
+    }
+    return;
+  }
 
   /**
    * ...INSIDE THE COLLISION BOX. Every stroke on the boundary is an inside stroke, because
@@ -242,6 +271,54 @@ export function drawChainRobot(
   ctx.restore();
 
   if (mode === 'turret' || mode === 'twinturret') drawTurret(ctx, r, loaded, ox, oy, mode === 'twinturret');
+}
+
+/**
+ * CHAIN REACTION'S SPRITE BODY FOR AN IMPORTED ROBOT (`render/drawImported.ts` has the rules), in
+ * the robot frame the caller set up. The hull or the import's picture; then this game's layer
+ * from its own accessors — the sweeper(s) at `chainIntakeMouths`, the drum/catapult at the
+ * mounted edge (`edgeGeom`), the catalyst mechanism at `mountOrigin` — as hardware on a
+ * silhouette, and as STATE over a picture (the mouths' grab areas, the hopper bar, the alliance
+ * chevron). Returns whether it drew the picture; the caller draws the turret after it.
+ */
+function drawImportedChain(
+  ctx: CanvasRenderingContext2D,
+  r: RobotState,
+  imp: ImportedRobot,
+  intaking: boolean,
+  accent: string,
+  color: string,
+  shadow: boolean,
+  world: World | undefined,
+): boolean {
+  const mode = r.spec.scoreMode ?? CHAIN_DEFAULT_SCORE_MODE;
+  const loaded = r.hopper.length > 0;
+  ctx.save();
+  clipToHull(ctx, imp);
+  const pictured = drawImportedBody(ctx, r, { fill: C.chassisFill(r.spec.chassisColor), accent, shadow });
+  if (pictured) {
+    drawMouthState(ctx, chainIntakeMouths(r.spec), intaking);
+  } else {
+    drawChainIntake(ctx, r, intaking, accent);
+    if (mode === 'drum' || mode === 'dumper') {
+      const edge = shooterEdgeOf(r.spec);
+      const g = edgeGeom(r.spec, edge);
+      ctx.save();
+      ctx.rotate(EDGE_ANGLE[edge]);
+      if (mode === 'drum') drawDrum(ctx, g.dist, g.span, loaded);
+      else drawCatapult(ctx, g.dist, g.span, loaded);
+      ctx.restore();
+    }
+  }
+  // the alliance chevron, behind the centroid like the standard sprite's (clear of the front
+  // mechanisms), and the hopper bar where the hull has room for it
+  drawImportedChevron(ctx, imp, color, -0.5);
+  const bar = hopperBarInHull(imp, 8, 1.15);
+  if (bar) drawHopperBar(ctx, r, bar.x, bar.y, bar.w);
+  drawImportedOutline(ctx, imp, ROBOT_TRIM);
+  ctx.restore();
+  if (!pictured) drawCatalystMech(ctx, r, accent, world);
+  return pictured;
 }
 
 /**
@@ -596,11 +673,15 @@ function drawTurret(
 
 /** a slim hopper-fill bar (stored particles ÷ capacity) near the rear of the chassis. */
 function drawHopperFill(ctx: CanvasRenderingContext2D, r: RobotState, hw: number): void {
+  const w = hw * 1.1; // bar width
+  drawHopperBar(ctx, r, -w / 2, hw - 2.6, w);
+}
+
+/** the hopper-fill bar itself, `w` long at (`x`, `y`) in the robot frame — an import places it
+ * inside its hull (`hopperBarInHull`), a standard robot at `drawHopperFill`'s spot */
+function drawHopperBar(ctx: CanvasRenderingContext2D, r: RobotState, x: number, y: number, w: number): void {
   const cap = chainHopperCap(r.spec);
   const frac = Math.max(0, Math.min(1, r.hopper.length / cap));
-  const w = hw * 1.1; // bar width
-  const x = -w / 2;
-  const y = hw - 2.6;
   ctx.fillStyle = 'rgba(10,14,20,0.75)';
   roundRect(ctx, x, y, w, 1.15, 0.4);
   ctx.fill();

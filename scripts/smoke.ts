@@ -502,6 +502,32 @@ import {
 } from '../src/sim/imported';
 import { robotHullWorld } from '../src/sim/physics';
 import { robotHullLocal } from '../src/sim/field';
+import {
+  ANY_ID,
+  IMPORTED_MESH_CAP,
+  IMPORTED_MESH_TO_ROBOT,
+  IMPORTED_TOP_CAP,
+  importedAssetCacheSizes,
+  importedAssetVersion,
+  importedMeshBlob,
+  importedMeshVersion,
+  importedTopFrame,
+  importedTopImage,
+  importedTopUrl,
+  invalidateImportedAssets,
+  registerImportedAssets,
+  resetImportedAssetsForTests,
+  robotToTopPixel,
+  setImportedAssetSource,
+  subscribeImportedAssets,
+  topImageTransform,
+  topPixelToRobot,
+  unregisterImportedAssets,
+} from '../src/render/importedAssets';
+import { pullInsideHull } from '../src/render/drawImported';
+import { drawRobot as drawDecodeSprite } from '../src/render/drawRobot';
+import { drawChainRobot } from '../src/games/chain/drawRobot';
+import { drawBiobuzzRobot } from '../src/games/biobuzz/drawRobot';
 import { wheelLocals, chassisInertia } from '../src/sim/robot';
 import { placeGroundArtifact } from '../src/sim/world';
 import { bbFootprintGap, bbRobotsContact } from '../src/games/biobuzz/penalties';
@@ -29076,7 +29102,9 @@ const dumperSetup = (): RobotSetup => {
     readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
       d.isDirectory() ? walk(joinPath(dir, d.name)) : /\.tsx?$/.test(d.name) ? [joinPath(dir, d.name)] : [],
     );
-  const revokers = walk('src').filter((f) => /revokeObjectURL/.test(readFileSync(f, 'utf8')));
+  // `render/importedAssets.ts` is the one owner of DISPLAY object URLs (an imported robot's top-down
+  // picture, revoked when its cache entry goes) — never a download, so it is not this rule's case
+  const revokers = walk('src').filter((f) => /revokeObjectURL/.test(readFileSync(f, 'utf8')) && !/importedAssets\.ts$/.test(f));
   const sb = readFileSync('src/ui/saveBlob.ts', 'utf8');
   check(
     '⚠️ downloads: only saveBlob revokes an object URL, and it waits well past the hand-off',
@@ -30123,6 +30151,393 @@ function impPlayCheck(g: GameId): void {
   };
   const dflt = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_NOSE }, DEFAULT_SPEC, 'decode');
   check('wheels: BASE parking counts the stated wheels (narrow: full, default: partial)', park(narrow) === 10 && park(dflt) === 5, `${park(narrow)} / ${park(dflt)}`);
+}
+
+/**
+ * ---- IMPORTED ROBOT VISUALS: the asset seam and its two frames (`src/render/importedAssets.ts`) ----
+ *
+ * The seam stores nothing: a source answers by id, in-memory blobs are lent, and a capped LRU holds
+ * decoded pictures whose object URLs must be revoked when they leave it. Node has no `Image`, so a
+ * stub decodes on the next microtask; `URL.createObjectURL`/`revokeObjectURL` are wrapped to count.
+ */
+{
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 6; i++) await new Promise<void>((r) => setTimeout(r, 0));
+  };
+  const g = globalThis as unknown as { Image?: unknown };
+  const hadImage = 'Image' in g;
+  const prevImage = g.Image;
+  const realCreate = URL.createObjectURL;
+  const realRevoke = URL.revokeObjectURL;
+  const live = new Set<string>();
+  let created = 0;
+  let revokedTwice = 0;
+  let revokedUnknown = 0;
+  URL.createObjectURL = (b: Blob): string => {
+    const u = `blob:test/${++created}`;
+    live.add(u);
+    void b;
+    return u;
+  };
+  URL.revokeObjectURL = (u: string): void => {
+    if (!live.has(u)) {
+      if (u.startsWith('blob:test/') && Number(u.slice(10)) <= created) revokedTwice++;
+      else revokedUnknown++;
+    }
+    live.delete(u);
+  };
+  class StubImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    decoding = '';
+    naturalWidth = 512;
+    private s = '';
+    set src(v: string) {
+      this.s = v;
+      queueMicrotask(() => this.onload?.());
+    }
+    get src(): string {
+      return this.s;
+    }
+  }
+  g.Image = StubImage;
+  try {
+    resetImportedAssetsForTests();
+    // ── the TOP-DOWN PICTURE's frame — the one map from its pixels to robot inches ──
+    const hull = IMP_NOSE.hull; // x −8..10, y −8..8
+    const f = importedTopFrame(hull);
+    check('imported assets: the top frame is the hull box, centred, max side + 1 in, 512 px',
+      f.cx === 1 && f.cy === 0 && f.sideIn === 19 && f.px === 512 && Math.abs(f.inPerPx - 19 / 512) < 1e-12, JSON.stringify(f));
+    let worst = 0;
+    for (const p of hull) {
+      const { u, v } = robotToTopPixel(p, f);
+      const q = topPixelToRobot(u, v, f);
+      worst = Math.max(worst, Math.hypot(q.x - p.x, q.y - p.y));
+    }
+    check('imported assets: robot → pixel → robot round-trips every hull vertex', worst < 1e-9, worst.toExponential(2));
+    const front = topPixelToRobot(f.px / 2, 0, f);
+    const left = topPixelToRobot(0, f.px / 2, f);
+    check('imported assets: image UP is robot +x (front), image LEFT is robot +y (left)',
+      front.x > f.cx + 9 && Math.abs(front.y - f.cy) < 1e-9 && left.y > f.cy + 9 && Math.abs(left.x - f.cx) < 1e-9);
+    const [a, b, c, d, e, ff] = topImageTransform(f);
+    let tw = 0;
+    for (const [u, v] of [[0, 0], [512, 0], [37, 411], [256, 256]]) {
+      const want = topPixelToRobot(u, v, f);
+      tw = Math.max(tw, Math.hypot(a * u + c * v + e - want.x, b * u + d * v + ff - want.y));
+    }
+    check('imported assets: the canvas transform IS the frame (drawImage lands where topPixelToRobot says)', tw < 1e-9, tw.toExponential(2));
+    // the sprite's chain to the SCREEN: robot frame → world (a nose-up heading, +90°) → the camera's
+    // y-flip. Image right must be screen right and image down screen down: never mirrored.
+    const toScreen = (u: number, v: number): [number, number] => {
+      const rx = a * u + c * v + e;
+      const ry = b * u + d * v + ff;
+      const wx = -ry; // rotate +90°
+      const wy = rx;
+      return [wx, -wy]; // y-flip
+    };
+    const o0 = toScreen(0, 0);
+    const ou = toScreen(1, 0);
+    const ov = toScreen(0, 1);
+    check('imported assets: drawn nose-up, the picture is NOT mirrored (image right = screen right, down = down)',
+      ou[0] - o0[0] > 0 && Math.abs(ou[1] - o0[1]) < 1e-9 && ov[1] - o0[1] > 0 && Math.abs(ov[0] - o0[0]) < 1e-9);
+    // ── the STORED MESH frame: glTF metres (+Y up, +Z front, +X left) → robot inches ──
+    const M = IMPORTED_MESH_TO_ROBOT;
+    const apply = (x: number, y: number, z: number): [number, number, number] => [
+      M[0] * x + M[4] * y + M[8] * z + M[12],
+      M[1] * x + M[5] * y + M[9] * z + M[13],
+      M[2] * x + M[6] * y + M[10] * z + M[14],
+    ];
+    const near = (p: number[], q: number[]): boolean => p.every((v, i) => Math.abs(v - q[i]) < 1e-9);
+    const det =
+      M[0] * (M[5] * M[10] - M[9] * M[6]) - M[4] * (M[1] * M[10] - M[9] * M[2]) + M[8] * (M[1] * M[6] - M[5] * M[2]);
+    check('imported assets: mesh frame — glTF +Z (1 in) is robot front, +X is left, +Y is up, and it is a proper rotation',
+      near(apply(0, 0, 0.0254), [1, 0, 0]) && near(apply(0.0254, 0, 0), [0, 1, 0]) && near(apply(0, 0.0254, 0), [0, 0, 1]) && det > 0,
+      `det ${det}`);
+
+    // ── the SOURCE, the cache, the cap, and revocation ──
+    const asked: string[] = [];
+    const meshAsked: string[] = [];
+    const blob = (s: string): Blob => new Blob([s], { type: 'image/png' });
+    setImportedAssetSource({
+      top: async (id) => {
+        asked.push(id);
+        return id.startsWith('0') ? null : blob(id);
+      },
+      mesh: async (id) => {
+        meshAsked.push(id);
+        return id.startsWith('0') ? null : new Blob([id], { type: 'model/gltf-binary' });
+      },
+    });
+    const ids = Array.from({ length: IMPORTED_TOP_CAP + 3 }, (_, i) => `a${String(i).padStart(15, '0')}`);
+    const heard: string[] = [];
+    const off = subscribeImportedAssets((id) => heard.push(id));
+    check('imported assets: the first ask is null (not loaded YET) and starts exactly one load', importedTopImage(ids[0]) === null && asked.length === 1);
+    importedTopImage(ids[0]);
+    check('...a second ask while it loads does not start another', asked.length === 1);
+    await flush();
+    const img0 = importedTopImage(ids[0]);
+    check('imported assets: once decoded the picture is returned, with its URL, and readers were told',
+      img0 !== null && importedTopUrl(ids[0]) === (img0 as unknown as StubImage).src && heard.includes(ids[0]) && importedAssetVersion(ids[0]) > 0);
+    for (const id of ids) importedTopImage(id);
+    await flush();
+    const sizes = importedAssetCacheSizes();
+    check(`imported assets: the picture cache is capped at ${IMPORTED_TOP_CAP}`, sizes.tops <= IMPORTED_TOP_CAP, String(sizes.tops));
+    check('imported assets: every evicted picture\'s URL was revoked — live URLs = cached pictures, none revoked twice',
+      live.size === sizes.tops && revokedTwice === 0 && revokedUnknown === 0, `live ${live.size} cached ${sizes.tops} twice ${revokedTwice} unknown ${revokedUnknown}`);
+    check('imported assets: the LRU kept the most recent and dropped the oldest',
+      importedTopUrl(ids[ids.length - 1]) !== null && !live.has(`blob:test/1`));
+    // a MISS (not on this device) is remembered for pictures, and never makes a URL
+    const before = created;
+    importedTopImage('0000000000000001');
+    await flush();
+    check('imported assets: a picture this device does not have resolves null and creates no URL',
+      importedTopImage('0000000000000001') === null && created === before);
+
+    // ── LENT blobs win, replace cleanly, and leave cleanly ──
+    const draft = 'b000000000000001';
+    registerImportedAssets(draft, { top: blob('draft-1') });
+    importedTopImage(draft);
+    await flush();
+    const u1 = importedTopUrl(draft);
+    const v1 = importedAssetVersion(draft);
+    const mv1 = importedMeshVersion(draft);
+    registerImportedAssets(draft, { top: blob('draft-2') });
+    check('imported assets: re-lending a draft\'s picture revokes the old URL and moves its version (not its MESH version)',
+      u1 !== null && !live.has(u1) && importedAssetVersion(draft) > v1 && importedMeshVersion(draft) === mv1);
+    importedTopImage(draft);
+    await flush();
+    const u2 = importedTopUrl(draft);
+    check('...and the new picture decodes under a new URL', u2 !== null && u2 !== u1 && live.has(u2));
+    check('imported assets: a lent draft never asked the source', !asked.includes(draft));
+    unregisterImportedAssets(draft);
+    check('imported assets: unregistering revokes the draft\'s URL', u2 !== null && !live.has(u2));
+    const aid = ids[ids.length - 1];
+    const ua = importedTopUrl(aid);
+    const ma = importedMeshVersion(aid);
+    invalidateImportedAssets(aid);
+    check('imported assets: invalidate drops the cached picture (URL revoked) and moves the mesh version',
+      ua !== null && !live.has(ua) && importedMeshVersion(aid) > ma);
+
+    // ── meshes: lent wins, the source is cached (capped), a miss is not ──
+    const lent = new Blob(['lent'], { type: 'model/gltf-binary' });
+    registerImportedAssets('c000000000000001', { mesh: lent });
+    check('imported assets: a lent mesh is returned as is', (await importedMeshBlob('c000000000000001')) === lent && !meshAsked.includes('c000000000000001'));
+    const m1 = importedMeshBlob(ids[1]);
+    check('imported assets: a mesh lookup is cached (same promise, one ask)', importedMeshBlob(ids[1]) === m1 && meshAsked.filter((x) => x === ids[1]).length === 1);
+    for (const id of ids) void importedMeshBlob(id);
+    await flush();
+    check(`imported assets: the mesh lookup cache is capped at ${IMPORTED_MESH_CAP}`, importedAssetCacheSizes().meshes <= IMPORTED_MESH_CAP);
+    await importedMeshBlob('0000000000000002');
+    await flush();
+    await importedMeshBlob('0000000000000002');
+    check('imported assets: a mesh MISS is not cached — a mesh that arrives later is found', meshAsked.filter((x) => x === '0000000000000002').length === 2);
+
+    // ── a load that lands after its entry left the cache is revoked, not leaked ──
+    let release: (b: Blob | null) => void = () => undefined;
+    setImportedAssetSource({ top: () => new Promise((r) => (release = r)), mesh: async () => null });
+    const slow = 'd000000000000001';
+    importedTopImage(slow);
+    invalidateImportedAssets(slow);
+    release(blob('late'));
+    await flush();
+    check('imported assets: a decode that lands for an evicted entry leaves no live URL behind', live.size === importedAssetCacheSizes().tops, `live ${live.size}`);
+    // ── swapping the SOURCE moves every id's version (a settled "no mesh" retries) ──
+    const anyBefore = heard.filter((x) => x === ANY_ID).length;
+    const vBefore = importedMeshVersion('0000000000000003');
+    setImportedAssetSource(null);
+    check('imported assets: swapping the source moves EVERY id\'s mesh version and tells readers',
+      importedMeshVersion('0000000000000003') > vBefore && heard.filter((x) => x === ANY_ID).length === anyBefore + 1);
+    off();
+    // no DOM at all: nothing throws, nothing loads
+    g.Image = undefined;
+    let threw = false;
+    try {
+      threw = importedTopImage('e000000000000001') !== null;
+    } catch {
+      threw = true;
+    }
+    check('imported assets: with no DOM (the server, a worker) a picture ask is a quiet null', !threw);
+  } finally {
+    resetImportedAssetsForTests();
+    URL.createObjectURL = realCreate;
+    URL.revokeObjectURL = realRevoke;
+    if (hadImage) g.Image = prevImage;
+    else delete g.Image;
+  }
+}
+
+/**
+ * ---- IMPORTED ROBOTS, 2D: every game's sprite draws an import from its HULL ----
+ *
+ * Run against a recording context: the first clip after the robot's transform must be the hull
+ * polygon, vertex for vertex (the sprite cannot exceed what collides); with a picture lent the body
+ * is one `drawImage` through `topImageTransform`; without one there is none; a standard robot still
+ * clips to a rectangle. Both turreted and turretless builds, all three games.
+ */
+{
+  interface Rec {
+    ctx: CanvasRenderingContext2D;
+    clips: Vec2[][];
+    images: number[][];
+    calls: number;
+  }
+  const recorder = (): Rec => {
+    let path: Vec2[] = [];
+    let lastTransform: number[] = [];
+    const rec: Rec = { ctx: null as unknown as CanvasRenderingContext2D, clips: [], images: [], calls: 0 };
+    const target: Record<string, unknown> = {
+      beginPath: () => {
+        path = [];
+      },
+      moveTo: (x: number, y: number) => path.push({ x, y }),
+      lineTo: (x: number, y: number) => path.push({ x, y }),
+      rect: (x: number, y: number, w: number, h: number) => {
+        path.push({ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h });
+      },
+      clip: () => rec.clips.push(path.slice()),
+      transform: (...m: number[]) => {
+        lastTransform = m;
+      },
+      drawImage: () => rec.images.push(lastTransform),
+      createLinearGradient: () => ({ addColorStop: () => undefined }),
+      measureText: () => ({ width: 0 }),
+    };
+    rec.ctx = new Proxy(target, {
+      get(t, k) {
+        rec.calls++;
+        if (k in t) return t[k as string];
+        return () => undefined;
+      },
+      set() {
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+    return rec;
+  };
+  const g = globalThis as unknown as { Image?: unknown };
+  const hadImage = 'Image' in g;
+  const prevImage = g.Image;
+  class StubImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    decoding = '';
+    set src(_v: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  g.Image = StubImage;
+  try {
+    resetImportedAssetsForTests();
+    const imp = coerceImported(IMP_NOSE)!;
+    const sameHull = (p: Vec2[]): boolean =>
+      p.length === imp.hull.length && p.every((q, i) => Math.abs(q.x - imp.hull[i].x) < 1e-9 && Math.abs(q.y - imp.hull[i].y) < 1e-9);
+    type Draw = (ctx: CanvasRenderingContext2D, w: World) => void;
+    const games: [GameId, Partial<RobotSpec>[], Draw][] = [
+      ['decode', [{}], (ctx, w) => drawDecodeSprite(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w)],
+      ['chain', [{ scoreMode: 'turret' }, { scoreMode: 'drum' }], (ctx, w) => drawChainRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w)],
+      [
+        'biobuzz',
+        [
+          { bbMech: { launcher: { kind: 'twinturret', mount: 'left', mount2: 'right', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'back' }, intake: { kind: 'sweeper' } } },
+          { bbMech: { launcher: { kind: 'dumper', mount: 'back', hoodDeg: 45 }, lift: null, intake: { kind: 'ramp' } } },
+        ] as Partial<RobotSpec>[],
+        (ctx, w) => drawBiobuzzRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w),
+      ],
+    ];
+    for (const [game, variants, draw] of games) {
+      for (const [vi, patch] of variants.entries()) {
+        const { w } = impWorld(game, [{ ...patch, imported: IMP_NOSE }]);
+        const r = w.robots[0];
+        r.hopper = game === 'biobuzz' ? ['yellow', 'red'] : ['green'];
+        const tag = `${game}#${vi}`;
+        check(`imported 2D ${tag}: the world kept the import`, !!r.spec.imported);
+        // SILHOUETTE: no picture anywhere
+        const s = recorder();
+        let threw = '';
+        try {
+          draw(s.ctx, w);
+        } catch (err) {
+          threw = String(err);
+        }
+        check(`imported 2D ${tag}: the silhouette draws without throwing`, threw === '' && s.calls > 50, threw);
+        check(`imported 2D ${tag}: its clip is the HULL, vertex for vertex`, s.clips.length > 0 && sameHull(s.clips[0]), JSON.stringify(s.clips[0]));
+        check(`imported 2D ${tag}: no picture is drawn without one`, s.images.length === 0);
+        // PICTURED: a picture lent for this id
+        registerImportedAssets(imp.id, { top: new Blob(['png'], { type: 'image/png' }) });
+        importedTopImage(imp.id);
+        for (let i = 0; i < 6; i++) await new Promise<void>((res) => setTimeout(res, 0));
+        const p = recorder();
+        threw = '';
+        try {
+          draw(p.ctx, w);
+        } catch (err) {
+          threw = String(err);
+        }
+        const want = topImageTransform(importedTopFrame(r.spec.imported!.hull));
+        check(`imported 2D ${tag}: with a picture it draws without throwing`, threw === '', threw);
+        check(`imported 2D ${tag}: the picture is ONE drawImage through the frame's transform, inside the hull clip`,
+          p.images.length === 1 && p.images[0].every((v, i) => Math.abs(v - want[i]) < 1e-9) && sameHull(p.clips[0]),
+          JSON.stringify(p.images));
+        unregisterImportedAssets(imp.id);
+      }
+      // a STANDARD robot of the same game still clips to its rectangle and draws no picture
+      const { w } = impWorld(game, [{}]);
+      const s = recorder();
+      draw(s.ctx, w);
+      check(`imported 2D ${game}: a STANDARD robot still clips to a rectangle and draws no picture`,
+        s.clips.length > 0 && s.clips[0].length === 4 && s.images.length === 0, JSON.stringify(s.clips[0]));
+    }
+    // held elements are pulled onto the deck the hull has (BIOBUZZ's slots are searched on the box)
+    const corner = pullInsideHull(imp, { x: 9.5, y: 7.5 }, 1.15);
+    check('imported 2D: a held-element slot in an empty box corner is pulled inside the hull with its clearance',
+      polyFeature(imp.hull, corner).depth >= 1.15 - 1e-9, JSON.stringify(corner));
+  } finally {
+    resetImportedAssetsForTests();
+    if (hadImage) g.Image = prevImage;
+    else delete g.Image;
+  }
+}
+
+/**
+ * ---- IMPORTED ROBOTS: FootprintSvg (cards, the hero, the SVG builder previews) ----
+ *
+ * Nose up through `matrix(0,-1,-1,0,0,0)` (robot left = screen left), and the picture placed in
+ * screen space by the SAME frame the sprite uses — so a hull vertex and the picture's pixel for
+ * that vertex land on one screen point.
+ */
+{
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { createElement } = await import('react');
+  const { FootprintSvg } = await import('../src/ui/FootprintSvg');
+  const imp = coerceImported(IMP_NOSE)!;
+  const html = renderToStaticMarkup(
+    createElement(FootprintSvg, {
+      imported: imp,
+      drivetrain: 'xdrive',
+      marks: { mouths: [{ edge: 'front', x0: 8, x1: 10, y0: -3, y1: 3 }], turrets: [{ x: -2, y: 0, r: 3 }], place: { x: 11, y: 0 } },
+      image: 'blob:test/x',
+      caption: true,
+      label: 'Imported robot',
+    }),
+  );
+  check('FootprintSvg: draws the hull in the bird\'s-eye frame matrix(0,-1,-1,0,0,0), never rotate(-90)',
+    html.includes('matrix(0,-1,-1,0,0,0)') && !html.includes('rotate(-90') && html.includes(imp.hull.map((p) => `${p.x},${p.y}`).join(' ')));
+  check('FootprintSvg: with a picture — no silhouette wheels, the picture clipped to the hull, the caption, an accessible name',
+    (html.match(/<rect[^>]*rx="0.5"/g) ?? []).length === 0 && html.includes('<image') && html.includes('clip-path="url(#') &&
+      html.includes('wide · ') && html.includes('aria-label="Imported robot"'));
+  const num = (attr: string): number => Number(new RegExp(`<image[^>]* ${attr}="([^"]+)"`).exec(html)?.[1]);
+  const f = importedTopFrame(imp.hull);
+  let worst = 0;
+  for (const p of imp.hull) {
+    const { u, v } = robotToTopPixel(p, f);
+    const sx = num('x') + u * (num('width') / f.px);
+    const sy = num('y') + v * (num('height') / f.px);
+    worst = Math.max(worst, Math.hypot(sx - -p.y, sy - -p.x));
+  }
+  check('FootprintSvg: the picture\'s pixel for each hull vertex lands ON that vertex (one frame, not mirrored)', worst < 1e-9, worst.toExponential(2));
+  const bare = renderToStaticMarkup(createElement(FootprintSvg, { imported: imp }));
+  check('FootprintSvg: without a picture it draws the silhouette and four wheels; unlabelled it is decorative',
+    !bare.includes('<image') && (bare.match(/rx="0.5"/g) ?? []).length === 4 && bare.includes('aria-hidden="true"'));
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

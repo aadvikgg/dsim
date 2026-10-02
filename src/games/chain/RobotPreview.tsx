@@ -15,6 +15,8 @@ import {
 import { catalystRailHalf, chainIntakeMouths } from './state';
 import { EDGE_ANGLE, MOUNT_ANGLE, catalystDrawPos, catalystMountOf, catalystSwingOf, edgeGeom, intakeMouthFrame, isEdgePos, mountOrigin, shooterEdgeOf, turretLocal, turretRadius } from './mounts';
 import { footprintExtents } from '../../sim/field';
+import { FootprintSvg, importedFootprintLabel } from '../../ui/FootprintSvg';
+import { useImportedTopUrl } from '../../ui/useImportedAssets';
 
 /** dimension-label type size, in the viewBox's inch units */
 const DIM_FONT = 1.7;
@@ -37,6 +39,9 @@ export function ChainRobotPreview({
   /** print the dimension line under the robot (see `RobotPreview`'s prop of the same name) */
   caption?: boolean;
 }) {
+  // AN IMPORTED ROBOT is its hull, not this schematic's box: the footprint, with the marks where
+  // this game's accessors put its mechanisms (the same ones the sprite and the sim read)
+  if (spec.imported) return <ImportedChainPreview spec={spec} size={size} caption={caption} />;
   const w = spec.width;
   const len = spec.length;
 
@@ -589,6 +594,27 @@ export function ChainRobotPreview({
         </text>
       )}
     </svg>
+  );
+}
+
+/** the builder preview of an IMPORTED Chain Reaction robot — see `ui/FootprintSvg.tsx` */
+function ImportedChainPreview({ spec, size, caption }: { spec: RobotSpec; size: number; caption: boolean }) {
+  const imp = spec.imported;
+  const image = useImportedTopUrl(imp?.id);
+  if (!imp) return null;
+  const mode = spec.scoreMode ?? CHAIN_DEFAULT_SCORE_MODE;
+  const turrets = mode === 'turret' || mode === 'twinturret' ? [{ ...turretLocal(spec), r: turretRadius(spec) }] : [];
+  const place = mountOrigin(spec, catalystDrawPos(catalystMountOf(spec), catalystSwingOf(spec)));
+  return (
+    <FootprintSvg
+      imported={imp}
+      drivetrain={spec.drivetrain}
+      marks={{ mouths: chainIntakeMouths(spec), turrets, place }}
+      image={image}
+      size={size}
+      caption={caption}
+      label={importedFootprintLabel(imp)}
+    />
   );
 }
 
