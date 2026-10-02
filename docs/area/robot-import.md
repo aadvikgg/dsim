@@ -173,3 +173,14 @@ pattern, or `import` reads as a section name). Four steps: Model, Drivetrain, Me
   `index.html` sheet. `scripts/importpad.cjs` walks the editor by stubbed gamepad and then by
   real key events and asserts each step. Both need `npx vite --port 5194 --strictPort` running
   and `env -u ELECTRON_RUN_AS_NODE npx electron scripts/<file>`.
+- `scripts/importprobe.cjs` measures the UI's cost against a PRODUCTION build (`npx vite preview
+  --port 4173`), cold cache, long tasks observed from before the first script. Measured
+  2026-10-01 (desktop, software GL): six imports add no long task to the robot page; the empty
+  editor fetches its chunk and `geometry-*.js` (the measurement code it runs) but not the engine;
+  the 18 KB GLB fixture reaches its first frame in ~200 ms with no long task; 150k triangles:
+  first frame 524 ms, longest task 142 ms (budget 200); re-opening a saved import 147 ms the
+  first time, 24 ms warm; ten editor trips: heap flat after GC, no "Too many active WebGL
+  contexts".
+  ⚠️ **Past ~250k triangles the longest task breaks 200 ms**: 368k gave 307 ms, nearly all of it
+  `simplifyModel` (meshopt on the main thread). Moving the simplifier into a worker, as the STEP
+  reader already is, is the fix if big exports turn out to be common.
