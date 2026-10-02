@@ -12,7 +12,9 @@ import {
   drawImportedOutline,
   drawMouthState,
   ringInHull,
+  traceHull,
 } from './drawImported';
+import { decodeImportGrabRect, decodeImportMouth, decodeImportSolids } from '../sim/importedMech';
 
 /**
  * ROBOT COSMETICS — 2D SHARED HELPERS (`docs/cosmetics-plan.md` §3.4). Used by all three 2D
@@ -580,30 +582,47 @@ function drawImportedDecodeRobot(
   clipToHull(ctx, imp);
   const pictured = drawImportedBody(ctx, r, { fill, accent });
 
-  // THE INTAKE — where DECODE's accessors put it (the axle, the mouth, the nip)
-  const axle = C.intakeAxleX(r.spec);
-  const rw = C.intakeMouth(r.spec).mouthHalf;
-  const nip = C.intakeNip(r.spec);
+  // THE INTAKE — exactly where the sim's DECODE mouth is (`decodeImportMouth`): the hull's own
+  // face and roller line, the mouth's lateral centre `yc` and width, the funnel wedges the artifact
+  // solve collides with (`decodeImportSolids`), and the band the capture grabs in
+  // (`decodeImportGrabRect`: the nip about the axle, across the mouth)
+  const d = decodeImportMouth(r.spec);
+  const band = decodeImportGrabRect(r.spec);
+  const mh = d.mouth.mouthHalf;
+  const th = d.mouth.throatHalf;
   const dia = C.intakeRollerDia(r.spec);
-  const band = { edge: 'front' as const, x0: axle - nip.back, x1: axle + Math.max(nip.front, dia / 2), y0: -rw, y1: rw };
   if (pictured) {
     drawMouthState(ctx, [band], intakeOn);
   } else {
-    // the mouth band, the beam on the axle, and the compliant wheels along it — the standard
-    // sprite's roller, at the accessor's axle instead of `length / 2 + reach`
+    // the funnel WEDGES (sloped/triangle) or the vector's flanking rails: the sim's own solids
+    for (const piece of decodeImportSolids(r.spec).structure) {
+      ctx.fillStyle = fill;
+      traceHull(ctx, piece);
+      ctx.fill();
+      ctx.strokeStyle = trim;
+      strokeInside(ctx, () => traceHull(ctx, piece), C.CHASSIS_OUTLINE);
+    }
+    // the mouth: wide at the axle, narrowing to the throat at the face
     ctx.fillStyle = intakeOn ? 'rgba(34,197,94,0.85)' : '#2a303c';
-    ctx.fillRect(band.x0, band.y0, axle - band.x0, band.y1 - band.y0);
+    ctx.beginPath();
+    ctx.moveTo(d.axle, d.yc - mh);
+    ctx.lineTo(d.axle, d.yc + mh);
+    ctx.lineTo(d.face, d.yc + th);
+    ctx.lineTo(d.face, d.yc - th);
+    ctx.closePath();
+    ctx.fill();
+    // the beam on the axle and the compliant wheels along it — the standard sprite's roller
     ctx.fillStyle = intakeOn ? '#166534' : '#475569';
-    ctx.fillRect(axle - 0.28, -rw, 0.56, rw * 2);
-    const n = Math.max(1, Math.round(rw / C.INTAKE_ROLLER_PITCH));
+    ctx.fillRect(d.axle - 0.28, d.yc - mh, 0.56, mh * 2);
+    const n = Math.max(1, Math.round(mh / C.INTAKE_ROLLER_PITCH));
     const halfW = C.INTAKE_ROLLER_W / 2;
     ctx.strokeStyle = intakeOn ? '#15803d' : '#94a3b8';
     ctx.lineWidth = 0.4;
     for (let i = -n; i <= n; i++) {
-      const cy = (i * rw) / (n + 0.35);
-      if (Math.abs(cy) + halfW > rw + 0.01) continue;
+      const cy = (i * mh) / (n + 0.35);
+      if (Math.abs(cy) + halfW > mh + 0.01) continue;
       ctx.fillStyle = intakeOn ? '#22c55e' : '#6b7280';
-      roundRect(ctx, axle - dia / 2, cy - halfW, dia, C.INTAKE_ROLLER_W, 0.45);
+      roundRect(ctx, d.axle - dia / 2, d.yc + cy - halfW, dia, C.INTAKE_ROLLER_W, 0.45);
       ctx.fill();
       ctx.stroke();
     }

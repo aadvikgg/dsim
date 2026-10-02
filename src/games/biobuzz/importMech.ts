@@ -14,6 +14,7 @@ import { polyBounds } from '../../sim/imported';
 import {
   BB_DEFAULT_INTAKE,
   BB_INTAKES,
+  BB_LAUNCH_LINE_FRAC,
   BB_LAUNCH_Z0,
   BB_PLACE_REACH,
   BB_SIDE_ROLLER_PROTRUDE,
@@ -21,7 +22,7 @@ import {
   bbHead,
   bbIntakeReach,
 } from './config';
-import { EDGE_DIR, MOUNT_DIR, bbIntakeEdges, bbIntakeMountOf, type BbEdge } from './mounts';
+import { EDGE_DIR, EDGE_PERP, MOUNT_DIR, bbIntakeEdges, bbIntakeMountOf, edgeGeom, type BbEdge } from './mounts';
 import { bbIntakeKindOf, bbLauncherOf, bbLiftOf } from './mechs';
 import type { LocalRect } from './state';
 
@@ -117,6 +118,30 @@ export function bbImportLaunchLine(spec: RobotSpec, edge: BbEdge, spanHalf: numb
   const origin = sh ? { x: sh.x, y: sh.y } : rayExit(imp.hull, { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 }, EDGE_DIR[edge]);
   const perp = { x: -EDGE_DIR[edge].y, y: EDGE_DIR[edge].x };
   return { origin, half: Math.min(spanHalf, importHalfChordThrough(imp, origin, perp)) };
+}
+
+/**
+ * A turretless launcher's release line IN ITS FIRING EDGE'S FRAME, for the renderers: `dist` out
+ * along the edge's normal to the line's centre, `lateral` across the edge, `span` the half-length
+ * the line takes before `BB_LAUNCH_LINE_FRAC`. A standard robot's is its edge, centred
+ * (`edgeGeom`); an IMPORT's is `bbImportLaunchLine`, asked with exactly the arguments `robot.ts`'s
+ * `launchLine` asks it with — so the drawn tray's lip is where the sim releases from.
+ */
+export function bbDumperFrame(spec: RobotSpec, edge: BbEdge): { dist: number; span: number; lateral: number; room?: number } {
+  const g = edgeGeom(spec, edge);
+  if (!spec.imported) return { dist: g.dist, span: g.span, lateral: 0 };
+  const line = bbImportLaunchLine(spec, edge, g.span * BB_LAUNCH_LINE_FRAC);
+  const n = EDGE_DIR[edge];
+  const p = EDGE_PERP[edge];
+  // how much hull there is BEHIND the lip along the firing direction — the tray (render-only) is
+  // sized to it, since a placed lip can sit anywhere on the hull, not only on its edge
+  const back = rayExit(spec.imported.hull, line.origin, { x: -n.x, y: -n.y });
+  return {
+    dist: line.origin.x * n.x + line.origin.y * n.y,
+    span: line.half / BB_LAUNCH_LINE_FRAC,
+    lateral: line.origin.x * p.x + line.origin.y * p.y,
+    room: (line.origin.x - back.x) * n.x + (line.origin.y - back.y) * n.y,
+  };
 }
 
 /** the Box Tube's placement point on an import: out of the hull from its base along the mount's

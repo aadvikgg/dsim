@@ -30,8 +30,18 @@ export const IMPORT_MAX_HULL_VERTS = 16;
 export const IMPORT_MAX_BAND_VERTS = 12;
 export const IMPORT_MAX_BANDS = 3;
 export const IMPORT_MAX_INTAKES = 4;
-/** input points read per polygon (the rest are ignored): bounds the work a hostile array costs */
-export const IMPORT_MAX_INPUT_POINTS = 256;
+/**
+ * Input points read per polygon (the rest are ignored): bounds the work a hostile array costs.
+ * The importer writes ≤ 16 hull and ≤ 12 band vertices, so 64 never cuts a real robot. It was 256,
+ * and with 16 bands of 256 far-off points one 62 KB `update` cost 70 ms of the room's thread.
+ */
+export const IMPORT_MAX_INPUT_POINTS = 64;
+/**
+ * Bands whose POINTS are read (each one a polygon of up to `IMPORT_MAX_INPUT_POINTS`): twice the
+ * bands kept, so a band dropped for a degenerate hull does not cost the ones after it, and a list
+ * of 16 junk bands costs 6 polygons, not 16.
+ */
+export const IMPORT_MAX_BAND_INPUTS = 2 * IMPORT_MAX_BANDS;
 /** any input coordinate is clamped to ±this before anything else (keeps every product exact) */
 export const IMPORT_COORD_LIMIT = 10000;
 /**
@@ -458,16 +468,73 @@ export function importedExtents(imp: ImportedRobot): { front: number; rear: numb
   return { front: b.maxX, rear: -b.minX, half: Math.max(-b.minY, b.maxY) };
 }
 
+/** a candidate this far past an edge's line (either side) is classified without `polyFeature` */
+const PULL_EPS = 1e-6;
+/** how far snapping a candidate to the 1/64-in grid can move it along a unit normal (√2/128 ≈
+ *  0.011), with room to spare: the margin a skipped candidate must clear */
+const PULL_SNAP_MARGIN = 1 / 32;
+const PULL_EXACT_MARGIN = 1e-4;
+
 /**
  * Walk `p` toward the origin until it is inside `hull` (the origin is, by `IMPORT_ORIGIN_MARGIN`).
- * 1/64 of the way at a time, optionally snapping each candidate to the grid; deterministic, and a
- * point already inside comes back unchanged.
+ * 1/64 of the way at a time (`k = 1 − j/64`, j = 0…64), optionally snapping each candidate to the
+ * grid; deterministic, and a point already inside comes back unchanged.
+ *
+ * ⚠️ THE ANSWER IS THE 65-STEP WALK'S, BIT FOR BIT; ONLY ITS COST CHANGED. The walk called
+ * `polyFeature` (two square roots per edge) on every candidate, up to 65 times, so a hostile band
+ * list cost 70 ms per message. Now:
+ *  1. The edges' unit normals and offsets are taken once, with `polyFeature`'s own arithmetic and
+ *     its own skipped zero-length edges.
+ *  2. The walk STARTS at the first candidate that could be inside. Candidate `k` is past edge i by
+ *     `k·(p·nᵢ) − dᵢ`, give or take the snap, so every `k` above `min (dᵢ + margin)/(p·nᵢ)` is
+ *     outside by more than snapping can undo: exactly a candidate the walk would have rejected.
+ *  3. Each candidate is classified by its largest edge excess. Clearly out (> ε) or clearly in
+ *     (< −ε) is `polyFeature`'s verdict without calling it; only a candidate within ε of an edge
+ *     line goes to `polyPointDepth`, the walk's exact test.
+ * Smoke pins the equivalence against the old walk over random hulls and points.
  */
-function pullInside(hull: readonly Vec2[], p: Vec2, snap: boolean): Vec2 {
-  for (let j = 0; j <= 64; j++) {
+export function pullInside(hull: readonly Vec2[], p: Vec2, snap: boolean): Vec2 {
+  const n = hull.length;
+  const nx: number[] = [];
+  const ny: number[] = [];
+  const d: number[] = [];
+  let originClear = true;
+  for (let i = 0; i < n; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % n];
+    const ex = b.x - a.x;
+    const ey = b.y - a.y;
+    const el = hyp(ex, ey);
+    if (el < 1e-9) continue;
+    const onx = ey / el;
+    const ony = -ex / el;
+    const di = a.x * onx + a.y * ony;
+    nx.push(onx);
+    ny.push(ony);
+    d.push(di);
+    if (!(di > 1e-3)) originClear = false;
+  }
+  let start = 0;
+  if (originClear) {
+    const m = snap ? PULL_SNAP_MARGIN : PULL_EXACT_MARGIN;
+    let K = Infinity;
+    for (let i = 0; i < d.length; i++) {
+      const pn = p.x * nx[i] + p.y * ny[i];
+      if (pn > 0) K = Math.min(K, (d[i] + m) / pn);
+    }
+    // one candidate earlier than the bound, so rounding in `64·(1 − K)` can only start it sooner
+    if (K < 1) start = clamp(Math.floor(64 * (1 - K)) - 1, 0, 64);
+  }
+  for (let j = start; j <= 64; j++) {
     const k = 1 - j / 64;
     const c = snap ? { x: q(p.x * k), y: q(p.y * k) } : { x: p.x * k, y: p.y * k };
-    if (polyPointDepth(hull, c) >= 0) return c;
+    let v = -Infinity;
+    for (let i = 0; i < d.length; i++) {
+      const e = c.x * nx[i] + c.y * ny[i] - d[i];
+      if (e > v) v = e;
+    }
+    if (v > PULL_EPS) continue;
+    if (v < -PULL_EPS || polyPointDepth(hull, c) >= 0) return c;
   }
   return { x: 0, y: 0 };
 }
@@ -674,7 +741,8 @@ function coerceMech(raw: unknown, f: Frame, b: Bounds, hull: readonly Vec2[], he
  *      outside; a set with no spread (RMS radius under 1 in) is dropped; then sorted FL, FR, BL, BR.
  *   8. BANDS: up to 3 valid ones, in input order, then sorted by (z0, z1). z0/z1 snapped and
  *      clamped to [0, heightIn], z0 < z1 or the band is dropped; its points are walked inside the
- *      hull, hulled and cut to 12 vertices, < 3 ⇒ the band is dropped.
+ *      hull, hulled and cut to 12 vertices, < 3 ⇒ the band is dropped. Points are read for at most
+ *      `IMPORT_MAX_BAND_INPUTS` bands (the work bound; a list that needs more is junk).
  *   9. MECH, game-blind: shooter / shooter2 / place snapped and moved to the nearest point INSIDE
  *      the hull, z into [0, heightIn]; intakes need a known edge, the span clamped to that edge's
  *      side of the box, reordered so from < to, at least `IMPORT_MIN_SPAN` wide, ONE per edge (the
@@ -747,8 +815,9 @@ export function coerceImported(raw: unknown): ImportedRobot | undefined {
   // 8) bands
   if (Array.isArray(r.bands)) {
     const list: ImportedBand[] = [];
+    let read = 0;
     for (const raw of r.bands.slice(0, 16)) {
-      if (list.length >= IMPORT_MAX_BANDS) break;
+      if (list.length >= IMPORT_MAX_BANDS || read >= IMPORT_MAX_BAND_INPUTS) break;
       if (typeof raw !== 'object' || raw === null) continue;
       const br = raw as Record<string, unknown>;
       const z0r = num(br.z0);
@@ -758,6 +827,7 @@ export function coerceImported(raw: unknown): ImportedRobot | undefined {
       const z0 = clamp(q(clamp(z0r, -L, L) * f.s), 0, heightIn);
       const z1 = clamp(q(clamp(z1r, -L, L) * f.s), 0, heightIn);
       if (!(z1 > z0)) continue;
+      read++;
       const pts = readPoints(br.hull, IMPORT_MAX_INPUT_POINTS).map((p) => pullInside(hull, place(f, p.x, p.y), true));
       const bh = reduceHull(convexHull(pts), IMPORT_MAX_BAND_VERTS);
       if (bh.length < 3) continue;

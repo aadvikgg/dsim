@@ -278,6 +278,14 @@ Contract: `docs/robot-import-plan.md` §3.1 and §4.
   standard robot, never `base`'s import), and sets `length`/`width` from the hull's bounding box
   before the game's clamps. Those two are the parametric fallback, not the shape: DECODE's sloped
   intake caps `length` at 15 while the hull stays 18.
+- ⚠️ **`coerceImported` runs on hostile input at a server's door, so its cost is bounded, not just
+  its output.** It reads 64 points a polygon (`IMPORT_MAX_INPUT_POINTS`) and the points of at most 6
+  bands (`IMPORT_MAX_BAND_INPUTS`); `pullInside` skips the candidates its edges prove are outside
+  and classifies the rest by their largest edge excess, calling `polyFeature` only within 1e-6 of an
+  edge line. Its answer is the old 65-step walk's BIT FOR BIT (smoke `imports/pull` compares them
+  over 50,000 points); the old walk with 16 × 256 band points cost 70 ms a message. Smoke
+  `imports/cost` holds the worst 64 KiB `update` under 1 ms. Any new loop over input points needs
+  the same bound.
 - The shape is `robotHullLocal(spec)` / `robotHullWorld(r)` (convex, CCW).
   `footprintExtents` / `robotExtents` return the hull's bounding box with NO intake reach (the
   hull includes the intake); treat them as a bound. `robotCorners` stays the four clockwise
@@ -320,6 +328,11 @@ Contract: `docs/robot-import-plan.md` §3.1 and §4.
   is what meets the field.
 - `IMP_STANDARD_PINS`' mechanism twin is `L2_MECH_PINS`: an intake/fire/place run per game (BIOBUZZ
   2D and 3D), recorded before the mechanism branches existed.
+- **The renderers read these accessors and nothing else** (docs/area/ui.md, docs/area/biobuzz.md).
+  Two exist for them alone, beside the sim's own: `decodeImportGrabRect` (the nip about the axle,
+  across the mouth — the terms `updateIntake` captures with) and BIOBUZZ's `bbDumperFrame` (the
+  release line `launchLine` uses, in its edge's frame). A renderer that needs a position the sim
+  does not expose gets an accessor here, gated on `spec.imported`, rather than its own arithmetic.
 
 ## Robot spec, builder, and drive feel
 

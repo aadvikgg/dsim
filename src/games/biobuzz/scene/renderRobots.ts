@@ -110,6 +110,7 @@ import {
   type BbKeepOut,
 } from '../parts';
 import { bbFlowerInReach, bbMouths, bbMuzzleLocal, bbPlacePointLocal } from '../robot';
+import { bbDumpZ, bbDumperFrame, bbImportTurretAxleZ } from '../importMech';
 import { bbSpecKey } from '../specKey';
 import {
   buildAimSight,
@@ -118,7 +119,7 @@ import {
   importedDeckZ,
   importedFrontMarkGeometries,
   importedMeshKey,
-  importedSightZ,
+
   isImportShared,
   releaseImportedMesh,
 } from './renderImported';
@@ -126,6 +127,7 @@ import {
   bbMouthFrame,
   bbShooterEdgeOf,
   EDGE_ANGLE,
+  EDGE_PERP,
   edgeGeom,
   turretLocal,
   turretRadius,
@@ -3117,21 +3119,31 @@ const DUMP_THROW_ANGLE = 1.05;
  * posts that carry it stay on the chassis. The per-frame sync rotates that one node by
  * `dumpThrowPhase`, and nothing else about the dumper moves.
  */
-function buildDumper(spec: RobotSpec, launcher: BbLauncherSpec): THREE.Group {
+function buildDumper(
+  spec: RobotSpec,
+  launcher: BbLauncherSpec,
+  /** an IMPORT's release line in the firing edge's frame (`dumperFrame`, the sim's
+   *  `bbImportLaunchLine`) and its lip height (`bbDumpZ`); absent is the standard edge and tray */
+  at?: { dist: number; span: number; lateral: number; z: number; room?: number },
+): THREE.Group {
   const edge = bbShooterEdgeOf({ shooterMount: launcher.mount });
-  const { dist, span } = edgeGeom(spec, edge);
+  const { dist, span } = at ?? edgeGeom(spec, edge);
+  const lipZ = at ? at.z : BB_LAUNCH_Z0;
   const group = new THREE.Group();
   group.name = 'robot:dumper';
   group.rotation.z = EDGE_ANGLE[edge];
+  // the line's centre across the edge, in the robot frame (0 on a standard robot)
+  if (at) group.position.set(EDGE_PERP[edge].x * at.lateral, EDGE_PERP[edge].y * at.lateral, 0);
   const half = span * 0.86;
-  const pivot = dist - Math.min(8, dist * 0.8);
+  // an IMPORT's tray reaches back no further than its hull does behind the placed lip
+  const pivot = dist - (at?.room !== undefined ? Math.max(2, Math.min(8, at.room * 0.8)) : Math.min(8, dist * 0.8));
   const lip = dist - 0.7;
   const len = lip - pivot;
-  const shaftZ = BB_LAUNCH_Z0 - 2.3;
+  const shaftZ = lipZ - 2.3;
   const mat = solidMat(DUMPER_BUCKET, 0.5, 0.3);
 
   // the FIXED half: the shaft and the posts that stand it off the deck.
-  const mount = framePart(`dumpmount:${half.toFixed(2)}|${pivot.toFixed(2)}`, () => {
+  const mount = framePart(`dumpmount:${half.toFixed(2)}|${pivot.toFixed(2)}${at ? `|${shaftZ.toFixed(3)}` : ''}`, () => {
     const parts: THREE.BufferGeometry[] = [];
     const shaft = new THREE.CylinderGeometry(0.34, 0.34, half * 2, 8);
     shaft.translate(pivot, 0, shaftZ);
@@ -3149,7 +3161,7 @@ function buildDumper(spec: RobotSpec, launcher: BbLauncherSpec): THREE.Group {
   arm.position.set(pivot, 0, shaftZ);
   const tray = framePart(`dumper:${len.toFixed(2)}|${half.toFixed(2)}`, () => {
     const parts: THREE.BufferGeometry[] = [];
-    const dz = BB_LAUNCH_Z0 - shaftZ;
+    const dz = lipZ - shaftZ;
     // floor, tilted up toward the lip
     const floor = new THREE.BoxGeometry(len, half * 2, 0.22);
     floor.rotateY(-0.22);
@@ -3369,8 +3381,10 @@ function buildImportedRobot(spec: RobotSpec, imp: ImportedRobot, id: number, all
     if (bbIsTurreted(launcher)) {
       const mounts = launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount, launcher.mount2] : [launcher.mount];
       mounts.forEach((m, i) => {
-        const at = turretLocal(spec, m);
-        const sight = buildAimSight(dark, at, importedSightZ(imp, BB_LAUNCH_Z0), turretRadius(spec));
+        // on the SIM's muzzle: the placed axle height and this head's own dimensions
+        const which: 0 | 1 = i === 0 ? 0 : 1;
+        const sight = buildAimSight(dark, turretLocal(spec, m), bbImportTurretAxleZ(spec, which), bbHead(which));
+        sight.pitch.rotation.y = -BB_TURRET_PITCH_REST; // a spawned head's pitch, until `sync` poses it
         sight.node.name = `robot:${id}:aim:${i}`;
         for (const m2 of sight.meshes) cast(m2, 'dark');
         group.add(sight.node);
@@ -3437,19 +3451,25 @@ function buildImportedRobot(spec: RobotSpec, imp: ImportedRobot, id: number, all
     group.userData.intakeRollers = intake.rollers;
     group.userData.sideRollers = intake.sideRollers;
     group.userData.rampPivots = intake.rampPivots;
+    // ...each turret at its placed axle height (`bbImportTurretAxleZ`), so its drawn lip is the
+    // sim's muzzle; the dumper on the sim's release line and lip (`bbDumperFrame`, `bbDumpZ`)
+    // (the standard head, ridden up or down whole so its own proportions hold)
     if (bbIsTurreted(launcher)) {
       const t0 = buildTurret(spec, launcher.mount, 0);
+      t0.position.z += bbImportTurretAxleZ(spec, 0) - BB_TURRET_AXLE_Z;
       group.add(t0);
       heads.push(t0.userData.head as THREE.Group);
       pitches.push(t0.userData.pitch as THREE.Group);
       if (launcher.kind === 'twinturret' && launcher.mount2) {
         const t1 = buildTurret(spec, launcher.mount2, 1);
+        t1.position.z += bbImportTurretAxleZ(spec, 1) - BB_TURRET_AXLE_Z;
         group.add(t1);
         heads.push(t1.userData.head as THREE.Group);
         pitches.push(t1.userData.pitch as THREE.Group);
       }
     } else if (launcher.kind === 'dumper') {
-      const d = buildDumper(spec, launcher);
+      const edge = bbShooterEdgeOf({ shooterMount: launcher.mount });
+      const d = buildDumper(spec, launcher, { ...bbDumperFrame(spec, edge), z: bbDumpZ(spec) });
       group.add(d);
       group.userData.dumpArm = d.userData.dumpArm;
     }

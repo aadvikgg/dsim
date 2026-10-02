@@ -435,15 +435,3 @@ export function frontArrowSpot(
   }
   return { x: c.x, y: c.y, ...size(c) };
 }
-
-/** a point pulled toward the hull's centroid until it sits `clear` inside the hull */
-export function pullInsideHull(imp: ImportedRobot, p: Vec2, clear: number): Vec2 {
-  if (polyPointDepth(imp.hull, p) >= clear) return p;
-  const c = polyCentroid(imp.hull);
-  for (let j = 1; j <= 32; j++) {
-    const k = 1 - j / 32;
-    const q = { x: c.x + (p.x - c.x) * k, y: c.y + (p.y - c.y) * k };
-    if (polyPointDepth(imp.hull, q) >= clear) return q;
-  }
-  return c;
-}

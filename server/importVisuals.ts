@@ -29,8 +29,11 @@ import {
   VISUAL_ROOM_BYTES,
   VISUAL_SERVE_CLIENT_BYTES,
   VISUAL_SERVE_ROOM_BYTES,
+  VISUAL_SERVE_WINDOW_MS,
+  VISUAL_SOURCE_BYTES,
   VISUAL_STREAMS_PER_CLIENT,
   VISUAL_STREAM_TICK_MS,
+  VISUAL_SWEEP_EVERY_MS,
   base64ToBytes,
   bytesToBase64,
   hasVisualsCap,
@@ -54,69 +57,137 @@ import {
  * slot zeroed by the thread that respawns it, so a crash cannot leak budget for the life of the
  * process. The check-then-add is not atomic across threads; two rooms racing may overshoot by
  * one asset each, which is slack, not a leak.
+ *
+ * ⚠️ AND NO ONE SOURCE MAY HOLD IT ALL (`VISUAL_SOURCE_BYTES`). Without a per-source cap, about 52
+ * sockets with imported robots held the whole 64 MiB and every later upload on the machine was
+ * refused. A source is an account, else an address (`Client.budgetKey`, hashed at the door), and
+ * its bytes are counted in `VISUAL_SOURCE_BUCKETS` buckets per thread in the same buffer (row
+ * `slot` after the totals), summed across threads like the total and zeroed with the slot. Two
+ * sources that hash to one bucket share a cap: rare, and only ever a refusal, never a leak.
  */
 export const VISUAL_BUDGET_SLOTS = 65;
+export const VISUAL_SOURCE_BUCKETS = 256;
+/** Int32 cells: the per-thread totals, then one row of source buckets per thread */
+const BUDGET_CELLS = VISUAL_BUDGET_SLOTS * (1 + VISUAL_SOURCE_BUCKETS);
 
-let cells: Int32Array<ArrayBufferLike> = new Int32Array(new ArrayBuffer(4 * VISUAL_BUDGET_SLOTS));
+let cells: Int32Array<ArrayBufferLike> = new Int32Array(new ArrayBuffer(4 * BUDGET_CELLS));
 let mySlot = 0;
+
+const bucketCell = (slot: number, bucket: number): number => VISUAL_BUDGET_SLOTS + slot * VISUAL_SOURCE_BUCKETS + bucket;
+const bucketOf = (key: number): number => (key >>> 0) % VISUAL_SOURCE_BUCKETS;
+
+/**
+ * A source's budget key: FNV-1a over `u:<account>` or `ip:<address>`, as an unsigned 32-bit
+ * number. Only this hash crosses into a room (and onto a worker), never the address.
+ */
+export function visualSourceKey(source: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < source.length; i++) {
+    h ^= source.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
 
 /** one SharedArrayBuffer for the whole process, or undefined where the platform has none */
 export function makeSharedVisualBudget(): SharedArrayBuffer | undefined {
-  return typeof SharedArrayBuffer === 'undefined' ? undefined : new SharedArrayBuffer(4 * VISUAL_BUDGET_SLOTS);
+  return typeof SharedArrayBuffer === 'undefined' ? undefined : new SharedArrayBuffer(4 * BUDGET_CELLS);
 }
 
-/** point this thread at the process's counters, and say which slot is its own */
+/** point this thread at the process's counters, and say which slot is its own. A buffer too
+ *  small to hold the source rows (a caller that wants a private counter) gets a private one. */
 export function configureVisualBudget(buf: SharedArrayBuffer | ArrayBuffer | undefined, slot: number): void {
   if (!buf || slot < 0 || slot >= VISUAL_BUDGET_SLOTS) return;
-  cells = new Int32Array(buf);
+  cells = new Int32Array(buf.byteLength >= 4 * BUDGET_CELLS ? buf : new ArrayBuffer(4 * BUDGET_CELLS));
   mySlot = slot;
 }
 
-/** a thread died: its rooms are gone with it, so its bytes are too */
+/** a thread died: its rooms are gone with it, so its bytes are too (its total and its sources) */
 export function resetVisualSlot(buf: SharedArrayBuffer | undefined, slot: number): void {
-  if (buf && slot >= 0 && slot < VISUAL_BUDGET_SLOTS) Atomics.store(new Int32Array(buf), slot, 0);
+  if (!buf || slot < 0 || slot >= VISUAL_BUDGET_SLOTS) return;
+  const c = new Int32Array(buf);
+  Atomics.store(c, slot, 0);
+  if (c.length >= BUDGET_CELLS) for (let b = 0; b < VISUAL_SOURCE_BUCKETS; b++) Atomics.store(c, bucketCell(slot, b), 0);
 }
 
 /** bytes in use across the process, as this thread sees it */
 export function visualBytesInUse(): number {
   let n = 0;
-  for (let i = 0; i < cells.length; i++) n += Atomics.load(cells, i);
+  for (let i = 0; i < VISUAL_BUDGET_SLOTS; i++) n += Atomics.load(cells, i);
+  return n;
+}
+
+/** bytes one source holds across the process */
+export function visualSourceBytesInUse(key: number): number {
+  const b = bucketOf(key);
+  let n = 0;
+  for (let s = 0; s < VISUAL_BUDGET_SLOTS; s++) n += Atomics.load(cells, bucketCell(s, b));
   return n;
 }
 
 export interface VisualBudget {
-  reserve(bytes: number): boolean;
-  release(bytes: number): void;
+  /** `key`: the source paying (`visualSourceKey`) */
+  reserve(bytes: number, key: number): boolean;
+  release(bytes: number, key: number): void;
 }
 
-/** the process budget (`limit` is for tests) */
-export function processVisualBudget(limit = VISUAL_PROCESS_BYTES): VisualBudget {
+/** the process budget (`limit` and `perSource` are for tests) */
+export function processVisualBudget(limit = VISUAL_PROCESS_BYTES, perSource = VISUAL_SOURCE_BYTES): VisualBudget {
   return {
-    reserve(bytes) {
+    reserve(bytes, key) {
       if (visualBytesInUse() + bytes > limit) return false;
+      if (visualSourceBytesInUse(key) + bytes > perSource) return false;
       Atomics.add(cells, mySlot, bytes);
+      Atomics.add(cells, bucketCell(mySlot, bucketOf(key)), bytes);
       return true;
     },
-    release(bytes) {
+    release(bytes, key) {
       Atomics.add(cells, mySlot, -bytes);
+      Atomics.add(cells, bucketCell(mySlot, bucketOf(key)), -bytes);
     },
   };
 }
 
 /** a budget of its own, for a check that must not touch the process's */
-export function localVisualBudget(limit: number): VisualBudget & { used(): number } {
+export function localVisualBudget(limit: number, perSource = Infinity): VisualBudget & { used(): number; usedBy(key: number): number } {
   let used = 0;
+  const by = new Map<number, number>();
   return {
-    reserve(bytes) {
-      if (used + bytes > limit) return false;
+    reserve(bytes, key) {
+      if (used + bytes > limit || (by.get(key) ?? 0) + bytes > perSource) return false;
       used += bytes;
+      by.set(key, (by.get(key) ?? 0) + bytes);
       return true;
     },
-    release(bytes) {
+    release(bytes, key) {
       used -= bytes;
+      by.set(key, (by.get(key) ?? 0) - bytes);
     },
     used: () => used,
+    usedBy: (key) => by.get(key) ?? 0,
   };
+}
+
+/** a client's budget key: the door's hash of its account or address, else its client id's */
+export const budgetKeyOf = (c: Pick<Client, 'id' | 'budgetKey'>): number =>
+  typeof c.budgetKey === 'number' && Number.isFinite(c.budgetKey) ? c.budgetKey >>> 0 : visualSourceKey(`c:${c.id}`);
+
+/**
+ * Bytes charged inside the last `VISUAL_SERVE_WINDOW_MS`. The serve caps are RATES: a total over
+ * the room's life (as they were) ran out after about nine viewer sessions in a busy room, and
+ * then no newcomer ever saw a robot's look again.
+ */
+class RollingBytes {
+  private readonly q: { at: number; bytes: number }[] = [];
+  private sum = 0;
+  total(now: number): number {
+    while (this.q.length && now - this.q[0].at >= VISUAL_SERVE_WINDOW_MS) this.sum -= this.q.shift()!.bytes;
+    return this.sum;
+  }
+  charge(now: number, bytes: number): void {
+    this.q.push({ at: now, bytes });
+    this.sum += bytes;
+  }
 }
 
 // ---- the relay ------------------------------------------------------------------------------------
@@ -139,6 +210,8 @@ interface Asset {
   id: string;
   kind: VisualKind;
   total: number;
+  /** the source its reservation was charged to (`budgetKeyOf` the owner) */
+  key: number;
   buf: Uint8Array;
   got: number;
   /** the next `seq` expected while the upload is open */
@@ -169,14 +242,22 @@ export class VisualRelay {
   private reserved = 0;
   private readonly streams = new Map<string, Outbox>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  /** bytes this room has been asked to send, per viewer and in all (a request is charged in full) */
-  private readonly served = new Map<string, number>();
-  private servedRoom = 0;
+  /** sweeps half-sent uploads while any is open (`sweepStale`) */
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Bytes this room has been asked to send in the last minute, per viewer SOURCE and in all (a
+   * request is charged in full). Per source, not per client id: a watcher that leaves and comes
+   * back is a new client id with the same account or address.
+   */
+  private readonly served = new Map<number, RollingBytes>();
+  private readonly servedRoom = new RollingBytes();
   private disposed = false;
 
   constructor(
     private readonly host: RelayHost,
     private readonly budget: VisualBudget = processVisualBudget(),
+    /** the relay's clock (a check moves it) */
+    private readonly clock: () => number = () => Date.now(),
   ) {}
 
   /** `visualPut` / `visualGet` from a seat or a watcher. A client without the capability is
@@ -204,7 +285,7 @@ export class VisualRelay {
     const seq = raw.seq;
     if (typeof total !== 'number' || !Number.isSafeInteger(total) || total < 1 || total > VISUAL_MAX_BYTES[kind]) return refuse('size');
     if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0 || seq >= visualFrames(total)) return refuse('seq');
-    const now = Date.now();
+    const now = this.clock();
     this.sweep(now);
     const held = this.owners.get(c.id);
     if (held && held.id !== cur) this.freeOwner(c.id);
@@ -213,11 +294,13 @@ export class VisualRelay {
       // a new upload of this kind replaces whatever was here, ready or half sent
       this.freeAsset(c.id, kind);
       for (const [other, o] of this.owners) if (other !== c.id && o.id === id) return refuse('dup');
-      if (this.reserved + total > VISUAL_ROOM_BYTES || !this.budget.reserve(total)) return refuse('budget');
+      const key = budgetKeyOf(c);
+      if (this.reserved + total > VISUAL_ROOM_BYTES || !this.budget.reserve(total, key)) return refuse('budget');
       this.reserved += total;
       let o = this.owners.get(c.id);
       if (!o) this.owners.set(c.id, (o = { id }));
-      o[kind] = { id, kind, total, buf: new Uint8Array(total), got: 0, next: 0, ready: false, touched: now };
+      o[kind] = { id, kind, total, key, buf: new Uint8Array(total), got: 0, next: 0, ready: false, touched: now };
+      this.ensureSweep();
     }
     const o = this.owners.get(c.id);
     const a = o?.[kind];
@@ -285,14 +368,38 @@ export class VisualRelay {
     const box = this.streams.get(c.id);
     if (box?.list.some((s) => s.owner === owner && s.asset === a)) return; // already on its way
     if ((box?.list.length ?? 0) >= VISUAL_STREAMS_PER_CLIENT) return refuse('busy');
-    const mine = this.served.get(c.id) ?? 0;
-    if (mine + a.total > VISUAL_SERVE_CLIENT_BYTES || this.servedRoom + a.total > VISUAL_SERVE_ROOM_BYTES) return refuse('busy');
-    this.served.set(c.id, mine + a.total);
-    this.servedRoom += a.total;
+    const now = this.clock();
+    const key = budgetKeyOf(c);
+    let mine = this.served.get(key);
+    if (!mine) this.served.set(key, (mine = new RollingBytes()));
+    if (mine.total(now) + a.total > VISUAL_SERVE_CLIENT_BYTES || this.servedRoom.total(now) + a.total > VISUAL_SERVE_ROOM_BYTES) return refuse('busy');
+    mine.charge(now, a.total);
+    this.servedRoom.charge(now, a.total);
+    // forget the windows that have emptied (a busy room meets many viewers)
+    for (const [k, w] of this.served) if (w !== mine && w.total(now) === 0) this.served.delete(k);
     const out = box ?? { list: [], lastAt: 0 };
     out.list.push({ owner, asset: a, seq: 0 });
     this.streams.set(c.id, out);
     this.ensureTimer();
+  }
+
+  /** run the stale-upload sweep on a timer while an upload is open, so a stalled one is freed
+   *  even when nobody else uploads in this room */
+  private ensureSweep(): void {
+    if (this.sweepTimer || this.disposed) return;
+    this.sweepTimer = setInterval(() => this.sweepStale(), VISUAL_SWEEP_EVERY_MS);
+    (this.sweepTimer as { unref?: () => void }).unref?.();
+  }
+
+  /** the timer's work: drop uploads gone quiet, and stop when none is open */
+  sweepStale(now = this.clock()): void {
+    this.sweep(now);
+    let open = false;
+    for (const o of this.owners.values()) if ((o.top && !o.top.ready) || (o.mesh && !o.mesh.ready)) open = true;
+    if (!open && this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
   }
 
   private ensureTimer(): void {
@@ -309,7 +416,7 @@ export class VisualRelay {
 
   /** one chunk per viewer per pump, paced by the socket's own backlog (`streamMayWrite`) */
   private pump(): void {
-    const now = Date.now();
+    const now = this.clock();
     const liveMatch = this.host.live();
     const allowed = this.host.allows();
     for (const [rid, box] of this.streams) {
@@ -360,7 +467,7 @@ export class VisualRelay {
     if (!o || !a) return;
     delete o[kind];
     this.reserved -= a.total;
-    this.budget.release(a.total);
+    this.budget.release(a.total, a.key);
     if (!o.top && !o.mesh) this.owners.delete(owner);
   }
 
@@ -381,10 +488,10 @@ export class VisualRelay {
     for (const seat of [...this.owners.keys()]) this.specChanged(seat);
   }
 
-  /** a viewer is gone: its streams and its quota go with it */
+  /** a viewer is gone: its streams go with it. Its serve window does NOT: it belongs to its
+   *  source, and a source that leaves and comes back is the same source. */
   dropRecipient(id: string): void {
     this.streams.delete(id);
-    this.served.delete(id);
   }
 
   /** an upload that went quiet is not worth the bytes it reserved */
@@ -403,15 +510,23 @@ export class VisualRelay {
     for (const owner of [...this.owners.keys()]) this.freeOwner(owner);
     this.streams.clear();
     this.served.clear();
-    this.servedRoom = 0;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
   }
 
   /** what this relay holds, for a check */
-  stats(): { reserved: number; owners: number; streams: number; ready: number; servedRoom: number } {
+  stats(): { reserved: number; owners: number; streams: number; ready: number; servedRoom: number; sweeping: boolean } {
     let ready = 0;
     for (const o of this.owners.values()) for (const k of ['top', 'mesh'] as const) if (o[k]?.ready) ready++;
-    return { reserved: this.reserved, owners: this.owners.size, streams: this.streams.size, ready, servedRoom: this.servedRoom };
+    return {
+      reserved: this.reserved,
+      owners: this.owners.size,
+      streams: this.streams.size,
+      ready,
+      servedRoom: this.servedRoom.total(this.clock()),
+      sweeping: this.sweepTimer !== null,
+    };
   }
 }

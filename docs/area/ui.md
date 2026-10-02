@@ -441,7 +441,12 @@ four `PERF_DISPLAY_BLURB` lines, an option's download size, and the R102 stow no
   the alliance stays a FILL (DECODE/Chain chevron, BIOBUZZ's NECTAR rim). Over a PICTURE only STATE
   is drawn — the mouths' grab areas with a live/idle lip, the turret's aim (`drawAimMark`), held
   elements, the hopper bar, the place marker — never a second set of hardware; over a silhouette
-  the game's own mechanisms are drawn where its accessors put them. The deck arrow moves ahead of
+  the game's own mechanisms are drawn where its accessors put them. ⚠️ **"Its accessors" means the
+  SIM's import-aware ones, never the bounding box**: DECODE's mouth is `decodeImportMouth` /
+  `decodeImportGrabRect` / `decodeImportSolids`, BIOBUZZ's `bbMouths`, `turretLocal`,
+  `bbPlacePointLocal`, `bbDumperFrame`, Chain's `chainIntakeMouths`, `catalystOrigin`,
+  `launcherFrame` (= `chainImportLaunchLine`); BIOBUZZ's held discs are searched on the hull. The
+  shared smoke pins each drawn rect, ring and frame to its accessor. The deck arrow moves ahead of
   a turret ring rather than under it (`frontArrowSpot`, shared with 3D and `FootprintSvg`).
   - ⚠️ **ONE FRAME FOR THE PICTURE, AND IT IS THE IMPORTER'S** (`topImageFrame`,
     `docs/area/robot-import.md` "Frames"), re-exported by `src/render/importedAssets.ts`. Its map has

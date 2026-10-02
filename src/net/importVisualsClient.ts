@@ -28,7 +28,7 @@ import type { GameId } from '../types';
 import { loadImporterEngine } from '../robotImport/engineLoader';
 import { meshFor, meshLiteFor, putMeshLite, topFor } from '../robotImport/library';
 import { getViewPref, subscribeViewPref } from '../games/biobuzz/graphics/store';
-import { registerRelayedAsset, hasRelayedAsset, unregisterRelayedAssets } from './importedAssetsBridge';
+import { registerRelayedAsset, hasRelayedAsset, relayedIdTakenByOther, unregisterRelayedAssets } from './importedAssetsBridge';
 import {
   VISUAL_ID_RX,
   VISUAL_MAX_BYTES,
@@ -50,10 +50,20 @@ export interface OwnAssets {
   top(id: string): Promise<Uint8Array | null>;
   /** already small enough for the relay, or null (the picture alone is shared) */
   mesh(id: string): Promise<Uint8Array | null>;
+  /** does this device hold a robot with this id itself? Then a relayed look is never lent for it:
+   *  the device's own copy is what it draws (absent ⇒ no) */
+  has?(id: string): Promise<boolean>;
 }
 
 /** the library, with the importer engine making (once, cached) a lighter mesh when the stored one is over the cap */
 export const libraryOwnAssets: OwnAssets = {
+  async has(id) {
+    try {
+      return !!(await topFor(id));
+    } catch {
+      return false;
+    }
+  },
   async top(id) {
     const b = await topFor(id);
     return b ? new Uint8Array(await b.arrayBuffer()) : null;
@@ -369,10 +379,13 @@ export class ImportVisualsClient {
     if (!tx || !tx.isOpen) return;
     if (!this.showOthers()) return;
     for (const [owner, id] of this.roster) {
+      // ⚠️ never this seat's own robot id: a seat that claimed it cannot lend this viewer a look for it
+      if (id === this.ownId) continue;
       for (const kind of this.wantedKinds()) {
         const key = `${owner}|${kind}`;
         if (this.ready.get(key) !== id) continue; // the room does not say it has this robot's asset
-        if (hasRelayedAsset(id, kind) || this.incoming.has(key)) continue;
+        // an asset is (owner, id): one this owner already lent, or an id another owner's look holds
+        if (hasRelayedAsset(owner, id, kind) || relayedIdTakenByOther(owner, id) || this.incoming.has(key)) continue;
         const asked = this.asks.get(key) ?? 0;
         if (asked >= MAX_ASKS) continue;
         this.asks.set(key, asked + 1);
@@ -411,10 +424,28 @@ export class ImportVisualsClient {
       this.asks.set(key, MAX_ASKS); // the owner's bytes are not a picture or a model: no second try
       return;
     }
-    // a robot id the roster still names for this owner (it may have changed while this travelled)
-    if (this.roster.get(inc.owner) !== inc.id || hasRelayedAsset(inc.id, inc.kind)) return;
-    registerRelayedAsset(inc.id, inc.kind, inc.buf);
-    this.delivered.add(inc.id);
+    void this.deliver(inc.owner, inc.id, inc.kind, inc.buf, this.tx);
+  }
+
+  /**
+   * Lend a validated asset to the renderers, keyed (owner, id), unless this viewer must not:
+   *  · the roster no longer names this robot for that owner (it changed while this travelled);
+   *  · it is this seat's OWN robot id, or one this device's library holds — what a viewer draws for
+   *    its own robots is its own copy, never another seat's upload under the same id;
+   *  · another owner's look already holds this id.
+   */
+  private async deliver(owner: string, id: string, kind: VisualKind, bytes: Uint8Array, tx: Transport | null): Promise<void> {
+    if (this.roster.get(owner) !== id || id === this.ownId) return;
+    if (hasRelayedAsset(owner, id, kind) || relayedIdTakenByOther(owner, id)) return;
+    let mine = false;
+    try {
+      mine = (await this.own.has?.(id)) ?? false;
+    } catch {
+      mine = false;
+    }
+    // the room may have been left, or the robot changed, while the library answered
+    if (mine || this.tx !== tx || this.roster.get(owner) !== id || id === this.ownId || !this.showOthers()) return;
+    if (registerRelayedAsset(owner, id, kind, bytes)) this.delivered.add(id);
   }
 
   private abort(key: string): void {

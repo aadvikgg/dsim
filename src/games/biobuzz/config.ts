@@ -42,7 +42,7 @@ import type { Alliance, AssistConfig, DrivetrainType, RobotSpec, StartCat, Vec2,
 import { DRIVETRAIN_LIMITS, INTAKE_PRESETS, ROBOT_MAX_SIZE } from '../../config';
 import { clamp, datan2, dcos, dsin, hyp, wrapAngle } from '../../math';
 import { lengthLimits, widthLimits } from '../../sim/drivetrain';
-import { importPlacePoint } from '../../sim/importedMech';
+import { importPlaceExit, importPlacePoint } from '../../sim/importedMech';
 import {
   BB_DEFAULT_INTAKE_MOUNT,
   type BbIntakeMount,
@@ -1677,12 +1677,15 @@ export interface BbBoxTubeFrame {
  * on an edge and close to the diagonal at a corner.
  */
 export function bbBoxTubeFrame(
-  spec: Pick<RobotSpec, 'length' | 'width'>,
+  spec: Pick<RobotSpec, 'length' | 'width'> & Partial<Pick<RobotSpec, 'imported'>>,
   mount: BbMountPos,
   place: { x: number; y: number } | null,
 ): BbBoxTubeFrame {
   const pos: BbMountPos = mount === 'center' ? 'front' : mount;
-  const o = mountOrigin(spec, pos);
+  // an IMPORT's tower stands where the sim's placer ray leaves its HULL (`importPlaceExit` — the
+  // point `bbImportPlacePoint` reaches `BB_PLACE_REACH` beyond), not on its bounding box, whose
+  // corner cell a chamfered hull does not even contain
+  const o = spec.imported ? importPlaceExit(spec.imported, MOUNT_DIR[pos]) : mountOrigin(spec, pos);
   const d = MOUNT_DIR[pos];
   const corner = Math.abs(d.x) > 1e-9 && Math.abs(d.y) > 1e-9;
   const ins = corner ? BB_BOX_TUBE_CORNER_INSET : BB_BOX_TUBE_INSET;

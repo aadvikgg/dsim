@@ -91,13 +91,25 @@ export const IMPORT_MEMBER_NEEDS_UPDATE =
 export const IMPORT_START_REFUSED =
   'Couldn’t start the match. Someone here is on an older version of DSIM and can’t play an imported robot. Ask them to refresh the page, or pick a standard robot.';
 
+/** an imported robot whose id another seat in the room already holds */
+export const IMPORT_ID_TAKEN =
+  'Couldn’t use this imported robot here. Another driver in this room has a robot with the same id. Duplicate it in your robot library to give it its own id, or pick another robot.';
+
 /** the client's own one-liner when it falls back to a standard robot */
 export const IMPORT_FELL_BACK = 'This server can’t play imported robots yet, so you are using your last standard robot.';
+
+/** the robot id (`ImportedRobot.id`) a spec carries, read off the RAW value, or undefined. The id
+ *  rule is `coerceImported`'s (16 lowercase hex), so a raw id that passes here survives coercion. */
+export function importIdOf(spec: unknown): string | undefined {
+  if (!isImportedSpec(spec)) return undefined;
+  const id = (spec as { imported: { id?: unknown } }).imported.id;
+  return typeof id === 'string' && /^[0-9a-f]{16}$/.test(id) ? id : undefined;
+}
 
 // ---- the room's state, and the one admission rule -------------------------------------
 
 /**
- * What a room has to know about imported robots to decide who may come in. Three facts, so a
+ * What a room has to know about imported robots to decide who may come in. Four facts, so a
  * worker room can mirror them to the socket thread (`RoomFacts`) and the same rule runs on both
  * sides of that boundary.
  */
@@ -109,6 +121,13 @@ export interface ImportRoomState {
   hasImport: boolean;
   /** some seated client or spectator does not advertise `ROBOT_IMPORT_CAP` */
   capless: boolean;
+  /**
+   * The robot ids the seats hold (a seat changing its own robot is left out of its own check).
+   * TWO SEATS MAY NOT HOLD ONE ID: a robot's picture and mesh are relayed and drawn by that id, so
+   * a second seat claiming it could put its own look on the first seat's robot for everyone.
+   * Absent on a mirror that predates it (then the room's own `add` decides).
+   */
+  ids?: readonly string[];
 }
 
 /**
@@ -118,11 +137,12 @@ export interface ImportRoomState {
  * and a seated driver asking for an imported robot (an `update` patch that carries one).
  *
  * `who.imported` is whether the robot they bring is imported. A client whose build lacks the cap
- * can never honestly bring one, so that combination is refused as a plain "not here".
+ * can never honestly bring one, so that combination is refused as a plain "not here". `who.id` is
+ * that robot's id, when it has a well-formed one.
  */
 export function importAdmission(
   state: ImportRoomState,
-  who: { imported: boolean; caps: readonly string[] | undefined },
+  who: { imported: boolean; caps: readonly string[] | undefined; id?: string },
 ): string | null {
   const cap = hasImportCap(who.caps);
   if (who.imported) {
@@ -130,6 +150,7 @@ export function importAdmission(
     if (!cap) return IMPORT_ROOM_NEEDS_UPDATE;
     // `capless` is read over every seat and spectator; this client has the cap, so it adds nothing
     if (state.capless) return IMPORT_MEMBER_NEEDS_UPDATE;
+    if (who.id !== undefined && state.ids?.includes(who.id)) return IMPORT_ID_TAKEN;
     return null;
   }
   // an ordinary robot: only the room's contents can turn it away, and only for lack of the cap

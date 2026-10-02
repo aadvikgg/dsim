@@ -18,7 +18,8 @@ import { FootprintSvg, importedFootprintLabel } from '../../ui/FootprintSvg';
 import { useImportedTopUrl } from '../../ui/useImportedAssets';
 import { BB_MODE_LABELS } from './labels';
 import { BB_PLACE_MARK_R, bbBoxTubeGlyph } from './parts';
-import { EDGE_ANGLE, type BbMountPos, bbMouthFrame, bbShooterEdgeOf, edgeGeom, turretLocal, turretRadius } from './mounts';
+import { EDGE_ANGLE, EDGE_DIR, EDGE_PERP, type BbMountPos, bbMouthFrame, bbShooterEdgeOf, edgeGeom, turretLocal, turretRadius } from './mounts';
+import { dumperFrame } from './drawRobot';
 import { bbFootprint, bbMouths, bbPlacePointLocal } from './robot';
 
 /** dimension-label type size, in the viewBox's inch units */
@@ -572,11 +573,23 @@ function ImportedBiobuzzPreview({ spec, size, fluid, caption }: { spec: RobotSpe
   const turrets = bbIsTurreted(launcher)
     ? [launcher.mount, ...(launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount2] : [])].map((m) => ({ ...turretLocal(spec, m), r }))
     : [];
+  // a dumper releases along a LINE (`dumperFrame`, the sim's `bbImportLaunchLine`)
+  const lines = [];
+  if (launcher.kind === 'dumper') {
+    const edge = bbShooterEdgeOf({ shooterMount: launcher.mount });
+    const f = dumperFrame(spec, edge);
+    const n = EDGE_DIR[edge];
+    const p = EDGE_PERP[edge];
+    const h = f.span * BB_LAUNCH_LINE_FRAC;
+    const cx = n.x * f.dist + p.x * f.lateral;
+    const cy = n.y * f.dist + p.y * f.lateral;
+    lines.push({ x0: cx - p.x * h, y0: cy - p.y * h, x1: cx + p.x * h, y1: cy + p.y * h });
+  }
   return (
     <FootprintSvg
       imported={imp}
       drivetrain={spec.drivetrain}
-      marks={{ mouths: bbMouths(spec), turrets, place: bbPlacePointLocal(spec) }}
+      marks={{ mouths: bbMouths(spec), turrets, place: bbPlacePointLocal(spec), lines }}
       image={image}
       size={size}
       fluid={fluid}
