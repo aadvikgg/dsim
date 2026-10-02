@@ -3,6 +3,7 @@ import * as C from '../../config';
 import { clamp, datan2, dcos, dsin, hyp, nextRandom, rot, wrapAngle } from '../../math';
 import { robotExtents } from '../../sim/physics';
 import { polyFeature } from '../../sim/imported';
+import { chainImportLaunchLine, chainImportLaunchZ } from './importMech';
 import {
   CHAIN_ACCEL_DEPTH,
   CHAIN_ACCEL_HALF_Y,
@@ -565,7 +566,7 @@ function launchToAccel(
   const netx = dir.x * horizSpeed + perp.x * latVel + r.vel.x;
   const nety = dir.y * horizSpeed + perp.y * latVel + r.vel.y;
   const netSpeed = Math.max(1, hyp(netx, nety));
-  const z0 = 8;
+  const z0 = r.spec.imported ? chainImportLaunchZ(r.spec, 8) : 8; // an IMPORT: its placed height
   const land = distMouth + CHAIN_ACCEL_DEPTH * 0.5; // arc timing: sized to the goal distance
   const t = land / netSpeed;
   const vz = 0.5 * C.GRAVITY * t - z0 / t; // solve z(t)=0 for the landing point
@@ -705,8 +706,12 @@ function launchAt(
   // launch point: out to the edge along its normal, then `frac` across it (edge perpendicular)
   const dir = EDGE_DIR[edge];
   const perp = EDGE_PERP[edge];
-  const across = frac * 2 * span * CHAIN_LAUNCH_LINE_FRAC;
-  const w = rot({ x: dist * dir.x + across * perp.x, y: dist * dir.y + across * perp.y }, r.heading);
+  // an IMPORT's line is centred on its placed lip, no wider than its hull there
+  const line = r.spec.imported ? chainImportLaunchLine(r.spec, edge, span) : null;
+  const across = frac * 2 * (line ? line.half : span) * CHAIN_LAUNCH_LINE_FRAC;
+  const w = line
+    ? rot({ x: line.origin.x + across * perp.x, y: line.origin.y + across * perp.y }, r.heading)
+    : rot({ x: dist * dir.x + across * perp.x, y: dist * dir.y + across * perp.y }, r.heading);
   const px = r.pos.x + w.x;
   const py = r.pos.y + w.y;
   const spd = speed * (1 + sideVar * (frac * 2)); // frac*2 ∈ [−1,1] — catapult side variance
@@ -722,7 +727,7 @@ function launchAt(
     state: { kind: 'flight', target: r.alliance },
     pos: { x: px, y: py },
     vel: { x: netx, y: nety },
-    z: CHAIN_LAUNCH_Z0,
+    z: r.spec.imported ? chainImportLaunchZ(r.spec, CHAIN_LAUNCH_Z0) : CHAIN_LAUNCH_Z0,
     vz: 0.5 * C.GRAVITY * tWall,
   });
 }

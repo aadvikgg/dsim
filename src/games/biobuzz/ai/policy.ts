@@ -899,8 +899,9 @@ function approach(c: Ctx, at: Vec2, prefer?: number): { goal: Vec2; heading: num
       for (const u of [deep, lip]) {
         for (const v of [0, side, -side]) {
           // robot-frame offset of the element from the robot centre
-          const lx = EDGE_DIR[edge].x * u + EDGE_PERP[edge].x * v;
-          const ly = EDGE_DIR[edge].y * u + EDGE_PERP[edge].y * v;
+          // `+ ax.vc`: an imported robot's mouth need not be centred on its edge (0 otherwise)
+          const lx = EDGE_DIR[edge].x * u + EDGE_PERP[edge].x * (v + ax.vc);
+          const ly = EDGE_DIR[edge].y * u + EDGE_PERP[edge].y * (v + ax.vc);
           const off2 = rot({ x: lx, y: ly }, heading);
           const gx = at.x - off2.x;
           const gy = at.y - off2.y;

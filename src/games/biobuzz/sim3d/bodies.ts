@@ -1,5 +1,5 @@
 import type { Rapier3d } from './engine';
-import type { Alliance, RobotSpec, World } from '../../../types';
+import type { Alliance, RobotSpec, Vec2, World } from '../../../types';
 import { dcos, dsin } from '../../../math';
 import {
   BB3_ELEMENT_FRICTION,
@@ -55,6 +55,9 @@ import {
   bbMechEnvelopes,
 } from '../config';
 import { bbMouths, mouthAxes } from '../robot';
+import { bbImportMouths } from '../importMech';
+import { carveImportPlates, clipHalf } from '../../../sim/importedMech';
+import { polyArea, polyBounds, polyGrow } from '../../../sim/imported';
 import { bbIntakeKindOf } from '../mechs';
 import { EDGE_ANGLE, type BbEdge } from '../mounts';
 import { cadCellBox, cadStatics, cadTrayHulls, cadTrayRiders } from './fieldColliders';
@@ -865,6 +868,112 @@ function buildTrayColliders(
 // a dynamic COMPOUND, yaw-only: the bare frame `length x width x heightIn` plus the sweeper's
 // side arms out to `bbIntakeReach`. See `chassis3dShapes`.
 
+// ---- IMPORTED ROBOTS --------------------------------------------------------------
+
+/** one convex polygon extruded from `z0` to `z1` above the tiles, as a `Chassis3dShape` prism in
+ *  a body whose origin is `half` above the tiles */
+function prismShape(poly: readonly Vec2[], z0: number, z1: number, half: number): Chassis3dShape {
+  const b = polyBounds(poly);
+  const cx = (b.minX + b.maxX) / 2;
+  const cy = (b.minY + b.maxY) / 2;
+  return {
+    cx,
+    cy,
+    cz: -half + (z0 + z1) / 2,
+    hx: Math.max(1e-3, (b.maxX - b.minX) / 2),
+    hy: Math.max(1e-3, (b.maxY - b.minY) / 2),
+    hz: Math.max(1e-3, (z1 - z0) / 2),
+    shape: 'prism',
+    pts: poly.map((p) => ({ x: p.x - cx, y: p.y - cy })),
+  };
+}
+
+/**
+ * ⚠️ **AN IMPORTED ROBOT'S 3D CHASSIS IS ITS CAD, BAND BY BAND** (`imported.bands`, up to three
+ * stacked convex prisms; absent ⇒ one prism of the hull to its measured height). The same bargain
+ * the standard compound makes — "THE COMPOUND IS THE DRAWING" — with the drawing being the model:
+ * no archetype turret/dumper/tower shape is added (`bbMechEnvelopes` returns none for an import),
+ * because the bands already hold them.
+ *
+ * Per band, BELOW the mouth slot (`BB3_MOUTH_SLOT_Z`) the band is CARVED exactly as the 2D solids
+ * are (`carveImportPlates`: the chassis behind each mouth face, a plate either side of each
+ * mouth), so an element rolls in under the roller to the face; the open strip is filled by a
+ * POCKET prism (`GROUP_POCKET`: walls, robots and statics meet it, an element never does), so to
+ * everything but an element the robot is still its whole hull. ABOVE the slot the band is whole
+ * (the lintel is part of it). The lowest band starts on the tiles whatever its own `z0` says (the
+ * body rests on its lowest collider); every band is capped at the build height.
+ *
+ * `remote` is the same bands UNCARVED — what the FULL predictor builds for a robot it does not
+ * drive (`predict.ts`), the analogue of its single cuboid plus mechanism shapes.
+ */
+export function import3dShapes(
+  spec: RobotSpec,
+  heightIn: number,
+): { chassis: Chassis3dShape[]; pocket: Chassis3dShape[]; remote: Chassis3dShape[] } {
+  const imp = spec.imported!;
+  const half = heightIn / 2;
+  const mouths = bbImportMouths(spec);
+  const bands = imp.bands && imp.bands.length > 0 ? imp.bands : [{ z0: 0, z1: imp.heightIn, hull: imp.hull }];
+  let lowest = Infinity;
+  for (const b of bands) lowest = Math.min(lowest, b.z0);
+  const chassis: Chassis3dShape[] = [];
+  const pocket: Chassis3dShape[] = [];
+  const remote: Chassis3dShape[] = [];
+  for (const band of bands) {
+    const z0 = band.z0 === lowest ? 0 : band.z0;
+    const z1 = Math.min(band.z1, heightIn);
+    if (!(z1 > z0 + 1e-3) || band.hull.length < 3) continue;
+    remote.push(prismShape(band.hull, z0, z1, half));
+    const slot = Math.min(BB3_MOUTH_SLOT_Z, z1 - 0.1);
+    if (mouths.length > 0 && z0 < slot) {
+      const carve = carveImportPlates(band.hull, mouths, INTAKE_RAIL_T);
+      chassis.push(prismShape(carve.chassis, z0, slot, half));
+      for (const piece of carve.structure) chassis.push(prismShape(piece, z0, slot, half));
+      for (const m of mouths) {
+        // the open strip in front of the face: vc ± half along p, beyond the face along n
+        let strip = clipHalf(band.hull, -m.n.x, -m.n.y, -m.face);
+        strip = clipHalf(strip, m.p.x, m.p.y, m.vc + m.half);
+        strip = clipHalf(strip, -m.p.x, -m.p.y, -(m.vc - m.half));
+        if (strip.length >= 3 && polyArea(strip) >= 0.05) pocket.push(prismShape(strip, z0, slot, half));
+      }
+      if (z1 > slot + 1e-3) chassis.push(prismShape(band.hull, slot, z1, half));
+    } else {
+      chassis.push(prismShape(band.hull, z0, z1, half));
+    }
+  }
+  return { chassis, pocket, remote };
+}
+
+/**
+ * A prism's collider: the convex hull of the polygon at top and bottom, with THE SAME EDGE BREAK
+ * the chassis boxes take (`chassisBoxDesc`) — the polygon ERODED by `r` (its own edges moved in,
+ * `polyGrow`), the height shrunk by `r`, and a contact skin of `r`, so every flat face is back in
+ * its own plane (a wall-flush start does not move) and only the edges pull in. Points are emitted
+ * bottom ring then top ring in polygon order: identical input, identical hull. A shape too thin to
+ * erode is the bare hull; one Rapier refuses to hull falls back to its bounding box.
+ */
+function prismDesc(RAPIER: Rapier3d, s: Chassis3dShape): InstanceType<Rapier3d['ColliderDesc']> {
+  const pts = s.pts!;
+  const r = Math.min(BB3_INTAKE_CORNER_R, BB3_INTAKE_CORNER_CLAMP * Math.min(s.hx, s.hy, s.hz));
+  const eroded = r > 1e-6 ? polyGrow(pts, -r) : [];
+  const useSkin = eroded.length >= 3 && polyArea(eroded) >= 0.05 && s.hz - r > 1e-3;
+  const ring = useSkin ? eroded : pts;
+  const hz = useSkin ? s.hz - r : s.hz;
+  const flat = new Float32Array(ring.length * 6);
+  ring.forEach((p, i) => {
+    flat[3 * i] = p.x;
+    flat[3 * i + 1] = p.y;
+    flat[3 * i + 2] = -hz;
+    flat[3 * (i + ring.length)] = p.x;
+    flat[3 * (i + ring.length) + 1] = p.y;
+    flat[3 * (i + ring.length) + 2] = hz;
+  });
+  const desc = RAPIER.ColliderDesc.convexHull(flat);
+  if (!desc) return RAPIER.ColliderDesc.cuboid(s.hx, s.hy, s.hz);
+  return useSkin ? desc.setContactSkin(r) : desc;
+}
+
+
 export function robotHeightIn(spec: RobotSpec): number {
   return spec.heightIn ?? 18;
 }
@@ -915,13 +1024,20 @@ export interface Chassis3dShape {
    * rails, so `reachColliderDesc` composes the fixed Y→Z rotation with `rot` rather than folding
    * it in here.
    */
-  shape?: 'box' | 'cylinder' | 'round';
+  shape?: 'box' | 'cylinder' | 'round' | 'prism';
+  /**
+   * `shape: 'prism'` only — an IMPORTED robot's convex polygon (robot-local, RELATIVE TO `cx, cy`,
+   * CCW), extruded over `cz ± hz`. `hx`/`hy` are then its bounding box's half-extents about
+   * `cx, cy`, so anything that reads a shape as a box still gets a conservative bound.
+   */
+  pts?: Vec2[];
 }
 
 /** the collider desc for a chassis MECHANISM shape: a cylinder (a turret's swept disc), a
  * ROUNDED box (a Box Tube tower — `BbMechEnvelope.narrow`), or the edge-broken box everything
  * else is. The authority and the FULL predictor both build through this. */
 export function chassisMechDesc(RAPIER: Rapier3d, s: Chassis3dShape): InstanceType<Rapier3d['ColliderDesc']> {
+  if (s.shape === 'prism' && s.pts) return prismDesc(RAPIER, s);
   if (s.shape === 'cylinder') return RAPIER.ColliderDesc.cylinder(s.hz, s.hx).setRotation(CYL_AXIS_Z);
   if (s.shape === 'round') {
     const r = Math.min(BB3_LIFT_EDGE_R, s.hx / 2, s.hy / 2, s.hz / 2);
@@ -959,6 +1075,11 @@ export function chassisMechDesc(RAPIER: Rapier3d, s: Chassis3dShape): InstanceTy
  * which is `robotExtents` by construction — see `chassis3dShapes`' own note on why a mechanism
  * shape is clamped into it. */
 export function chassis3dPlanEnvelope(spec: RobotSpec): { front: number; back: number; left: number; right: number } {
+  if (spec.imported) {
+    // an IMPORT: its hull's bounding box (no reach is added — the hull already holds the intake)
+    const b = polyBounds(spec.imported.hull);
+    return { front: b.maxX, back: -b.minX, left: b.maxY, right: -b.minY };
+  }
   const hl = spec.length / 2;
   const hw = spec.width / 2;
   const ex = { front: hl, back: hl, left: hw, right: hw };
@@ -1009,6 +1130,8 @@ export function chassis3dMechShapes(
 }
 
 export function chassis3dShapes(spec: RobotSpec, heightIn: number): Chassis3dShape[] {
+  // an IMPORTED robot is its CAD height bands, its mouths carved below the slot (`import3dShapes`)
+  if (spec.imported) return import3dShapes(spec, heightIn).chassis;
   const hl = spec.length / 2;
   const hw = spec.width / 2;
   const half = heightIn / 2;
@@ -1133,6 +1256,7 @@ export function chassis3dShapes(spec: RobotSpec, heightIn: number): Chassis3dSha
  * 1.434 after.
  */
 export function chassis3dPocketShapes(spec: RobotSpec, heightIn: number): Chassis3dShape[] {
+  if (spec.imported) return import3dShapes(spec, heightIn).pocket;
   const reach = bbIntakeReach(spec);
   if (reach <= 1e-6) return [];
   const hl = spec.length / 2;
@@ -1264,9 +1388,10 @@ export function chassis3dReachShapes(spec: RobotSpec, heightIn: number, rampRead
   for (const m of bbMouths(spec)) {
     const axes = mouthAxes(m, hl, hw);
     const { n, p, uOut } = axes;
+    // `v + vc`: an IMPORTED mouth need not be centred on its edge (`vc` is 0 on a standard one)
     const place = (u: number, v: number): { cx: number; cy: number } => ({
-      cx: u * n.x + v * p.x,
-      cy: u * n.y + v * p.y,
+      cx: u * n.x + (v + axes.vc) * p.x,
+      cy: u * n.y + (v + axes.vc) * p.y,
     });
     if (kind === 'siderollers') {
       const wheelY = bbSideRollerY(axes.half);
@@ -1375,7 +1500,7 @@ export function bbRampSwingShapes(spec: RobotSpec, heightIn: number, e: number):
   for (const m of bbMouths(spec)) {
     const axes = mouthAxes(m, hl, hw);
     const { n, p, uOut } = axes;
-    const place = (u: number, v: number): { cx: number; cy: number } => ({ cx: u * n.x + v * p.x, cy: u * n.y + v * p.y });
+    const place = (u: number, v: number): { cx: number; cy: number } => ({ cx: u * n.x + (v + axes.vc) * p.x, cy: u * n.y + (v + axes.vc) * p.y });
     const pivotU = uOut - BB_RAMP_PIVOT_BACK;
     const tipU = pivotU + BB_RAMP_L * sinPhi;
     const tipZ = BB_RAMP_PIVOT_Z + BB_RAMP_L * cosPhi;
@@ -1531,7 +1656,7 @@ export function addChassis3dColliders(
    */
   for (const s of chassis3dPocketShapes(spec, heightIn)) {
     world3d.createCollider(
-      chassisBoxDesc(RAPIER, s.hx, s.hy, s.hz)
+      (s.shape === 'prism' ? chassisMechDesc(RAPIER, s) : chassisBoxDesc(RAPIER, s.hx, s.hy, s.hz))
         .setTranslation(s.cx, s.cy, s.cz)
         .setDensity(0)
         .setFriction(PHYS_FRICTION)

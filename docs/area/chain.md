@@ -153,6 +153,17 @@ throughout: **+x = forward, +y = the robot's LEFT**.
 The drawn intake bars ARE the grab area (renderer and `interact` share
 `chainIntakeMouths`) — keep it that way.
 
+**An IMPORTED robot** (`importMech.ts`; the shared rules are `docs/area/physics.md` "Imported
+robots: mechanisms") keeps the mount enums for WHICH edge, and reads positions off the hull and
+`imported.mech`: each mouth's lip is where the hull ends inside its placed span, possibly
+off-centre (`intakeMouthFrame` draws it there); a turret is the placed shooter, a turretless line
+is centred on the placed lip and spread no wider than the hull through it, and both release at
+the placed height. The catalyst works from where the hull ends along its mount direction from the
+placed base (`catalystOrigin`), so `catalystMouth`, the rail target and the rail's half-travel
+(the hull's chord, less `CHAIN_RAIL_MARGIN`) all agree; the arm's reach is `24 − the hull's
+extent on that axis + ring radius` (the hull already holds the sweeper), and storage reads the
+hull's AREA.
+
 ## Ball storage
 
 The manual sets no fixed particle limit (G01 unlimited control; G02 bounds them to an

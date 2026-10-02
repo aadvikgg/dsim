@@ -1,6 +1,7 @@
 import type { Artifact, RobotState, Vec2 } from '../types';
 import * as C from '../config';
 import { hyp, rot } from '../math';
+import { decodeImportSolids } from './importedMech';
 
 /**
  * WHAT ON A ROBOT IS SOLID TO A GROUND ARTIFACT — the one geometry authority.
@@ -69,7 +70,7 @@ export function robotSolids(
   heldBalls: readonly Artifact[],
   radius: number = C.BALL_RADIUS,
 ): RobotSolids {
-  if (r.spec.imported) return importedSolids(r, heldBalls, radius);
+  if (r.spec.imported) return importedSolids(r, heldBalls, radius, decodeImportSolids(r.spec));
   const hl = r.spec.length / 2;
   const hw = r.spec.width / 2;
   const preset = C.INTAKE_PRESETS[r.spec.intake];
@@ -131,26 +132,29 @@ export function robotSolids(
 }
 
 /**
- * AN IMPORTED ROBOT'S ARTIFACT SOLIDS: its whole hull as ONE CLOSED convex polygon, no intake
- * structure, plus the artifacts it holds — for EVERY game (BIOBUZZ's `bbRobotSolids` delegates
- * here too).
- *
- * CLOSED, for now, and that is a stated interim rather than an oversight: the hull is the robot
- * seen from above with its intake included, so it covers the mouth. Carving the mouth (from
- * `imported.mech.intakes`) belongs to the mechanism lane, which will return a chassis polygon with
- * the mouth band removed plus whatever guide structure the game's intake has. Until then an
- * artifact can never end up inside an imported robot — `placeGroundArtifact` and the pin test both
- * read this — and an import collects nothing through a floor-level mouth.
+ * AN IMPORTED ROBOT'S ARTIFACT SOLIDS: the hull CARVED by the game's intake — `carve.chassis` (the
+ * hull behind every mouth face) and `carve.structure` (side plates / funnel wedges, each a convex
+ * polygon), plus the artifacts it holds. DECODE carves with `decodeImportSolids`
+ * (`importedMech.ts`), BIOBUZZ with `bbImportSolids`; with no carve (a game that has not got one)
+ * the hull is ONE CLOSED polygon, so an artifact can never end up inside it.
  */
 export function importedSolids(
   r: RobotState,
   heldBalls: readonly Artifact[],
   radius: number = C.BALL_RADIUS,
+  carve?: { chassis: Vec2[]; structure: Vec2[][] },
 ): RobotSolids {
   const held: SolidShape[] = [];
   for (const b of heldBalls) {
     if (b.state.kind !== 'held' || b.state.robot !== r.id) continue;
     held.push({ kind: 'circle', cx: b.state.lx, cy: b.state.ly, r: b.r ?? radius });
+  }
+  if (carve) {
+    return {
+      chassis: { kind: 'poly', pts: carve.chassis },
+      structure: carve.structure.map((pts): SolidShape => ({ kind: 'poly', pts })),
+      held,
+    };
   }
   const pts = r.spec.imported!.hull.map((p) => ({ x: p.x, y: p.y }));
   return { chassis: { kind: 'poly', pts }, structure: [], held };
