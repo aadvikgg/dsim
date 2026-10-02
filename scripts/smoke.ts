@@ -32454,15 +32454,19 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
     cli.release(a);
     check('visuals/client: releasing a transport that is not the bound one does nothing', true);
     cli.reset();
-    // the adapter holds what it was given until a sink exists, and hands it over then
+    // by default the adapter lends to the renderers' own registry (`src/render/importedAssets.ts`)
     reset();
+    const IA = await import('../src/render/importedAssets');
     BR.setRelayedAssetSink(null);
+    IA.resetImportedAssetsForTests();
     BR.registerRelayedAsset(ID, 'top', png);
-    const late: { id: string }[] = [];
-    BR.setRelayedAssetSink({ register: (id) => late.push({ id }), unregister: () => {} });
-    check('visuals/client: the renderer adapter holds an asset until its registry is plugged in, and hands it over then (lane 6’s seam)', late.length === 1 && late[0].id === ID && BR.hasRelayedAsset(ID, 'top'));
+    check('visuals/client: ⚠️ by default a relayed asset is lent to the renderers’ registry (`registerImportedAssets`), where it wins over the device library', IA.importedAssetCacheSizes().registered === 1 && BR.hasRelayedAsset(ID, 'top'));
+    BR.registerRelayedAsset(ID, 'mesh', glb);
+    const lent = await IA.importedMeshBlob(ID);
+    check('visuals/client: ...a relayed mesh is what the 3D scene is handed for that id, byte for byte', !!lent && lent.type === 'model/gltf-binary' && same(new Uint8Array(await lent.arrayBuffer()), glb));
     BR.unregisterRelayedAssets([ID]);
-    check('visuals/client: ...and takes it back', !BR.hasRelayedAsset(ID, 'top') && BR.relayedAssetIds().length === 0);
+    check('visuals/client: ...and `unregisterImportedAssets` takes it back when the room is left', IA.importedAssetCacheSizes().registered === 0 && !BR.hasRelayedAsset(ID, 'top') && BR.relayedAssetIds().length === 0);
+    IA.resetImportedAssetsForTests();
     BR.setRelayedAssetSink(null);
   }
 }
