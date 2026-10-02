@@ -364,7 +364,14 @@ export function hopperBarInHull(imp: ImportedRobot, w: number, h: number, clear 
  * BAR along the hull edge(s) facing forward, and a near-white ARROW on the deck pointing at it.
  * Neither in an alliance colour. The bar runs on the INSIDE of the hull, so it is inside the clip.
  */
-export function drawImportedFrontBack(ctx: CanvasRenderingContext2D, imp: ImportedRobot, ink: string, depth: number): void {
+export function drawImportedFrontBack(
+  ctx: CanvasRenderingContext2D,
+  imp: ImportedRobot,
+  ink: string,
+  depth: number,
+  /** turret rings the deck arrow must not sit under (robot frame) */
+  avoid: readonly { x: number; y: number; r: number }[] = [],
+): void {
   const hull = imp.hull;
   // the forward-facing edges: outward normal within 45° of +x, or the most forward one
   const edges: { a: Vec2; b: Vec2; nx: number; ny: number }[] = [];
@@ -391,20 +398,42 @@ export function drawImportedFrontBack(ctx: CanvasRenderingContext2D, imp: Import
     ctx.closePath();
     ctx.fill();
   }
-  // the deck ARROW, at the centroid, sized to the room it has
-  const c = polyCentroid(hull);
-  const room = polyPointDepth(hull, c);
-  const half = Math.max(0.8, Math.min(1.8, room * 0.3));
-  const len = half * 1.6;
+  // the deck ARROW, where the deck is clear of the turrets
+  const a = frontArrowSpot(hull, avoid);
   ctx.beginPath();
-  ctx.moveTo(c.x + len / 2, c.y);
-  ctx.lineTo(c.x - len / 2, c.y + half);
-  ctx.lineTo(c.x - len / 2, c.y - half);
+  ctx.moveTo(a.x + a.len / 2, a.y);
+  ctx.lineTo(a.x - a.len / 2, a.y + a.half);
+  ctx.lineTo(a.x - a.len / 2, a.y - a.half);
   ctx.closePath();
   ctx.fill();
   ctx.strokeStyle = 'rgba(17,21,27,0.55)';
   ctx.lineWidth = 0.22;
   ctx.stroke();
+}
+
+/**
+ * WHERE THE DECK ARROW GOES on an import: the hull's centroid, or — when a turret ring sits on it
+ * (a centre turret is the common build) — the first spot straight ahead of it that clears every
+ * ring in `avoid`, so the one mark that says which way the robot faces is never under a turret.
+ * Sized to the room the hull has there. Shared by the sprites and `FootprintSvg`.
+ */
+export function frontArrowSpot(
+  hull: readonly Vec2[],
+  avoid: readonly { x: number; y: number; r: number }[] = [],
+): { x: number; y: number; half: number; len: number } {
+  const c = polyCentroid(hull);
+  const front = polyBounds(hull).maxX;
+  const size = (p: Vec2): { half: number; len: number } => {
+    const half = Math.max(0.8, Math.min(1.8, polyPointDepth(hull, p) * 0.3));
+    return { half, len: half * 1.6 };
+  };
+  for (let x = c.x; x <= front - 1; x += 0.25) {
+    const p = { x, y: c.y };
+    const s = size(p);
+    const clear = avoid.every((o) => Math.hypot(p.x - o.x, p.y - o.y) >= o.r + s.len / 2 + 0.3);
+    if (clear && polyPointDepth(hull, { x: x + s.len / 2, y: c.y }) > 0.4) return { ...p, ...s };
+  }
+  return { x: c.x, y: c.y, ...size(c) };
 }
 
 /** a point pulled toward the hull's centroid until it sits `clear` inside the hull */

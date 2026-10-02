@@ -264,7 +264,15 @@ export function drawBiobuzzRobot(
   // header (`parts.ts`) is the language and the reason it is not the alliance colour. An import
   // draws the same two marks on its hull: the bar along the edge(s) facing forward, the arrow at
   // its centroid.
-  if (imp) drawImportedFrontBack(ctx, imp, BB_FRONT_INK, BB_END_BAR_T);
+  if (imp) {
+    const rings = bbIsTurreted(launcher)
+      ? [launcher.mount, ...(launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount2] : [])].map((m) => ({
+          ...turretLocal(r.spec, m),
+          r: turretRadius(r.spec),
+        }))
+      : [];
+    drawImportedFrontBack(ctx, imp, BB_FRONT_INK, BB_END_BAR_T, rings);
+  }
   else drawFrontBack(ctx, r.spec);
 
   // the silhouette line — neutral; the alliance is the name label + the fills

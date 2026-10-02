@@ -3418,7 +3418,10 @@ function buildImportedRobot(spec: RobotSpec, imp: ImportedRobot, id: number, all
     group.userData.spinWheels = spin;
 
     // WHICH END IS THE FRONT — `bbFrontMarks`' language, on the hull
-    const marks = importedFrontMarkGeometries(imp.hull, deckZ, Math.min(BB_END_BAR_H, 0.9), BB_FRONT_ARROW_T);
+    const rings = bbIsTurreted(launcher)
+      ? [launcher.mount, ...(launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount2] : [])].map((m) => ({ ...turretLocal(spec, m), r: turretRadius(spec) }))
+      : [];
+    const marks = importedFrontMarkGeometries(imp.hull, deckZ, Math.min(BB_END_BAR_H, 0.9), BB_FRONT_ARROW_T, rings);
     if (marks.bar) {
       const bar = cast(new THREE.Mesh(marks.bar, frontBarMat()), 'paint');
       bar.name = `robot:${id}:frontbar`;

@@ -1,9 +1,9 @@
 import { useId } from 'react';
 import type { DrivetrainType, ImportedRobot, Vec2 } from '../types';
 import { COLORS } from '../config';
-import { importedWheels, polyBounds, polyCentroid, polyGrow, polyPointDepth } from '../sim/imported';
+import { importedWheels, polyBounds, polyGrow } from '../sim/imported';
 import { importedTopFrame } from '../render/importedAssets';
-import type { EdgeRect } from '../render/drawImported';
+import { frontArrowSpot, type EdgeRect } from '../render/drawImported';
 
 /** a mechanism mark on the footprint, robot-local inches */
 export interface FootprintMarks {
@@ -113,10 +113,8 @@ export function FootprintSvg({
     drivetrain === 'xdrive' ? ((p.x - wcx) * (p.y - wcy) >= 0 ? -45 : 45) : 0;
 
   const inner = polyGrow(hull, -1.15);
-  const c = polyCentroid(hull);
-  const room = polyPointDepth(hull, c);
-  const ah = Math.max(0.8, Math.min(1.8, room * 0.3));
-  const al = ah * 1.6;
+  // the deck arrow, clear of any turret ring (the sprites' own rule, `frontArrowSpot`)
+  const arrow = frontArrowSpot(hull, marks?.turrets ?? []);
 
   const f = importedTopFrame(hull);
 
@@ -194,7 +192,7 @@ export function FootprintSvg({
         ) : null}
         {/* WHICH END IS THE FRONT: the arrow on the deck, pointing at it (+x, screen up) */}
         <path
-          d={`M ${c.x + al / 2} ${c.y} L ${c.x - al / 2} ${c.y + ah} L ${c.x - al / 2} ${c.y - ah} Z`}
+          d={`M ${arrow.x + arrow.len / 2} ${arrow.y} L ${arrow.x - arrow.len / 2} ${arrow.y + arrow.half} L ${arrow.x - arrow.len / 2} ${arrow.y - arrow.half} Z`}
           fill={ink}
           opacity={0.92}
         />

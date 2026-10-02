@@ -8,7 +8,8 @@ import {
   importedMeshVersion,
   subscribeImportedAssets,
 } from '../../../render/importedAssets';
-import { polyCentroid, polyGrow, polyPointDepth } from '../../../sim/imported';
+import { polyGrow } from '../../../sim/imported';
+import { frontArrowSpot } from '../../../render/drawImported';
 import { BB_DECK_Z } from '../config';
 import { loader } from './renderElementsGlb';
 
@@ -361,7 +362,14 @@ export function openTowerGeometry(poly: readonly Vec2[], z0: number, z1: number,
  * near-white bar along the edge(s) facing forward, standing on the deck, and the deck arrow at the
  * centroid pointing +x. Geometry only; `renderRobots.ts` puts its own (non-emissive) material on.
  */
-export function importedFrontMarkGeometries(hull: readonly Vec2[], deckZ: number, barH: number, arrowT: number): {
+export function importedFrontMarkGeometries(
+  hull: readonly Vec2[],
+  deckZ: number,
+  barH: number,
+  arrowT: number,
+  /** turret rings the arrow must not sit under — the 2D sprite's rule (`frontArrowSpot`) */
+  avoid: readonly { x: number; y: number; r: number }[] = [],
+): {
   bar: THREE.BufferGeometry | null;
   arrow: THREE.BufferGeometry;
 } {
@@ -387,14 +395,11 @@ export function importedFrontMarkGeometries(hull: readonly Vec2[], deckZ: number
     g.translate((e.a.x + e.b.x) / 2 - (e.nx * depth) / 2, (e.a.y + e.b.y) / 2 - (e.ny * depth) / 2, deckZ + barH / 2);
     bars.push(g.toNonIndexed());
   }
-  const c = polyCentroid(hull);
-  const room = polyPointDepth(hull, c);
-  const half = Math.max(0.8, Math.min(1.8, room * 0.3));
-  const len = half * 1.6;
+  const a = frontArrowSpot(hull, avoid);
   const tri = new THREE.Shape([
-    new THREE.Vector2(c.x + len / 2, c.y),
-    new THREE.Vector2(c.x - len / 2, c.y + half),
-    new THREE.Vector2(c.x - len / 2, c.y - half),
+    new THREE.Vector2(a.x + a.len / 2, a.y),
+    new THREE.Vector2(a.x - a.len / 2, a.y + a.half),
+    new THREE.Vector2(a.x - a.len / 2, a.y - a.half),
   ]);
   const arrow = new THREE.ExtrudeGeometry(tri, { depth: arrowT, bevelEnabled: false, steps: 1 });
   arrow.translate(0, 0, deckZ);
@@ -425,8 +430,12 @@ export function buildAimSight(material: THREE.Material, at: Vec2, z: number, rin
   pitch.name = 'bb-turret-pitch';
   node.add(head);
   head.add(pitch);
-  const ringMesh = new THREE.Mesh(new THREE.TorusGeometry(Math.max(0.8, ring), 0.12, 6, 32), material);
-  ringMesh.name = 'bb-import-aim-ring';
+  // a short HUB on the axis, not a hoop: a floating ring read as a marker, not as hardware
+  // (looked at, 2026-10-01 — the first pass had a torus at the turret radius)
+  const hubGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.5, 16);
+  hubGeo.rotateX(Math.PI / 2); // the cylinder's axis (+y) onto +z
+  const ringMesh = new THREE.Mesh(hubGeo, material);
+  ringMesh.name = 'bb-import-aim-hub';
   head.add(ringMesh);
   const len = Math.max(2.5, ring + 1.6);
   const rodGeo = new THREE.CylinderGeometry(0.16, 0.22, len, 10);

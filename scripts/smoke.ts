@@ -497,6 +497,7 @@ import {
   coerceImported,
   importedHalfDiag,
   polyBounds,
+  polyCentroid,
   polyFeature,
   rotatedPolyBounds,
 } from '../src/sim/imported';
@@ -524,7 +525,7 @@ import {
   topPixelToRobot,
   unregisterImportedAssets,
 } from '../src/render/importedAssets';
-import { pullInsideHull } from '../src/render/drawImported';
+import { frontArrowSpot, pullInsideHull } from '../src/render/drawImported';
 import { drawRobot as drawDecodeSprite } from '../src/render/drawRobot';
 import { drawChainRobot } from '../src/games/chain/drawRobot';
 import { drawBiobuzzRobot } from '../src/games/biobuzz/drawRobot';
@@ -30502,6 +30503,14 @@ function impPlayCheck(g: GameId): void {
     const corner = pullInsideHull(imp, { x: 9.5, y: 7.5 }, 1.15);
     check('imported 2D: a held-element slot in an empty box corner is pulled inside the hull with its clearance',
       polyFeature(imp.hull, corner).depth >= 1.15 - 1e-9, JSON.stringify(corner));
+    // the deck arrow (which end is the front) is never under a turret ring — a centre turret moves it forward
+    const free = frontArrowSpot(imp.hull);
+    const ring = { ...polyCentroid(imp.hull), r: 3 };
+    const moved = frontArrowSpot(imp.hull, [ring]);
+    check('imported 2D: the deck arrow sits on the centroid, and moves ahead of a centre turret ring rather than under it',
+      Math.hypot(free.x - ring.x, free.y - ring.y) < 1e-9 && Math.hypot(moved.x - ring.x, moved.y - ring.y) >= ring.r + moved.len / 2 &&
+        moved.x > ring.x && polyFeature(imp.hull, { x: moved.x + moved.len / 2, y: moved.y }).depth > 0,
+      JSON.stringify(moved));
   } finally {
     resetImportedAssetsForTests();
     if (hadImage) g.Image = prevImage;

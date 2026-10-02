@@ -4,6 +4,7 @@ import * as C from '../config';
 import { coerceSpec, createWorld, DEFAULT_ASSISTS } from '../sim/spawn';
 import { DEFAULT_SPEC } from '../sim/specDefaults';
 import { footprintExtents } from '../sim/field';
+import { polyBounds } from '../sim/imported';
 import { drawRobot } from '../render/drawRobot';
 import { clampCosmetics } from '../cosmetics';
 import { useImportedAssetVersion } from './useImportedAssets';
@@ -139,8 +140,9 @@ export function RobotPreview({
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     // an import's size is its hull's (its `length` is a clamped parametric mirror)
-    const dims = spec.imported
-      ? `${(fx.half * 2).toFixed(1)}" wide · ${(fx.front + fx.rear).toFixed(1)}" long`
+    const hb = spec.imported ? polyBounds(spec.imported.hull) : null;
+    const dims = hb
+      ? `${(hb.maxY - hb.minY).toFixed(1)}" wide · ${(hb.maxX - hb.minX).toFixed(1)}" long`
       : `${spec.width}" wide · ${spec.length}" long`;
     ctx.fillText(dims, size / 2, height - 6);
     ctx.restore();
