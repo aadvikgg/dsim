@@ -1,3 +1,14 @@
+# HANDOFF — 2026-10-02 (satellites: why they never stopped, and the fixes — also on `main`)
+
+**State: on `main` and `alpha`; production Fly redeployed from `main`.** `npm test`, `test:mm`, `test:workers`, `build`, `server:check`, `docaudit`, `uiaudit` pass.
+
+- **Owner:** satellites still up 19-24 h/day after the router; find out why and fix it.
+- **Measured:** the router worked (satellite HTTP fell from ~350k to ~4.5k requests/day). Real uptime was 10-22 h/day, not the 18-24 the checkup reported: `trend.mjs`/`cost.mjs` counted any hour with one sample as a full hour (fixed in the scheduled-task scripts; projection $191 → $169). What kept them up: (1) tabs whose one boot probe of the router failed fell back to Anycast for good and polled the nearest satellite all day (ord: a request every 1-3 min, no socket, no match); (2) results screens and lobbies held a socket indefinitely, pinging every 300 ms (syd: one socket, no room, 7 h); (3) real play, e.g. one account running solo record runs on lhr every 2.5 min for 6 h.
+- **Fixes:** router fallback is a backoff (`PrimaryHealth`); satellites release sockets idle 15 min outside a live match (close 4002, not reconnected); a clean leave from a finished room frees the seat; `/health?region=` no longer replays; one presence poller per tab; `[wake]` log line per minute on satellites. Details in `docs/area/netcode.md`.
+- **Next:** read `fly logs -a dohun-sim-decode | grep '\[wake\]'` after a day. Old tabs (pre-fix bundles) keep the old fallback until reloaded; they decay over days. Judge upH/day from 2026-10-04 on.
+- **Not fixed:** the Discord Activity's HTTP polls go through its `/gs` mapping, which is Anycast; only a second Discord URL mapping to the router (Discord developer portal) would move them.
+- `dsim-alpha-primary`'s machine was found STOPPED (the alpha router auto-stops; harmless, it starts on request).
+
 # HANDOFF — 2026-10-02a (swerve pod order, SIM_VERSION 5)
 
 **State: pushed on `alpha` (92d87739).** `npm test` (shared 2877, BIOBUZZ 5399), `build`, `server:check`, `docaudit`, `bundleaudit` pass. **Server change** (`step()` output): needs `./scripts/fly-deploy.sh --alpha`. Not deployed. Not on `main`.
