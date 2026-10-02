@@ -314,7 +314,10 @@ rename one. Order is task order — Robot, Controls, Match, Audio and Visual, Gr
 build it, learn to drive it, set up the session, the two output sections, then the connection.
 **Network** (`NetworkSection.tsx`) holds client prediction, which sat in a Controls fold until
 2026-09-22 (owner: "Network prediction should NOT be part of controls") — it is how this machine
-draws its own robot in a 3D-physics room, not a control, and not Graphics either. **A sub-nav hint
+draws its own robot in a 3D-physics room, not a control, and not Graphics either.
+It also holds "Show other players’ imported robots" (`importVisualsPref.ts`, the room relay's download): per
+device, and every game has it — Graphics is hidden for a game with no 3D view, and the 2D picture is a
+download too. **A sub-nav hint
 is optional**: Audio and Visual's "Follows your account" and Graphics' "This device only" said
 where the settings are stored, which nobody picks a section by, and went as clutter.
 

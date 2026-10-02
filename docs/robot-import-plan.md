@@ -32,8 +32,9 @@ here first, then in code.
   re-open in the editor, **export as one `.glb` file** that any glTF viewer opens and that carries
   the DSIM setup in `asset.extras.dsim`; importing that file restores the robot with no wizard.
 - **In a match**: the owner sees their mesh (3D) or a top-down render of it (2D). Other players
-  in a custom room see an extrusion of the footprint (3D) or its silhouette (2D) until the mesh
-  relay (phase 2) delivers the mesh.
+  in a custom room see an extrusion of the footprint (3D) or its silhouette (2D) until the room's
+  visuals relay delivers the picture (and, in BIOBUZZ's 3D view, a mesh of at most 1 MiB); a viewer
+  can turn that off and keep the outline.
 
 Lessons taken from existing robot-sim builders (surveyed 2026-10-01, notes kept outside the
 repo): treat the mesh as skin and build physics from simple primitives; automate units /

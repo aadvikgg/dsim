@@ -234,12 +234,12 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-panel` | src/ui/shell.css:1994 | 383 |
-| `.ds-panel-body` | src/ui/shell.css:2051 | 98 |
+| `.ds-panel` | src/ui/shell.css:1994 | 387 |
+| `.ds-panel-body` | src/ui/shell.css:2051 | 99 |
 | `.ds-panel-foot` | src/ui/shell.css:2125 | 3 |
-| `.ds-panel-h` | src/ui/shell.css:2168 | 81 |
+| `.ds-panel-h` | src/ui/shell.css:2168 | 82 |
 | `.ds-panel-open` | src/ui/shell.css:2304 | 2 |
-| `.ds-panel-title` | src/ui/shell.css:2238 | 86 |
+| `.ds-panel-title` | src/ui/shell.css:2238 | 87 |
 
 ## `ds-bind` — 5
 

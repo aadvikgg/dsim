@@ -14,9 +14,10 @@
  * decided: every op is the same `Room` method the socket thread used to call directly, in the
  * same order, so the room's behaviour is the room's.
  */
-import { parentPort, threadId } from 'node:worker_threads';
+import { parentPort, threadId, workerData } from 'node:worker_threads';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { Room, type Client, type MatchOutcome, type PersistOutcome, type DodgeReport } from './room';
+import { configureVisualBudget } from './importVisuals';
 import { encodeMsg, type ServerMsg } from '../src/net/protocol';
 import type { DodgeVerdict } from '../src/dodge';
 import { initPhysics } from '../src/sim/physicsEngine';
@@ -37,6 +38,13 @@ import {
 const port = parentPort;
 if (!port) throw new Error('server/roomWorker.ts is a worker_threads entry, not a module to import');
 const tag = `[worker ${threadId}]`;
+
+// the process's imported-robot-visuals budget is one counter per thread in a shared buffer
+// (`server/importVisuals.ts`); this thread writes only its own slot
+{
+  const wd = workerData as { visualBudget?: SharedArrayBuffer; visualSlot?: number } | null;
+  configureVisualBudget(wd?.visualBudget, wd?.visualSlot ?? 0);
+}
 
 // the same containment the socket thread has: one bad tick must not take every room on this
 // thread with it (the Room's own loop already catches closer in)
@@ -94,10 +102,13 @@ function schedule(): void {
  * lookup that never hits is waste. And it does not mark the room dirty: it is 30 Hz and changes
  * nothing the socket thread mirrors except the live score and clock, which the once-a-second
  * sweep refreshes. Anything else a room says (roster, matchStart, results…) is a state change.
+ *
+ * A `visualChunk` is the same: one viewer's 33 KB slice of a robot's picture, unique to its
+ * recipient, so hashing it is waste, and it changes nothing the socket thread mirrors.
  */
 function out(rid: number, sock: number, s: string): void {
   let i: number | undefined;
-  if (s.startsWith('{"t":"snapshot"')) {
+  if (s.startsWith('{"t":"snapshot"') || s.startsWith('{"t":"visualChunk"')) {
     i = strs.push(s) - 1;
   } else {
     i = strIndex.get(s);

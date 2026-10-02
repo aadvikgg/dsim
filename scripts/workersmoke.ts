@@ -30,6 +30,9 @@ import {
 } from '../src/net/protocol';
 import { DEFAULT_ASSISTS, DEFAULT_SPEC } from '../src/sim/spawn';
 import { IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_REFUSED_HERE, IMPORT_REFUSED_RANKED, IMPORT_ROOM_NEEDS_UPDATE } from '../src/net/imported';
+import * as IV from '../src/net/importVisuals';
+import { visualBytesInUse } from '../server/importVisuals';
+import { glbBytes, pngBytes } from './visualFixtures';
 import type { Alliance, RobotCommand } from '../src/types';
 import type { Client } from '../server/room';
 import {
@@ -322,6 +325,76 @@ async function partA(): Promise<void> {
   const rj = await until(() => sz.msgs('rejoined').some((m) => (m as { ok: boolean }).ok), 3000);
   check('A: the reclaimed seat is told on its new socket', rj);
   check('A: ...and gets a snapshot there', await until(() => snaps(sz).length > 0, 3000));
+
+  // ---- the visuals relay across the thread (docs/area/netcode.md, VISUALS RELAY) ------------------
+  // The relay lives IN the worker's room: the bytes, their validation and the stream timer run on
+  // the worker, and the socket thread only writes the frames. What this proves is the part a
+  // headless Room cannot: frames crossing the batch boundary intact, the socket's backlog
+  // (a mirror, in steps of 16 KiB) pacing the worker's stream, and the process budget being ONE
+  // counter that the socket thread can read although a worker wrote it.
+  {
+    const png = pngBytes(128, 128, { noise: true, seed: 5 }); // 3 chunks
+    const mesh = glbBytes({ tris: 6000 }); // 216 KB, 9 chunks
+    const room = createRoom('wt-vis', () => {}, { kind: 'versus', game: 'decode' });
+    const so = fakeSocket();
+    const sv = fakeSocket();
+    const co = clientOn(so, 'vo', 'u-vo', 'red');
+    co.player.spec = { ...co.player.spec, imported: IMP } as typeof co.player.spec;
+    const cv = clientOn(sv, 'vv', 'u-vv', 'blue');
+    room.add(co);
+    room.add(cv);
+    await until(() => so.msgs('welcome').length > 0 && sv.msgs('welcome').length > 0, 5000);
+    const base = visualBytesInUse();
+    const put = (kind: IV.VisualKind, bytes: Uint8Array): void => {
+      for (let seq = 0; seq < IV.visualFrames(bytes.length); seq++) {
+        const sp = IV.visualSpan(bytes.length, seq);
+        room.onMessage('vo', { t: 'visualPut', kind, id: IMP.id, total: bytes.length, seq, data: IV.bytesToBase64(bytes, sp.start, sp.end) });
+      }
+    };
+    const got = (sock: ReturnType<typeof fakeSocket>, kind: IV.VisualKind): Uint8Array => {
+      const cs = (sock.msgs('visualChunk') as Extract<ServerMsg, { t: 'visualChunk' }>[]).filter((m) => m.kind === kind);
+      const out = new Uint8Array(cs[0]?.total ?? 0);
+      for (const c of cs) out.set(IV.base64ToBytes(c.data) ?? new Uint8Array(0), IV.visualSpan(c.total, c.seq).start);
+      return out;
+    };
+    const eq = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.length > 0 && a.every((x, i) => x === b[i]);
+    put('top', png);
+    check('A: the owner’s upload is announced to the other seat across the thread', await until(() => sv.msgs('visualReady').length === 1, 3000));
+    check('A: ...and to the owner', so.msgs('visualReady').length === 1);
+    check('A: ⚠️ the process budget is one shared counter: the socket thread reads what the worker reserved', await until(() => visualBytesInUse() - base === png.length, 2000), String(visualBytesInUse() - base));
+    room.onMessage('vv', { t: 'visualGet', owner: 'vo', id: IMP.id, kind: 'top' });
+    check('A: a request is streamed from the worker, in order, identical', await until(() => got(sv, 'top').length === png.length && sv.msgs('visualChunk').length === 3, 3000) && eq(got(sv, 'top'), png));
+    check('A: the owner, who did not ask, was sent no chunk', so.msgs('visualChunk').length === 0);
+    // pacing by the socket's backlog: it is mirrored in 16 KiB steps and re-read by the pool
+    sv.setBacklog(64 * 1024);
+    put('mesh', mesh); // a write to the viewer's socket, which is what makes the pool read its backlog
+    await until(() => sv.msgs('visualReady').length === 2, 3000);
+    await sleep(150);
+    room.onMessage('vv', { t: 'visualGet', owner: 'vo', id: IMP.id, kind: 'mesh' });
+    await sleep(400);
+    check('A: ⚠️ a viewer whose socket is backed up is handed no chunk, however long it waits', sv.msgs('visualChunk').filter((m) => (m as { kind?: string }).kind === 'mesh').length === 0);
+    sv.setBacklog(0);
+    check('A: ...and the stream resumes the moment it drains, and arrives identical', await until(() => eq(got(sv, 'mesh'), mesh) && sv.msgs('visualChunk').length === 3 + 9, 5000), String(sv.msgs('visualChunk').length));
+    // the owner leaves the lobby: the worker frees, the shared counter shows it
+    room.detach('vo', co.conn, true);
+    check('A: the owner leaving frees the assets, and the budget with them (seen from the socket thread)', await until(() => visualBytesInUse() === base, 3000), String(visualBytesInUse() - base));
+    // a worker that dies with assets in its rooms must not leak the process budget
+    const sx2 = fakeSocket();
+    const room2 = createRoom('wt-vis2', () => {}, { kind: 'versus', game: 'decode' });
+    const cx2 = clientOn(sx2, 'vx', 'u-vx', 'red');
+    cx2.player.spec = { ...cx2.player.spec, imported: IMP } as typeof cx2.player.spec;
+    room2.add(cx2);
+    await until(() => sx2.msgs('welcome').length > 0, 5000);
+    const w2 = workerOfForTest(room2);
+    for (let seq = 0; seq < IV.visualFrames(png.length); seq++) {
+      const sp = IV.visualSpan(png.length, seq);
+      room2.onMessage('vx', { t: 'visualPut', kind: 'top', id: IMP.id, total: png.length, seq, data: IV.bytesToBase64(png, sp.start, sp.end) });
+    }
+    check('A: a second room on a worker holds a picture', await until(() => visualBytesInUse() - base === png.length, 3000));
+    await killWorkerForTest(w2);
+    check('A: ⚠️ a worker that dies with a picture in one of its rooms gives the bytes back (the pool zeroes its slot)', await until(() => visualBytesInUse() === base, 5000), String(visualBytesInUse() - base));
+    await until(() => !!workerPerf()?.[w2]?.ready, 30_000);
+  }
 }
 
 // =============================================================================================
@@ -681,6 +754,99 @@ async function scenarios(s: Server): Promise<void> {
     P.close();
     G.close();
   }
+
+  await visuals(s);
+}
+
+/**
+ * THE VISUALS RELAY AT THE REAL DOOR (docs/area/netcode.md, VISUALS RELAY), on both server shapes:
+ * an owner uploads a picture and a mesh as paced frames over a real WebSocket, a seat and a watcher
+ * ask, and what they receive is byte-identical — through `ws`, the 64 KiB frame cap, the uncompressed
+ * `visualChunk` write, and (on two workers) the batch boundary. A client without the capability is
+ * sent nothing, and a record room refuses.
+ */
+async function visuals(s: Server): Promise<void> {
+  const L = (name: string): string => `B[${s.label}]: ${name}`;
+  const versus: RoomConfig = { kind: 'versus', game: 'decode' };
+  const impP = (name: string, alliance: Alliance) => ({ ...makePlayer(name, alliance, 0), spec: { ...DEFAULT_SPEC, name, imported: IMP } as typeof DEFAULT_SPEC });
+  const png = pngBytes(128, 128, { noise: true, seed: 8 }); // 3 chunks
+  const mesh = glbBytes({ tris: 29_000 }); // ~1 MiB, 43 chunks: the largest asset the relay takes
+  const noVisuals = CLIENT_CAPS.filter((c) => c !== IV.IMPORT_VISUALS_CAP);
+  const room = newCode();
+  const O = await new Sock(s.url).open();
+  O.send({ t: 'join', room, config: versus, player: impP('O', 'red'), caps: CLIENT_CAPS });
+  await O.until('welcome');
+  const V = await new Sock(s.url).open();
+  V.send({ t: 'join', room, config: versus, player: makePlayer('V', 'blue', 0), caps: CLIENT_CAPS });
+  await V.until('welcome');
+  const X = await new Sock(s.url).open();
+  X.send({ t: 'join', room, config: versus, player: makePlayer('X', 'blue', 1), caps: noVisuals });
+  await X.until('welcome');
+  const put = async (sock: Sock, kind: IV.VisualKind, bytes: Uint8Array): Promise<void> => {
+    for (let seq = 0; seq < IV.visualFrames(bytes.length); seq++) {
+      const sp = IV.visualSpan(bytes.length, seq);
+      sock.send({ t: 'visualPut', kind, id: IMP.id, total: bytes.length, seq, data: IV.bytesToBase64(bytes, sp.start, sp.end) });
+      await sleep(IV.VISUAL_UPLOAD_GAP_MS / 3); // the real client paces at the gap; a third of it keeps this fast and far under 240/s
+    }
+  };
+  const got = (sock: Sock, kind: IV.VisualKind): Uint8Array => {
+    const cs = sock.log.filter((m) => m.t === 'visualChunk' && m.kind === kind) as Extract<ServerMsg, { t: 'visualChunk' }>[];
+    const out = new Uint8Array(cs[0]?.total ?? 0);
+    for (const c of cs) out.set(IV.base64ToBytes(c.data) ?? new Uint8Array(0), IV.visualSpan(c.total, c.seq).start);
+    return out;
+  };
+  const eq = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.length > 0 && a.every((x, i) => x === b[i]);
+  const ownerId = O.clientId;
+
+  await put(O, 'top', png);
+  const rdy = await V.until('visualReady', (m) => m.kind === 'top');
+  check(L('an upload over a real socket is announced to the other seat'), rdy?.owner === ownerId && rdy.id === IMP.id && rdy.bytes === png.length, JSON.stringify(rdy));
+  check(L('...and to the owner'), !!(await O.until('visualReady', (m) => m.kind === 'top')));
+  await sleep(150);
+  check(L('⚠️ a build without the capability is sent nothing at all'), !X.log.some((m) => m.t.startsWith('visual')));
+  V.send({ t: 'visualGet', owner: ownerId, id: IMP.id, kind: 'top' });
+  await V.until('visualChunk', (m) => m.seq === 2);
+  check(L('a request is answered with the picture, byte for byte'), eq(got(V, 'top'), png));
+  X.send({ t: 'visualGet', owner: ownerId, id: IMP.id, kind: 'top' });
+  await sleep(200);
+  check(L('...and a request from the build without the capability is ignored, unanswered'), !X.log.some((m) => m.t.startsWith('visual')));
+
+  await put(O, 'mesh', mesh);
+  check(L('a 1 MiB mesh (43 frames) is accepted'), !!(await V.until('visualReady', (m) => m.kind === 'mesh', 8000)));
+  const S = await new Sock(s.url).open();
+  S.send({ t: 'spectate', room, caps: CLIENT_CAPS });
+  await S.until('welcome');
+  check(L('a watcher who arrives later is told what is ready'), !!(await S.until('visualReady', (m) => m.kind === 'mesh')) && !!(await S.until('visualReady', (m) => m.kind === 'top')));
+  S.send({ t: 'visualGet', owner: ownerId, id: IMP.id, kind: 'mesh' });
+  V.send({ t: 'visualGet', owner: ownerId, id: IMP.id, kind: 'mesh' });
+  await S.until('visualChunk', (m) => m.kind === 'mesh' && m.seq === 42, 15_000);
+  await V.until('visualChunk', (m) => m.kind === 'mesh' && m.seq === 42, 15_000);
+  check(L('⚠️ two viewers stream the full 1 MiB mesh at once, each byte for byte (a watcher, and a seat)'), eq(got(S, 'mesh'), mesh) && eq(got(V, 'mesh'), mesh));
+  check(L('...in order, with no chunk repeated'), (V.log.filter((m) => m.t === 'visualChunk' && m.kind === 'mesh') as Extract<ServerMsg, { t: 'visualChunk' }>[]).every((m, i) => m.seq === i));
+
+  // a bad upload is refused at the door
+  const mark = O.log.length;
+  O.send({ t: 'visualPut', kind: 'top', id: IMP.id, total: 12, seq: 0, data: IV.bytesToBase64(new Uint8Array(12).fill(7)) });
+  const refusal = await O.until('visualRefused', () => true, 3000, mark);
+  check(L('bytes that are not a picture are refused with the format reason'), refusal?.op === 'put' && refusal.reason === 'format');
+
+  // the owner leaves: what it held is gone
+  O.close();
+  await V.until('roster', (m) => m.players.length === 2, 5000, V.log.length);
+  const m2 = V.log.length;
+  V.send({ t: 'visualGet', owner: ownerId, id: IMP.id, kind: 'top' });
+  const none = await V.until('visualRefused', () => true, 3000, m2);
+  check(L('once the owner has left, a request for its picture is refused (none): the viewer keeps the outline'), none?.reason === 'none', JSON.stringify(none));
+
+  // a record room refuses an upload outright
+  const R = await new Sock(s.url).open();
+  R.join(newCode(), { kind: 'record', record: 'solo', game: 'decode' }, 'R', 'blue');
+  await R.until('welcome');
+  const m3 = R.log.length;
+  R.send({ t: 'visualPut', kind: 'top', id: IMP.id, total: 12, seq: 0, data: IV.bytesToBase64(new Uint8Array(12).fill(7)) });
+  const rr = await R.until('visualRefused', () => true, 3000, m3);
+  check(L('a record room refuses an upload, with the room reason'), rr?.reason === 'room', JSON.stringify(rr));
+  for (const k of [V, X, S, R]) k.close();
 }
 
 async function spread(s: Server): Promise<void> {

@@ -2985,7 +2985,12 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
   // than by ws's `threshold` option, which is inert while context takeover is on — see
   // COMPRESS_THRESHOLD. (With the extension off, ws ignores the flag entirely.)
   const write = (s: string): void => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(s, { compress: s.length >= COMPRESS_THRESHOLD });
+    // ⚠️ A `visualChunk` IS BASE64 OF A PNG OR A GLB, ALREADY COMPRESSED. Deflating it saves the
+    // 25% base64 added and costs a zlib pass on the socket thread per 33 KB, and — worse — it
+    // would fill this socket's shared LZ77 window (context takeover is on) with bytes that never
+    // repeat, so the next snapshot would compress against noise. Uncompressed frames contribute
+    // nothing to the window (see COMPRESS_THRESHOLD).
+    if (ws.readyState === WebSocket.OPEN) ws.send(s, { compress: s.length >= COMPRESS_THRESHOLD && !s.startsWith('{"t":"visualChunk"') });
   };
   const send = (m: ServerMsg): void => {
     write(encodeMsg(m));

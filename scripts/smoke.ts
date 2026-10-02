@@ -543,6 +543,13 @@ import { decodeImportLaunchZ, decodeImportMouth, DECODE_IMPORT_LAUNCH_MIN } from
 import { defaultImportedMech, mechHandles, validateImportedMech } from '../src/games/sim';
 import { BB_DEFAULT_SPEC } from '../src/games/biobuzz/coerce';
 import { bbMouths, bbRobotSolids, mouthAxes } from '../src/games/biobuzz/robot';
+import * as PROTO from '../src/net/protocol';
+import * as IV from '../src/net/importVisuals';
+import * as SV from '../server/importVisuals';
+import * as VF from './visualFixtures';
+import * as IVC from '../src/net/importVisualsClient';
+import * as BR from '../src/net/importedAssetsBridge';
+import type { Transport } from '../src/net/transport';
 
 // the sim now steps a Rapier physics world (robots) — load the WASM before any
 // step() runs. tsx runs this file as ESM, so top-level await is available.
@@ -9179,7 +9186,7 @@ function pushContest(A: Partial<RobotSpec>, B: Partial<RobotSpec>, seconds = 3):
     const roomSrc = readFileSync('server/room.ts', 'utf8');
     check(
       'lan tab: the room itself stops its loop when it empties, so nothing steps an empty room',
-      /if \(this\.clients\.size === 0\) \{\s*\n\s*this\.stop\(\);\s*\n\s*this\.onEmpty\(\);/.test(roomSrc),
+      /if \(this\.clients\.size === 0\) \{\s*\n\s*this\.stop\(\);\s*\n\s*this\.emptied\(\);/.test(roomSrc) && /private emptied\(\): void \{\s*\n\s*this\.visuals\.dispose\(\);\s*\n\s*this\.onEmpty\(\);/.test(roomSrc),
     );
     /**
      * ⚠️ **A SOLO RECORD RUN NEVER BLOCKS ITS OWN OWNER, AND THE RESTART BUTTON IS WHY.**
@@ -31328,6 +31335,1269 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
     const a = once();
     const b = once();
     check(`imported mechanisms: four imports with placed mechanisms play deterministically — ${g} (two runs, one hash; nothing non-finite; something was intaken)`, a.h === b.h && a.finite && a.held > 0, `${a.h} / ${b.h}, held ${a.held}`);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// IMPORTED ROBOT VISUALS RELAY (docs/area/netcode.md, VISUALS RELAY) — the wire rules, pure
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const { glbBytes, glbFrom, pngBytes, pngChunk, concat } = VF;
+  const png = pngBytes(8, 8);
+  const glb = glbBytes({ tris: 3 });
+
+  check('visuals/caps: the capability is on both lists, and a client without it is not a participant',
+    PROTO.CLIENT_CAPS.includes(IV.IMPORT_VISUALS_CAP) && PROTO.SERVER_CAPS.includes(IV.IMPORT_VISUALS_CAP) && IV.IMPORT_VISUALS_CAP === 'importVisuals'
+      && IV.hasVisualsCap(PROTO.CLIENT_CAPS) && !IV.hasVisualsCap([]) && !IV.hasVisualsCap(undefined) && !IV.hasVisualsCap(['robotImport']));
+  check('visuals/caps: coerceCaps still keeps every cap this build advertises (16 is the ceiling)', PROTO.coerceCaps(PROTO.CLIENT_CAPS).length === PROTO.CLIENT_CAPS.length && PROTO.CLIENT_CAPS.length <= 16);
+
+  // ---- a frame fits every transport it crosses ------------------------------------------------
+  {
+    check('visuals/frame: a chunk is 24 KiB of payload and exactly 32,768 base64 characters', IV.VISUAL_CHUNK_BYTES === 24 * 1024 && IV.VISUAL_CHUNK_CHARS === 32768);
+    const put = JSON.stringify({ t: 'visualPut', kind: 'mesh', id: '0123456789abcdef', total: 1048576, seq: 42, data: 'A'.repeat(IV.VISUAL_CHUNK_CHARS) });
+    const chunk = JSON.stringify({ t: 'visualChunk', owner: 'c'.repeat(36), id: '0123456789abcdef', kind: 'mesh', total: 1048576, seq: 42, data: 'A'.repeat(IV.VISUAL_CHUNK_CHARS) });
+    check('visuals/frame: the fullest upload frame is well under the server’s 64 KiB inbound cap', put.length < 34000 && put.length < 64 * 1024, String(put.length));
+    check('visuals/frame: ...and the fullest download frame is under the 64 KiB default of a WebRTC DataChannel message', chunk.length < 34000 && chunk.length < 64 * 1024, String(chunk.length));
+    check('visuals/frame: a mesh is 43 frames and a top picture 11 (the 1 MiB and 256 KiB caps)', IV.visualFrames(IV.VISUAL_MAX_BYTES.mesh) === 43 && IV.visualFrames(IV.VISUAL_MAX_BYTES.top) === 11);
+    // the spans tile an asset exactly, whatever its length
+    let tiled = true;
+    for (const total of [1, 2, 24575, 24576, 24577, 65752, 1048576]) {
+      let at = 0;
+      for (let seq = 0; seq < IV.visualFrames(total); seq++) {
+        const s = IV.visualSpan(total, seq);
+        if (s.start !== at || s.end <= s.start || s.end - s.start > IV.VISUAL_CHUNK_BYTES) tiled = false;
+        at = s.end;
+      }
+      if (at !== total) tiled = false;
+    }
+    check('visuals/frame: the frame spans tile every length exactly, none over a chunk', tiled);
+  }
+
+  // ---- pacing ---------------------------------------------------------------------------------
+  {
+    check('visuals/pace: the owner’s upload is under a quarter of the 240 msg/s bucket, beside the 60 Hz input stream',
+      1000 / IV.VISUAL_UPLOAD_GAP_MS <= 240 / 4 && 1000 / IV.VISUAL_UPLOAD_GAP_MS + 60 < 240, String(1000 / IV.VISUAL_UPLOAD_GAP_MS));
+    check('visuals/pace: a full 1 MiB mesh uploads in about a second and a half', IV.visualFrames(IV.VISUAL_MAX_BYTES.mesh) * IV.VISUAL_UPLOAD_GAP_MS < 2000);
+    const m = IV.streamMayWrite;
+    check('visuals/pace: an idle socket is written to', m({ backlog: 0, now: 1000, lastAt: 0, live: false }));
+    check('visuals/pace: a socket with a backlog at the limit is not, and one just under it is',
+      !m({ backlog: IV.VISUAL_STREAM_BACKLOG_BYTES, now: 1000, lastAt: 0, live: false }) && m({ backlog: IV.VISUAL_STREAM_BACKLOG_BYTES - 1, now: 1000, lastAt: 0, live: false }));
+    check('visuals/pace: a socket the room cannot read (LAN, a test) is paced by time alone', m({ backlog: undefined, now: 1000, lastAt: 999, live: false }));
+    check('visuals/pace: during a live match a viewer is held to one chunk per gap, and released after it',
+      !m({ backlog: 0, now: 1050, lastAt: 1000, live: true }) && m({ backlog: 0, now: 1000 + IV.VISUAL_STREAM_LIVE_GAP_MS, lastAt: 1000, live: true }));
+    check('visuals/pace: the live cap is about 240 KB/s, so a snapshot stream beside it is not crowded out',
+      (IV.VISUAL_CHUNK_BYTES * 1000) / IV.VISUAL_STREAM_LIVE_GAP_MS <= 250_000);
+    check('visuals/pace: the backlog limit sits far under the snapshot-skip threshold (256 KB), so a download can never cause a keyframe',
+      IV.VISUAL_STREAM_BACKLOG_BYTES + IV.VISUAL_CHUNK_BYTES * 2 < 256 * 1024);
+  }
+
+  // ---- budgets, as numbers -------------------------------------------------------------------------
+  check('visuals/budget: a room holds four seats of (a 1 MiB mesh + a 256 KiB picture), the process 64 MiB',
+    IV.VISUAL_ROOM_BYTES === 4 * (1024 * 1024 + 256 * 1024) && IV.VISUAL_PROCESS_BYTES === 64 * 1024 * 1024 && IV.VISUAL_ROOM_BYTES < IV.VISUAL_PROCESS_BYTES);
+  check('visuals/budget: one viewer may be sent a full room twice over and not 100 times (egress is the bill)',
+    IV.VISUAL_SERVE_CLIENT_BYTES >= IV.VISUAL_ROOM_BYTES && IV.VISUAL_SERVE_CLIENT_BYTES <= 2 * IV.VISUAL_ROOM_BYTES && IV.VISUAL_SERVE_ROOM_BYTES <= 10 * IV.VISUAL_ROOM_BYTES);
+
+  // ---- base64 ----------------------------------------------------------------------------------------
+  {
+    let rt = true;
+    const rnd = VF.prng(3);
+    for (const n of [0, 1, 2, 3, 4, 5, 1000, IV.VISUAL_CHUNK_BYTES, IV.VISUAL_CHUNK_BYTES + 1]) {
+      const b = Uint8Array.from({ length: n }, () => Math.floor(rnd() * 256));
+      const back = IV.base64ToBytes(IV.bytesToBase64(b));
+      if (!back || back.length !== n || !back.every((x, i) => x === b[i])) rt = false;
+    }
+    check('visuals/base64: round-trips every length around a chunk', rt);
+    const b = Uint8Array.from({ length: 100 }, (_, i) => i);
+    check('visuals/base64: a sub-range encodes just that range', IV.base64ToBytes(IV.bytesToBase64(b, 10, 20))?.join(',') === b.subarray(10, 20).join(','));
+    check('visuals/base64: a stray character is refused (Node’s own decoder would skip it)', IV.base64ToBytes('AAA*') === null && IV.base64ToBytes('AA A') === null && IV.base64ToBytes('AAA=A') === null);
+    check('visuals/base64: a length that is not a multiple of 4, a non-string, and misplaced padding are refused',
+      IV.base64ToBytes('AAA') === null && IV.base64ToBytes(5) === null && IV.base64ToBytes(null) === null && IV.base64ToBytes('A=AA') === null);
+  }
+
+  // ---- a PNG --------------------------------------------------------------------------------------
+  {
+    const v = IV.validateTopPng;
+    check('visuals/png: a real PNG passes', v(png) === null && v(pngBytes(512, 512)) === null);
+    const sig = (b: Uint8Array, at: number, val: number): Uint8Array => {
+      const c = Uint8Array.from(b);
+      c[at] = val;
+      return c;
+    };
+    check('visuals/png: a wrong signature is refused', v(sig(png, 1, 0x51)) === 'not a PNG');
+    check('visuals/png: a truncated file is refused (no IEND)', v(png.subarray(0, png.length - 12)) !== null && v(png.subarray(0, png.length - 5)) !== null);
+    check('visuals/png: bytes after IEND are refused (a polyglot)', v(concat([png, Uint8Array.of(1, 2, 3)])) !== null);
+    const ihdr = (w: number, h: number, depth = 8, colour = 6): Uint8Array => {
+      const be = (n: number): number[] => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+      return pngChunk('IHDR', Uint8Array.from([...be(w), ...be(h), depth, colour, 0, 0, 0]));
+    };
+    const withIhdr = (chunk: Uint8Array): Uint8Array => concat([png.subarray(0, 8), chunk, png.subarray(8 + 25)]);
+    check('visuals/png: a 65,535 × 65,535 picture is refused whatever its size on the wire (a decompression bomb)', v(withIhdr(ihdr(65535, 65535))) === 'picture size');
+    check('visuals/png: ...as are a side of 0 and one just over 1024', v(withIhdr(ihdr(0, 8))) === 'picture size' && v(withIhdr(ihdr(1025, 8))) === 'picture size' && v(withIhdr(ihdr(1024, 1024))) === null);
+    check('visuals/png: an impossible bit depth or colour type is refused', v(withIhdr(ihdr(8, 8, 7, 6))) === 'IHDR' && v(withIhdr(ihdr(8, 8, 8, 5))) === 'IHDR');
+    check('visuals/png: no IHDR first, or a second IHDR, is refused',
+      v(concat([png.subarray(0, 8), pngChunk('IDAT', Uint8Array.of(1)), png.subarray(8 + 25)])) === 'no IHDR' && v(concat([png.subarray(0, 8 + 25), ihdr(8, 8), png.subarray(8 + 25)])) === 'second IHDR');
+    check('visuals/png: a chunk type that is not letters, and a chunk longer than the file, are refused',
+      v(concat([png.subarray(0, 8 + 25), pngChunk('ID4T', Uint8Array.of(1)), png.subarray(8 + 25)])) === 'chunk type'
+      && v(concat([png.subarray(0, 8 + 25), Uint8Array.of(0, 0, 0xff, 0xff, 0x49, 0x44, 0x41, 0x54, 1, 2, 3)])) !== null);
+    check('visuals/png: a file with no IDAT is refused', v(concat([png.subarray(0, 8 + 25), pngChunk('IEND')])) !== null);
+    check('visuals/png: over 256 KiB is refused, at 256 KiB or under is not', v(pngBytes(260, 260, { noise: true })) !== null && v(pngBytes(250, 250, { noise: true })) === null,
+      `${pngBytes(260, 260, { noise: true }).length} / ${pngBytes(250, 250, { noise: true }).length}`);
+  }
+
+  // ---- a GLB ---------------------------------------------------------------------------------------
+  {
+    const v = IV.validateMeshGlb;
+    check('visuals/glb: a real binary glTF with its buffer in the BIN chunk passes', v(glb) === null && v(glbBytes({ tris: 20000 })) === null);
+    const bad = (edit: (j: Record<string, any>) => void): string | null => v(glbBytes({ edit }));
+    check('visuals/glb: ⚠️ an EXTERNAL buffer (a uri) is refused outright — the viewer’s loader would fetch it', bad((j) => { j.buffers[0].uri = 'https://example.invalid/robot.bin'; }) === 'external reference');
+    check('visuals/glb: ...a data: URI buffer too (everything must be in the BIN chunk)', bad((j) => { j.buffers[0].uri = 'data:application/octet-stream;base64,AAAA'; }) === 'external reference');
+    check('visuals/glb: ...a uri hidden in `extras`, deep, or in an array is found', bad((j) => { j.extras = { a: [{ b: { uri: 'x' } }] }; }) === 'external reference'
+      && bad((j) => { j.materials[0].extensions = { X: { uri: 'x' } }; }) === 'external reference');
+    check('visuals/glb: an IMAGE inside a mesh is refused (even one with no uri, from a buffer view)', bad((j) => { j.images = [{ bufferView: 0, mimeType: 'image/png' }]; }) === 'images');
+    check('visuals/glb: textures are refused', bad((j) => { j.textures = [{ source: 0 }]; }) === 'textures');
+    check('visuals/glb: a REQUIRED extension (a decoder this client may not have) is refused', bad((j) => { j.extensionsRequired = ['KHR_draco_mesh_compression']; }) === 'required extension');
+    check('visuals/glb: an accessor that reads past its buffer view is refused', bad((j) => { j.accessors[0].count += 1000; }) === 'accessor range');
+    check('visuals/glb: a buffer view past the buffer is refused', bad((j) => { j.bufferViews[0].byteLength += 64; }) === 'bufferView');
+    check('visuals/glb: a sparse accessor and an accessor with no buffer view are refused', bad((j) => { j.accessors[0].sparse = { count: 1 }; }) === 'accessor'
+      && bad((j) => { delete j.accessors[0].bufferView; }) === 'accessor has no buffer view');
+    check('visuals/glb: a primitive that is not triangles, or has no positions, is refused', bad((j) => { j.meshes[0].primitives[0].mode = 1; }) === 'primitive mode'
+      && bad((j) => { delete j.meshes[0].primitives[0].attributes.POSITION; }) === 'primitive has no positions');
+    check('visuals/glb: a file with no geometry is refused', bad((j) => { j.meshes = []; }) === 'no geometry');
+    check('visuals/glb: more triangles than the importer’s own 150,000 cap are refused', v(glbBytes({ tris: 150_001 }), 64 * 1024 * 1024) === 'too many triangles');
+    check('visuals/glb: a second buffer is refused', bad((j) => { j.buffers.push({ byteLength: 4 }); }) === 'buffers');
+    const g = glbBytes({ tris: 3 });
+    const poke = (at: number, val: number, little = true): Uint8Array => {
+      const c = Uint8Array.from(g);
+      new DataView(c.buffer).setUint32(at, val, little);
+      return c;
+    };
+    check('visuals/glb: a wrong magic, a wrong version and a lying total length are refused', v(poke(0, 0)) === 'not a GLB' && v(poke(4, 1)) === 'not glTF 2' && v(poke(8, g.length + 4)) === 'GLB length');
+    check('visuals/glb: a JSON chunk longer than the file is refused', v(poke(12, 0xfffffff0)) === 'chunk length');
+    check('visuals/glb: a file whose first chunk is not JSON, and one that is not 4-byte aligned, are refused', v(poke(16, 0x004e4942)) === 'first chunk is not JSON' && v(g.subarray(0, g.length - 1)) !== null);
+    check('visuals/glb: a third chunk is refused', v(glbFrom({ asset: { version: '2.0' } }, null)) !== null && v(concat([g, Uint8Array.of(0, 0, 0, 0)])) !== null);
+    check('visuals/glb: invalid UTF-8 and JSON that does not parse are refused', (() => {
+      const c = Uint8Array.from(g);
+      c[21] = 0xff;
+      c[22] = 0xfe;
+      return v(c) === 'JSON';
+    })());
+    check('visuals/glb: over 1 MiB is refused, just under it is not', v(glbBytes({ tris: 30_000 })) === 'too large' && v(glbBytes({ tris: 29_000 })) === null,
+      `${glbBytes({ tris: 30_000 }).length} / ${glbBytes({ tris: 29_000 }).length}`);
+    check('visuals/glb: validateVisual picks the validator by kind', IV.validateVisual('top', png) === null && IV.validateVisual('mesh', glb) === null && IV.validateVisual('top', glb) !== null && IV.validateVisual('mesh', png) !== null);
+  }
+  check('visuals/copy: every refusal is a plain sentence — Couldn’t or a clear statement, the next thing the viewer sees, a typographic apostrophe, no ASCII one',
+    Object.values(IV.VISUAL_REFUSAL_COPY).every((s) => /\.$/.test(s) && !/'/.test(s) && s.length < 140) && IV.isVisualKind('top') && IV.isVisualKind('mesh') && !IV.isVisualKind('thumb'));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE RELAY, with a stand-in room: uploads, refusals, budgets, freeing, the pump
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const { glbBytes, pngBytes } = VF;
+  const ID_A = '00000000000000a1';
+  const ID_B = '00000000000000b2';
+  const ID_C = '00000000000000c3';
+  type Msg = PROTO.ServerMsg;
+  interface FC {
+    id: string;
+    caps: string[] | undefined;
+    got: Msg[];
+    backlogBytes: number | undefined;
+    robot: string | undefined;
+    c: Client;
+  }
+  const fakes = new Map<string, FC>();
+  let allows = true;
+  let liveMatch = false;
+  const mkFake = (id: string, caps: string[] | undefined, robot?: string): FC => {
+    const f: FC = { id, caps, got: [], backlogBytes: 0, robot, c: null as unknown as Client };
+    f.c = {
+      id,
+      send: (m: Msg) => f.got.push(m),
+      backlog: () => f.backlogBytes as number,
+      player: { clientId: id, name: id, teamName: 'T', teamNumber: 1, alliance: 'red', startIndex: 0, ready: true, spec: { ...DEFAULT_SPEC }, assists: { ...DEFAULT_ASSISTS } },
+      connected: true,
+      disconnectAt: 0,
+      caps,
+    } as Client;
+    fakes.set(id, f);
+    return f;
+  };
+  const host: SV.RelayHost = {
+    allows: () => allows,
+    find: (id) => fakes.get(id)?.c,
+    importId: (id) => fakes.get(id)?.robot,
+    recipients: () => [...fakes.values()].map((f) => f.c),
+    live: () => liveMatch,
+  };
+  const reset = (limit = IV.VISUAL_PROCESS_BYTES) => {
+    fakes.clear();
+    allows = true;
+    liveMatch = false;
+    const budget = SV.localVisualBudget(limit);
+    return { relay: new SV.VisualRelay(host, budget), budget };
+  };
+  const msgs = (f: FC, t: string): Msg[] => f.got.filter((m) => m.t === t);
+  const refusals = (f: FC): string[] => (msgs(f, 'visualRefused') as Extract<Msg, { t: 'visualRefused' }>[]).map((m) => `${m.op}:${m.reason}`);
+  /** send `bytes` as the owner would, one frame per chunk */
+  const put = (relay: SV.VisualRelay, f: FC, kind: IV.VisualKind, bytes: Uint8Array, id = f.robot ?? '', skip = -1): void => {
+    const from = f.got.length;
+    for (let seq = 0; seq < IV.visualFrames(bytes.length); seq++) {
+      if (seq === skip) continue;
+      const s = IV.visualSpan(bytes.length, seq);
+      relay.onMessage(f.id, { t: 'visualPut', kind, id, total: bytes.length, seq, data: IV.bytesToBase64(bytes, s.start, s.end) });
+      // an owner stops at a refusal; the frames after it would only be refused for their own seq
+      if (f.got.slice(from).some((m) => m.t === 'visualRefused')) return;
+    }
+  };
+  const get = (relay: SV.VisualRelay, f: FC, owner: string, id: string, kind: IV.VisualKind): void => relay.onMessage(f.id, { t: 'visualGet', owner, id, kind });
+  const pump = (relay: SV.VisualRelay): void => (relay as unknown as { pump(): void }).pump();
+  const drain = (relay: SV.VisualRelay, rounds = 400): void => {
+    for (let i = 0; i < rounds; i++) pump(relay);
+  };
+  /** the bytes a viewer was streamed for one asset, in the order they arrived */
+  const received = (f: FC, owner: string, kind: IV.VisualKind): { bytes: Uint8Array; seqs: number[] } => {
+    const cs = (msgs(f, 'visualChunk') as Extract<Msg, { t: 'visualChunk' }>[]).filter((m) => m.owner === owner && m.kind === kind);
+    const total = cs[0]?.total ?? 0;
+    const bytes = new Uint8Array(total);
+    for (const c of cs) bytes.set(IV.base64ToBytes(c.data) ?? new Uint8Array(0), IV.visualSpan(total, c.seq).start);
+    return { bytes, seqs: cs.map((c) => c.seq) };
+  };
+  const same = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
+
+  const png = pngBytes(128, 128, { noise: true }); // 3 chunks
+  const glb = glbBytes({ tris: 2000 }); // 72 KB, 3 chunks
+
+  // ---- upload, announce, stream ----------------------------------------------------------------
+  {
+    const { relay, budget } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    const old = mkFake('old', ['robotImport']);
+    const spec = mkFake('spec', PROTO.CLIENT_CAPS);
+    put(relay, a, 'top', png);
+    const ready = msgs(b, 'visualReady') as Extract<Msg, { t: 'visualReady' }>[];
+    check('visuals/relay: a completed upload is announced to every participant, the owner included, with the size',
+      ready.length === 1 && ready[0].owner === 'a' && ready[0].id === ID_A && ready[0].kind === 'top' && ready[0].bytes === png.length && msgs(a, 'visualReady').length === 1 && msgs(spec, 'visualReady').length === 1);
+    check('visuals/relay: ...and to NOBODY who did not advertise the capability (a cap-less client is sent nothing)', old.got.length === 0);
+    check('visuals/relay: the room has reserved exactly the asset’s bytes from the budget', relay.stats().reserved === png.length && budget.used() === png.length && relay.stats().ready === 1);
+
+    get(relay, b, 'a', ID_A, 'top');
+    check('visuals/relay: ⚠️ nothing is streamed until the pump runs (nothing is sent that was not asked for, and not in the same tick)', msgs(b, 'visualChunk').length === 0 && relay.stats().streams === 1);
+    drain(relay);
+    const r = received(b, 'a', 'top');
+    check('visuals/relay: a viewer that asked receives the asset IDENTICAL, chunks in order from 0', same(r.bytes, png) && r.seqs.join() === '0,1,2', r.seqs.join());
+    check('visuals/relay: the stream is finished and removed (no timer left running for nothing)', relay.stats().streams === 0 && !(relay as unknown as { timer: unknown }).timer);
+    check('visuals/relay: the spectator, who did not ask, was sent no chunk at all', msgs(spec, 'visualChunk').length === 0);
+    check('visuals/relay: a second upload of the other kind is held beside the first', (() => {
+      put(relay, a, 'mesh', glb);
+      return relay.stats().ready === 2 && relay.stats().reserved === png.length + glb.length;
+    })());
+    get(relay, spec, 'a', ID_A, 'mesh');
+    drain(relay);
+    check('visuals/relay: a watcher (not a seat) can ask too, and gets the mesh identical', same(received(spec, 'a', 'mesh').bytes, glb));
+    check('visuals/relay: a client attaching later is told what is ready (`greet`), one message per asset', (() => {
+      const late = mkFake('late', PROTO.CLIENT_CAPS);
+      relay.greet(late.c);
+      const ms = msgs(late, 'visualReady') as Extract<Msg, { t: 'visualReady' }>[];
+      const none = mkFake('none', ['robotImport']);
+      relay.greet(none.c);
+      return ms.length === 2 && ms.map((m) => m.kind).sort().join() === 'mesh,top' && none.got.length === 0;
+    })());
+    relay.dispose();
+    check('visuals/relay: dispose gives every byte back', budget.used() === 0 && relay.stats().reserved === 0 && relay.stats().owners === 0);
+  }
+
+  // ---- half sent ----------------------------------------------------------------------------------
+  {
+    const { relay } = reset();
+    const o = mkFake('o', PROTO.CLIENT_CAPS, ID_A);
+    const v = mkFake('v', PROTO.CLIENT_CAPS);
+    put(relay, o, 'top', png, ID_A, 2);
+    check('visuals/relay: nothing is announced, to anybody, while an upload is half sent', v.got.length === 0 && o.got.length === 0 && relay.stats().ready === 0);
+    get(relay, v, 'o', ID_A, 'top');
+    check('visuals/relay: ...and nothing can be asked for until it completes', refusals(v).join() === 'get:none');
+    relay.dispose();
+    const { relay: r2 } = reset();
+    const o2 = mkFake('o', PROTO.CLIENT_CAPS, ID_A);
+    put(r2, o2, 'top', png, ID_A, 1);
+    check('visuals/relay: a frame that never came refuses the upload as soon as the next one does', refusals(o2).join() === 'put:seq' && r2.stats().reserved === 0);
+    r2.dispose();
+  }
+
+  // ---- refusals ----------------------------------------------------------------------------------
+  {
+    const { relay, budget } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const rawPut = (f: FC, o: Record<string, unknown>): void => relay.onMessage(f.id, { t: 'visualPut', ...o } as unknown as PROTO.ClientMsg);
+    const base = { kind: 'top', id: ID_A, total: png.length, seq: 0, data: IV.bytesToBase64(png, 0, IV.VISUAL_CHUNK_BYTES) };
+    rawPut(a, { ...base, id: ID_B });
+    check('visuals/refuse: an id that is not the id of the robot this seat holds is refused', refusals(a).join() === 'put:id' && relay.stats().reserved === 0);
+    a.got.length = 0;
+    rawPut(a, { ...base, id: 'not-hex' });
+    check('visuals/refuse: ...and one that is not a robot id at all', refusals(a).join() === 'put:id');
+    a.got.length = 0;
+    const standard = mkFake('s', PROTO.CLIENT_CAPS, undefined);
+    rawPut(standard, base);
+    check('visuals/refuse: a seat that holds a STANDARD robot cannot upload (there is nothing to be the look of)', refusals(standard).join() === 'put:id');
+    rawPut(a, { ...base, total: IV.VISUAL_MAX_BYTES.top + 1 });
+    rawPut(a, { ...base, total: 0 });
+    rawPut(a, { ...base, total: 1.5 });
+    rawPut(a, { ...base, total: 'big' });
+    check('visuals/refuse: a total over the cap, zero, fractional or not a number is refused, and reserves nothing', refusals(a).join() === 'put:size,put:size,put:size,put:size' && relay.stats().reserved === 0, refusals(a).join());
+    a.got.length = 0;
+    rawPut(a, { ...base, kind: 'mesh', total: IV.VISUAL_MAX_BYTES.mesh + 1 });
+    check('visuals/refuse: a mesh over 1 MiB is refused', refusals(a).join() === 'put:size');
+    a.got.length = 0;
+    rawPut(a, { ...base, kind: 'thumb' });
+    rawPut(a, { ...base, kind: undefined });
+    check('visuals/refuse: a kind that is not top or mesh is ignored, with no reply and no state', a.got.length === 0 && relay.stats().reserved === 0);
+    rawPut(a, { ...base, seq: 3 });
+    check('visuals/refuse: a first frame that is not seq 0 is refused', refusals(a).join() === 'put:seq' && relay.stats().reserved === 0);
+    a.got.length = 0;
+    rawPut(a, { ...base, seq: -1 });
+    rawPut(a, { ...base, seq: 1.5 });
+    check('visuals/refuse: a negative or fractional seq is refused', refusals(a).join() === 'put:seq,put:seq');
+    a.got.length = 0;
+    rawPut(a, base);
+    rawPut(a, { ...base, seq: 2, data: IV.bytesToBase64(png, 2 * IV.VISUAL_CHUNK_BYTES, png.length) });
+    check('visuals/refuse: a skipped frame refuses the upload AND frees what it reserved', refusals(a).join() === 'put:seq' && relay.stats().reserved === 0 && budget.used() === 0, refusals(a).join());
+    a.got.length = 0;
+    rawPut(a, base);
+    rawPut(a, { ...base, seq: 1, data: '!!!!' });
+    check('visuals/refuse: a chunk that is not base64 refuses the upload and frees it', refusals(a).join() === 'put:size' && relay.stats().reserved === 0);
+    a.got.length = 0;
+    rawPut(a, base);
+    rawPut(a, { ...base, seq: 1, data: IV.bytesToBase64(png, IV.VISUAL_CHUNK_BYTES, IV.VISUAL_CHUNK_BYTES + 100) });
+    check('visuals/refuse: a chunk of the wrong length refuses the upload and frees it', refusals(a).join() === 'put:size' && relay.stats().reserved === 0);
+    a.got.length = 0;
+    rawPut(a, { ...base, data: 'A'.repeat(IV.VISUAL_CHUNK_CHARS + 4) });
+    check('visuals/refuse: a chunk over the frame limit is refused', refusals(a).join() === 'put:size' && relay.stats().reserved === 0);
+    a.got.length = 0;
+    // content: the right size, the wrong bytes
+    const junk = new Uint8Array(png.length).fill(7);
+    put(relay, a, 'top', junk);
+    check('visuals/refuse: ⚠️ bytes that are not a PNG are refused at the LAST frame, announced to nobody, and freed', refusals(a).join() === 'put:format' && msgs(a, 'visualReady').length === 0 && relay.stats().reserved === 0);
+    a.got.length = 0;
+    const ext = glbBytes({ tris: 2000, edit: (j) => { j.buffers[0].uri = 'https://example.invalid/x.bin'; } });
+    put(relay, a, 'mesh', ext);
+    check('visuals/refuse: ⚠️ a mesh GLB that names an external buffer is refused by the room', refusals(a).join() === 'put:format' && relay.stats().ready === 0 && budget.used() === 0, refusals(a).join());
+    a.got.length = 0;
+    const img = glbBytes({ tris: 2000, edit: (j) => { j.images = [{ bufferView: 0, mimeType: 'image/png' }]; } });
+    put(relay, a, 'mesh', img);
+    check('visuals/refuse: ⚠️ a mesh GLB with an image inside is refused by the room', refusals(a).join() === 'put:format' && relay.stats().ready === 0);
+    a.got.length = 0;
+    // a good one lands, and a stray late frame does not cost it
+    put(relay, a, 'top', png);
+    const keep = relay.stats().ready;
+    rawPut(a, { ...base, seq: 2, data: IV.bytesToBase64(png, 2 * IV.VISUAL_CHUNK_BYTES, png.length) });
+    check('visuals/refuse: a duplicate frame after the asset completed is ignored, and the asset stays', keep === 1 && relay.stats().ready === 1 && !refusals(a).includes('put:seq'));
+    allows = false;
+    a.got.length = 0;
+    rawPut(a, base);
+    check('visuals/refuse: in a room that does not allow imported robots (ranked, record) an upload is refused with the room reason', refusals(a).join() === 'put:room');
+    allows = true;
+    relay.dispose();
+  }
+
+  // ---- ignoring the cap-less ------------------------------------------------------------------------
+  {
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const old = mkFake('old', ['robotImport'], ID_B);
+    put(relay, old, 'top', png, ID_B);
+    check('visuals/cap: an upload from a client without the capability is ignored (no state, no reply)', old.got.length === 0 && relay.stats().reserved === 0);
+    put(relay, a, 'top', png);
+    get(relay, old, 'a', ID_A, 'top');
+    drain(relay);
+    check('visuals/cap: a download request from one is ignored too, and it is sent nothing', old.got.length === 0 && relay.stats().streams === 0);
+    const nocaps = mkFake('nocaps', undefined);
+    get(relay, nocaps, 'a', ID_A, 'top');
+    check('visuals/cap: ...and one that advertised nothing at all', nocaps.got.length === 0);
+    relay.dispose();
+  }
+
+  // ---- downloads: what may be asked for ------------------------------------------------------------------
+  {
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    put(relay, a, 'top', png);
+    get(relay, b, 'a', ID_A, 'mesh');
+    check('visuals/get: an asset nobody uploaded is refused `none` (the viewer keeps the footprint)', refusals(b).join() === 'get:none');
+    b.got.length = 0;
+    get(relay, b, 'a', ID_B, 'top');
+    check('visuals/get: ...and so is one under a robot id that is not the owner’s', refusals(b).join() === 'get:none');
+    b.got.length = 0;
+    get(relay, b, 'nobody', ID_A, 'top');
+    get(relay, b, 'x'.repeat(200), ID_A, 'top');
+    get(relay, b, 'a', 'bad', 'top');
+    check('visuals/get: an unknown owner, an over-long owner and a bad id are all `none`', refusals(b).join() === 'get:none,get:none,get:none');
+    b.got.length = 0;
+    get(relay, a, 'a', ID_A, 'top');
+    check('visuals/get: an owner asking for its own asset is refused (it has it)', refusals(a).includes('get:none'));
+    get(relay, b, 'a', ID_A, 'top');
+    get(relay, b, 'a', ID_A, 'top');
+    check('visuals/get: asking again while a stream is on its way does not start a second one', relay.stats().streams === 1);
+    drain(relay);
+    check('visuals/get: ...and the viewer got the asset once, not twice', received(b, 'a', 'top').seqs.join() === '0,1,2');
+    allows = false;
+    b.got.length = 0;
+    get(relay, b, 'a', ID_A, 'top');
+    check('visuals/get: in a room that does not allow imported robots a request is refused with the room reason', refusals(b).join() === 'get:room');
+    allows = true;
+    relay.dispose();
+  }
+
+  // ---- egress: a viewer cannot ask forever -------------------------------------------------------------
+  {
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    const big = pngBytes(250, 250, { noise: true });
+    put(relay, a, 'top', big);
+    let asks = 0;
+    let busy = false;
+    for (let i = 0; i < 100 && !busy; i++) {
+      b.got.length = 0;
+      get(relay, b, 'a', ID_A, 'top');
+      if (refusals(b).includes('get:busy')) busy = true;
+      else asks++;
+      drain(relay, 40);
+    }
+    check('visuals/egress: ⚠️ one viewer is stopped after about 8 MiB however many times it asks', busy && asks * big.length <= IV.VISUAL_SERVE_CLIENT_BYTES && asks >= 25, `${asks} asks of ${big.length} B`);
+    check('visuals/egress: the room’s own running total reflects it', relay.stats().servedRoom === asks * big.length);
+    // a second viewer is still served (the per-client cap is per client)
+    const c = mkFake('c', PROTO.CLIENT_CAPS);
+    get(relay, c, 'a', ID_A, 'top');
+    drain(relay);
+    check('visuals/egress: ...while another viewer is still served', same(received(c, 'a', 'top').bytes, big));
+    // the room cap: many fresh viewers, each within its own quota
+    const { relay: r2 } = reset();
+    const o = mkFake('o', PROTO.CLIENT_CAPS, ID_A);
+    put(r2, o, 'top', big);
+    let served = 0;
+    let stopped = false;
+    for (let i = 0; i < 400 && !stopped; i++) {
+      const v = mkFake(`v${i}`, PROTO.CLIENT_CAPS);
+      get(r2, v, 'o', ID_A, 'top');
+      if (refusals(v).includes('get:busy')) stopped = true;
+      else served++;
+      drain(r2, 20);
+    }
+    check('visuals/egress: ⚠️ the ROOM stops serving after its own total too (48 MiB), however many viewers come', stopped && served * big.length <= IV.VISUAL_SERVE_ROOM_BYTES, `${served} viewers`);
+    r2.dispose();
+    relay.dispose();
+  }
+
+  // ---- pacing in the pump ------------------------------------------------------------------------------------
+  {
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    put(relay, a, 'mesh', glbBytes({ tris: 5000 })); // 180 KB, 8 chunks
+    get(relay, b, 'a', ID_A, 'mesh');
+    b.backlogBytes = IV.VISUAL_STREAM_BACKLOG_BYTES;
+    pump(relay);
+    pump(relay);
+    check('visuals/pump: a socket whose backlog is at the limit is handed nothing, however often the pump runs', msgs(b, 'visualChunk').length === 0 && relay.stats().streams === 1);
+    b.backlogBytes = 0;
+    pump(relay);
+    check('visuals/pump: ...and one chunk the moment it drains', msgs(b, 'visualChunk').length === 1);
+    pump(relay);
+    pump(relay);
+    check('visuals/pump: one chunk per viewer per pump (never a burst)', msgs(b, 'visualChunk').length === 3);
+    b.backlogBytes = undefined;
+    drain(relay);
+    check('visuals/pump: a socket the room cannot read is paced by the pump alone, and finishes', received(b, 'a', 'mesh').seqs.join() === '0,1,2,3,4,5,6,7');
+    liveMatch = true;
+    get(relay, b, 'a', ID_A, 'mesh');
+    b.got.length = 0;
+    pump(relay);
+    pump(relay);
+    pump(relay);
+    check('visuals/pump: ⚠️ during a live match a viewer is held to one chunk per gap, so its snapshots are not crowded out', msgs(b, 'visualChunk').length === 1, String(msgs(b, 'visualChunk').length));
+    liveMatch = false;
+    relay.dispose();
+  }
+  {
+    // round-robin across one viewer's streams, and a held seat (socket dropped) waits
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    put(relay, a, 'top', png);
+    put(relay, a, 'mesh', glb);
+    get(relay, b, 'a', ID_A, 'top');
+    get(relay, b, 'a', ID_A, 'mesh');
+    pump(relay);
+    pump(relay);
+    const kinds = (msgs(b, 'visualChunk') as Extract<Msg, { t: 'visualChunk' }>[]).map((m) => m.kind).join();
+    check('visuals/pump: a viewer’s streams take turns', kinds === 'top,mesh', kinds);
+    b.c.connected = false;
+    const before = msgs(b, 'visualChunk').length;
+    pump(relay);
+    check('visuals/pump: a seat whose socket dropped (held for its reconnect) is not written to', msgs(b, 'visualChunk').length === before);
+    b.c.connected = true;
+    drain(relay);
+    check('visuals/pump: ...and finishes what it was sent when it is back', same(received(b, 'a', 'top').bytes, png) && same(received(b, 'a', 'mesh').bytes, glb));
+    relay.dispose();
+  }
+
+  // ---- budgets and freeing -------------------------------------------------------------------------------------
+  {
+    const { relay, budget } = reset();
+    const owners = ['o1', 'o2', 'o3', 'o4', 'o5'].map((id, i) => mkFake(id, PROTO.CLIENT_CAPS, `00000000000000${i}${i}`));
+    const mesh = glbBytes({ tris: 29_000 }); // 1.04 MB
+    const top = pngBytes(250, 250, { noise: true, seed: 5 }); // 250 KB
+    for (const o of owners.slice(0, 4)) {
+      put(relay, o, 'mesh', mesh, o.robot);
+      put(relay, o, 'top', top, o.robot);
+    }
+    check('visuals/budget: four seats’ full sets fit a room exactly (4 × (1 MiB + 256 KiB) is the cap)', relay.stats().ready === 8 && relay.stats().reserved === 4 * (mesh.length + top.length) && relay.stats().reserved <= IV.VISUAL_ROOM_BYTES,
+      `${relay.stats().reserved} of ${IV.VISUAL_ROOM_BYTES}`);
+    const o5 = owners[4];
+    put(relay, o5, 'mesh', mesh, o5.robot);
+    check('visuals/budget: ⚠️ the ROOM’s budget refuses more, politely (`budget`), and reserves nothing', refusals(o5).join() === 'put:budget' && relay.stats().ready === 8, refusals(o5).join());
+    check('visuals/budget: the process budget agrees with the room’s books to the byte', budget.used() === relay.stats().reserved);
+    relay.freeOwner('o1');
+    check('visuals/budget: a seat leaving frees its assets and the budget with them', relay.stats().ready === 6 && budget.used() === relay.stats().reserved && relay.stats().owners === 3);
+    o5.got.length = 0;
+    put(relay, o5, 'mesh', mesh, o5.robot);
+    check('visuals/budget: ...and the next seat then fits', relay.stats().ready === 7 && refusals(o5).length === 0);
+    // robot change frees
+    owners[1].robot = undefined;
+    relay.specChanged('o2');
+    check('visuals/budget: a seat that picks a standard robot loses its assets', relay.stats().ready === 5 && budget.used() === relay.stats().reserved);
+    owners[2].robot = ID_C;
+    relay.specChanged('o3');
+    check('visuals/budget: ...and one that picks ANOTHER imported robot loses them too (they were for the old one)', relay.stats().ready === 3 && budget.used() === relay.stats().reserved);
+    owners[3].robot = undefined;
+    owners[4].robot = undefined;
+    relay.reconcile();
+    check('visuals/budget: `reconcile` (after a start that stripped imports) frees every seat that no longer holds one', relay.stats().ready === 0 && budget.used() === 0 && relay.stats().owners === 0);
+    relay.dispose();
+  }
+  {
+    const { relay, budget } = reset(2.5 * 1024 * 1024); // a process with 2.5 MiB left
+    const o1 = mkFake('o1', PROTO.CLIENT_CAPS, ID_A);
+    const o2 = mkFake('o2', PROTO.CLIENT_CAPS, ID_B);
+    const mesh = glbBytes({ tris: 20_000 }); // 720 KB
+    put(relay, o1, 'mesh', mesh, ID_A);
+    put(relay, o1, 'top', pngBytes(250, 250, { noise: true }), ID_A);
+    put(relay, o2, 'mesh', mesh, ID_B);
+    put(relay, o2, 'top', pngBytes(250, 250, { noise: true, seed: 2 }), ID_B);
+    const third = mkFake('o3', PROTO.CLIENT_CAPS, ID_C);
+    put(relay, third, 'mesh', glbBytes({ tris: 29_000 }), ID_C);
+    check('visuals/budget: ⚠️ the PROCESS budget refuses when the machine is full, even with room left in the room', refusals(third).join() === 'put:budget' && budget.used() <= 2.5 * 1024 * 1024, `${budget.used()}`);
+    relay.dispose();
+    check('visuals/budget: ...and every byte is back when the room goes', budget.used() === 0);
+  }
+  {
+    // an upload that went quiet is not worth what it reserved
+    const { relay, budget } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS, ID_B);
+    put(relay, a, 'top', png, ID_A, 2); // never finishes (the last frame is never sent)
+    check('visuals/budget: a half-sent upload holds its reservation', budget.used() === png.length && relay.stats().ready === 0);
+    const realNow = Date.now;
+    Date.now = () => realNow() + IV.VISUAL_PUT_STALE_MS + 1000;
+    try {
+      put(relay, b, 'top', png, ID_B);
+    } finally {
+      Date.now = realNow;
+    }
+    check('visuals/budget: ⚠️ ...until a minute passes and the next upload sweeps it (a stalled client cannot pin the budget)', budget.used() === png.length && relay.stats().ready === 1 && relay.stats().owners === 1);
+    relay.dispose();
+  }
+  {
+    // a new upload replaces the old, and a stream of the old one is dropped
+    const { relay, budget } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    put(relay, a, 'top', png);
+    get(relay, b, 'a', ID_A, 'top');
+    pump(relay);
+    const png2 = pngBytes(64, 64, { noise: true, seed: 9 });
+    put(relay, a, 'top', png2);
+    check('visuals/replace: a new upload of a kind replaces the old one, and the books follow', relay.stats().ready === 1 && budget.used() === png2.length);
+    pump(relay);
+    pump(relay);
+    check('visuals/replace: ...and a stream of the OLD asset stops (a viewer is never handed half of each)', relay.stats().streams === 0 && msgs(b, 'visualChunk').length === 1);
+    relay.dispose();
+  }
+  {
+    // two seats cannot hold one robot id: the second is refused, the first keeps its look
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS, ID_A);
+    put(relay, a, 'top', png);
+    put(relay, b, 'top', pngBytes(64, 64, { noise: true, seed: 4 }), ID_A);
+    check('visuals/dup: ⚠️ a second seat claiming the same robot id is refused (`dup`), so a viewer keying a picture by id cannot be handed the wrong one', refusals(b).join() === 'put:dup' && relay.stats().owners === 1);
+    relay.dispose();
+  }
+  check('visuals/budget: the process budget is one counter per thread in one shared buffer — the sum is the process’s, a dead thread’s slot can be zeroed', (() => {
+    const sab = SV.makeSharedVisualBudget();
+    if (!sab) return false;
+    SV.configureVisualBudget(sab, 2);
+    const budget = SV.processVisualBudget(1000);
+    const ok1 = budget.reserve(600);
+    // "another thread" writes its own slot of the same buffer
+    new Int32Array(sab)[5] += 300;
+    const full = SV.visualBytesInUse() === 900 && !budget.reserve(200) && budget.reserve(100);
+    budget.release(700);
+    const seen = SV.visualBytesInUse() === 300;
+    SV.resetVisualSlot(sab, 5);
+    const zero = SV.visualBytesInUse() === 0;
+    SV.configureVisualBudget(new ArrayBuffer(4 * SV.VISUAL_BUDGET_SLOTS), 0); // back to a private counter
+    return ok1 && full && seen && zero;
+  })());
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE RELAY IN A REAL `Room`: owner uploads, a viewer asks, a cap-less client is left alone
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const { glbBytes, pngBytes } = VF;
+  const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const ID = '0123456789abcdef';
+  const ID2 = 'fedcba9876543210';
+  const impOf = (id: string) => ({ v: 1, id, heightIn: 12, hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }] });
+  const impSpec = (id: string) => ({ ...DEFAULT_SPEC, imported: impOf(id) }) as typeof DEFAULT_SPEC;
+  type Sink = Record<string, PROTO.ServerMsg[]>;
+  const noVisuals = PROTO.CLIENT_CAPS.filter((c) => c !== IV.IMPORT_VISUALS_CAP);
+  const mk = (sink: Sink, id: string, caps: string[] | undefined, spec: typeof DEFAULT_SPEC, alliance: Alliance = 'red'): Client => {
+    sink[id] ??= [];
+    return {
+      id,
+      send: (m) => sink[id].push(m),
+      player: { clientId: id, name: id, teamName: 'T', teamNumber: 1, alliance, startIndex: 0, ready: true, spec: { ...spec }, assists: { ...DEFAULT_ASSISTS } },
+      connected: true,
+      disconnectAt: 0,
+      caps,
+      userId: `u-${id}`,
+    };
+  };
+  const vis = (s: Sink, id: string): PROTO.ServerMsg[] => s[id].filter((m) => m.t.startsWith('visual'));
+  const putAll = (room: Room, id: string, kind: IV.VisualKind, bytes: Uint8Array, rid: string): void => {
+    for (let seq = 0; seq < IV.visualFrames(bytes.length); seq++) {
+      const sp = IV.visualSpan(bytes.length, seq);
+      room.onMessage(id, { t: 'visualPut', kind, id: rid, total: bytes.length, seq, data: IV.bytesToBase64(bytes, sp.start, sp.end) });
+    }
+  };
+  const assemble = (s: Sink, id: string, owner: string, kind: IV.VisualKind): Uint8Array => {
+    const cs = s[id].filter((m) => m.t === 'visualChunk' && m.owner === owner && m.kind === kind) as Extract<PROTO.ServerMsg, { t: 'visualChunk' }>[];
+    const out = new Uint8Array(cs[0]?.total ?? 0);
+    for (const c of cs) out.set(IV.base64ToBytes(c.data) ?? new Uint8Array(0), IV.visualSpan(c.total, c.seq).start);
+    return out;
+  };
+  const same = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.length > 0 && a.every((x, i) => x === b[i]);
+  const png = pngBytes(128, 128, { noise: true, seed: 11 });
+  const glb = glbBytes({ tris: 6000 });
+  const baseline = SV.visualBytesInUse();
+
+  // ---- a custom room ------------------------------------------------------------------------------
+  {
+    const s: Sink = {};
+    let emptied = 0;
+    const room = new Room('smoke-vis-custom', () => emptied++, { kind: 'versus' });
+    room.add(mk(s, 'a', PROTO.CLIENT_CAPS, impSpec(ID), 'red'));
+    room.add(mk(s, 'b', PROTO.CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    room.add(mk(s, 'x', noVisuals, DEFAULT_SPEC, 'blue')); // an imports build without the relay
+    room.addSpectator(mk(s, 'w', PROTO.CLIENT_CAPS, DEFAULT_SPEC));
+    check('visuals/room: the seats are in (the cap-less one has the imports capability, so it is seated beside an imported robot)', ['a', 'b', 'x', 'w'].every((id) => s[id].some((m) => m.t === 'welcome')));
+    putAll(room, 'a', 'top', png, ID);
+    check('visuals/room: the owner’s upload is announced to the other seat, the watcher and the owner', ['a', 'b', 'w'].every((id) => vis(s, id).length === 1 && vis(s, id)[0].t === 'visualReady'));
+    check('visuals/room: ⚠️ a client without `importVisuals` is sent NOTHING and the room carries on (its roster and welcome are untouched)', vis(s, 'x').length === 0 && s.x.some((m) => m.t === 'roster'));
+    room.onMessage('x', { t: 'visualGet', owner: 'a', id: ID, kind: 'top' });
+    putAll(room, 'x', 'top', png, ID);
+    check('visuals/room: ...and what it sends the relay is ignored without a reply', vis(s, 'x').length === 0);
+    room.onMessage('b', { t: 'visualGet', owner: 'a', id: ID, kind: 'top' });
+    check('visuals/room: a request is answered by the room’s own timer, not in the call (nothing is sent per tick, nothing unasked)', s.b.filter((m) => m.t === 'visualChunk').length === 0);
+    await sleepMs(250);
+    check('visuals/room: ⚠️ the viewer receives the owner’s picture byte for byte', same(assemble(s, 'b', 'a', 'top'), png));
+    check('visuals/room: ...and the watcher, who did not ask, received no chunk', s.w.filter((m) => m.t === 'visualChunk').length === 0);
+    room.onMessage('w', { t: 'visualGet', owner: 'a', id: ID, kind: 'top' });
+    await sleepMs(250);
+    check('visuals/room: a watcher can ask, and gets it identical', same(assemble(s, 'w', 'a', 'top'), png));
+    // a client attaching later is greeted
+    room.addSpectator(mk(s, 'w2', PROTO.CLIENT_CAPS, DEFAULT_SPEC));
+    room.add(mk(s, 'c', PROTO.CLIENT_CAPS, DEFAULT_SPEC, 'red'));
+    check('visuals/room: a watcher and a seat that arrive later are told what is ready', vis(s, 'w2').length === 1 && vis(s, 'c').length === 1);
+    const resend: PROTO.ServerMsg[] = [];
+    room.reattach('b', (m) => { resend.push(m); s.b.push(m); }, undefined, undefined, undefined, true);
+    check('visuals/room: a reclaimed seat (a new socket) is told again, because the new socket was told nothing', resend.filter((m) => m.t === 'visualReady').length === 1);
+    check('visuals/room: the room reserved the picture’s bytes from the process budget', SV.visualBytesInUse() - baseline === png.length, String(SV.visualBytesInUse() - baseline));
+    // the robot changes: the assets go
+    room.onMessage('a', { t: 'update', patch: { spec: { ...DEFAULT_SPEC } } });
+    check('visuals/room: an owner who picks a STANDARD robot loses its assets, and the bytes go back', SV.visualBytesInUse() === baseline);
+    s.b.length = 0;
+    room.onMessage('b', { t: 'visualGet', owner: 'a', id: ID, kind: 'top' });
+    check('visuals/room: ...so a request for them is `none` (the viewer keeps the footprint)', (s.b.find((m) => m.t === 'visualRefused') as Extract<PROTO.ServerMsg, { t: 'visualRefused' }> | undefined)?.reason === 'none');
+    room.onMessage('a', { t: 'update', patch: { spec: impSpec(ID) } });
+    putAll(room, 'a', 'top', png, ID);
+    room.onMessage('a', { t: 'update', patch: { spec: impSpec(ID2) } });
+    check('visuals/room: ...and one that picks ANOTHER imported robot loses them too', SV.visualBytesInUse() === baseline);
+    s.a.length = 0;
+    putAll(room, 'a', 'top', png, ID);
+    check('visuals/room: an upload for the OLD robot’s id is refused now (`id`)', (s.a.find((m) => m.t === 'visualRefused') as Extract<PROTO.ServerMsg, { t: 'visualRefused' }> | undefined)?.reason === 'id');
+    putAll(room, 'a', 'top', png, ID2);
+    check('visuals/room: ...and one for the robot it holds is taken', SV.visualBytesInUse() - baseline === png.length);
+    // the owner leaves: a lobby departure frees at once
+    room.detach('a');
+    check('visuals/room: an owner leaving the lobby frees its assets', SV.visualBytesInUse() === baseline);
+    // everyone leaves: the room is gone and nothing is held
+    putAll(room, 'c', 'top', png, ID2); // c holds a standard robot: refused, holds nothing
+    for (const id of ['b', 'x', 'c']) room.detach(id);
+    check('visuals/room: the last seat out empties the room', emptied === 1);
+    check('visuals/room: ⚠️ ...and the process budget is exactly where it started (nothing leaked)', SV.visualBytesInUse() === baseline);
+    room.stop();
+  }
+
+  // ---- the room empties with assets in it ------------------------------------------------------------
+  {
+    const s: Sink = {};
+    let emptied = 0;
+    const room = new Room('smoke-vis-empty', () => emptied++, { kind: 'versus' });
+    room.add(mk(s, 'a', PROTO.CLIENT_CAPS, impSpec(ID), 'red'));
+    putAll(room, 'a', 'mesh', glb, ID);
+    putAll(room, 'a', 'top', png, ID);
+    check('visuals/room: a mesh and a picture are held for one owner', SV.visualBytesInUse() - baseline === glb.length + png.length);
+    room.detach('a');
+    check('visuals/room: ⚠️ the owner leaving a room with nobody else in it frees both, and the room is gone', emptied === 1 && SV.visualBytesInUse() === baseline);
+    room.stop();
+  }
+
+  // ---- a seat that drops mid-match keeps its assets for its reconnect, and loses them at the reap -----------
+  {
+    const s: Sink = {};
+    const room = new Room('smoke-vis-match', () => {}, { kind: 'versus' });
+    room.add(mk(s, 'a', PROTO.CLIENT_CAPS, impSpec(ID), 'red'));
+    room.add(mk(s, 'b', PROTO.CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    putAll(room, 'a', 'top', png, ID);
+    room.onMessage('a', { t: 'start' });
+    check('visuals/room: the match starts with the imported robot and the relay holding its picture', !!room.worldForTest() && SV.visualBytesInUse() - baseline === png.length);
+    room.addSpectator(mk(s, 'late', PROTO.CLIENT_CAPS, DEFAULT_SPEC));
+    check('visuals/room: a spectator who arrives mid-match is told the picture is ready', vis(s, 'late').some((m) => m.t === 'visualReady'));
+    room.onMessage('late', { t: 'visualGet', owner: 'a', id: ID, kind: 'top' });
+    await sleepMs(500); // a live match holds a viewer to one chunk per 100 ms: three chunks
+    check('visuals/room: ...asks, and is streamed it DURING the match, identical', same(assemble(s, 'late', 'a', 'top'), png));
+    room.detach('a'); // a drop inside the reconnect grace holds the seat
+    check('visuals/room: a seat that drops mid-match keeps its assets (it is coming back)', SV.visualBytesInUse() - baseline === png.length);
+    // ...and its grace lapsing is the reap that frees them
+    (room as unknown as { clients: Map<string, Client> }).clients.get('a')!.disconnectAt = 1;
+    (room as unknown as { checkGrace(): void }).checkGrace();
+    check('visuals/room: ...and the reconnect grace lapsing frees them', SV.visualBytesInUse() === baseline);
+    room.stop();
+  }
+
+  // ---- record and ranked rooms ------------------------------------------------------------------------------
+  {
+    const s: Sink = {};
+    const room = new Room('smoke-vis-record', () => {}, { kind: 'record', record: 'solo' });
+    room.add(mk(s, 'r', PROTO.CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    putAll(room, 'r', 'top', png, ID);
+    const first = s.r.find((m) => m.t === 'visualRefused') as Extract<PROTO.ServerMsg, { t: 'visualRefused' }> | undefined;
+    check('visuals/room: ⚠️ a record room refuses an upload, with the room reason, and holds nothing', first?.reason === 'room' && SV.visualBytesInUse() === baseline, String(first?.reason));
+    s.r.length = 0;
+    room.onMessage('r', { t: 'visualGet', owner: 'r', id: ID, kind: 'top' });
+    check('visuals/room: ...and refuses a request', (s.r.find((m) => m.t === 'visualRefused') as Extract<PROTO.ServerMsg, { t: 'visualRefused' }> | undefined)?.reason === 'room');
+    room.stop();
+    const staged = new Room('smoke-vis-ranked', () => {}, { kind: 'versus' });
+    staged.applyPending({
+      code: 'iad-vis', hostRegion: 'iad', mode: '1v1', seed: 9, ranked: true,
+      roster: [{ userId: 'u-a', name: 'a', teamName: 'T', teamNumber: 1, spec: { ...DEFAULT_SPEC }, assists: { ...DEFAULT_ASSISTS }, startIndex: 0, alliance: 'red', introElo: 1200 }],
+    });
+    const s2: Sink = {};
+    const c = mk(s2, 'a', PROTO.CLIENT_CAPS, DEFAULT_SPEC, 'red');
+    c.userId = 'u-a';
+    staged.add(c);
+    putAll(staged, 'a', 'top', png, ID);
+    check('visuals/room: ⚠️ a staged ranked room refuses it too, and holds nothing', (s2.a.find((m) => m.t === 'visualRefused') as Extract<PROTO.ServerMsg, { t: 'visualRefused' }> | undefined)?.reason === 'room' && SV.visualBytesInUse() === baseline);
+    staged.stop();
+  }
+  check('visuals/room: after every scenario the process budget is where it started', SV.visualBytesInUse() === baseline, String(SV.visualBytesInUse() - baseline));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE CLIENT: an owner and a viewer, each an `ImportVisualsClient`, through a real `Room`
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const { glbBytes, pngBytes } = VF;
+  const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const until = async (pred: () => boolean, ms = 4000): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (pred()) return true;
+      await sleepMs(10);
+    }
+    return pred();
+  };
+  const ID = '0123456789abcdef';
+  const ID2 = 'fedcba9876543210';
+  const impSpec = (id: string) => ({ ...DEFAULT_SPEC, imported: { v: 1, id, heightIn: 12, hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }] } }) as typeof DEFAULT_SPEC;
+  const png = pngBytes(100, 100, { noise: true, seed: 21 });
+  const glb = glbBytes({ tris: 29_000 });
+
+  class FakeTx implements Transport {
+    sent: PROTO.ClientMsg[] = [];
+    isOpen = true;
+    toRoom: ((m: PROTO.ClientMsg) => void) | null = null;
+    send(d: string): void {
+      const m = PROTO.decodeClientMsg(d);
+      this.sent.push(m);
+      this.toRoom?.(m);
+    }
+    onMessage(): void {}
+    onOpen(): void {}
+    onReopen(): void {}
+    onDown(): void {}
+    onFail(): void {}
+    close(): void {}
+    count(t: string): number {
+      return this.sent.filter((m) => m.t === t).length;
+    }
+  }
+  const delivered: { id: string; assets: { top?: Blob | null; mesh?: Blob | null } }[] = [];
+  const unregistered: string[] = [];
+  BR.setRelayedAssetSink({ register: (id, assets) => delivered.push({ id, assets }), unregister: (id) => unregistered.push(id) });
+  const reset = (): void => {
+    delivered.length = 0;
+    unregistered.length = 0;
+    BR.unregisterRelayedAssets(BR.relayedAssetIds());
+    unregistered.length = 0;
+  };
+  const bytesOf = async (b: Blob | null | undefined): Promise<Uint8Array> => (b ? new Uint8Array(await b.arrayBuffer()) : new Uint8Array(0));
+  const same = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.length > 0 && a.every((x, i) => x === b[i]);
+  const own = (top: Uint8Array | null, mesh: Uint8Array | null): IVC.OwnAssets => ({ top: async () => top, mesh: async () => mesh });
+
+  /** a client wired to a room the way `LobbyClient` wires it: its transport reaches the room, the room's frames reach it */
+  function join(room: Room, id: string, spec: typeof DEFAULT_SPEC, cli: IVC.ImportVisualsClient, alliance: Alliance = 'red'): FakeTx {
+    const tx = new FakeTx();
+    tx.toRoom = (m) => room.onMessage(id, m);
+    cli.bind(tx);
+    room.add({
+      id,
+      send: (m) => {
+        if (m.t === 'roster') cli.noteRoster(id, m.players);
+        else if (m.t === 'welcome') cli.onWelcome(m.clientId);
+        else cli.handle(m);
+      },
+      player: { clientId: id, name: id, teamName: 'T', teamNumber: 1, alliance, startIndex: 0, ready: true, spec: { ...spec }, assists: { ...DEFAULT_ASSISTS } },
+      connected: true,
+      disconnectAt: 0,
+      caps: PROTO.CLIENT_CAPS,
+      userId: `u-${id}`,
+    });
+    return tx;
+  }
+  const mkClient = (o: IVC.ImportVisualsOptions): IVC.ImportVisualsClient => new IVC.ImportVisualsClient({ settleMs: 5, showOthers: () => true, meshWanted: () => false, ...o });
+
+  // ---- the round trip -------------------------------------------------------------------------------
+  {
+    reset();
+    const room = new Room('smoke-visc-1', () => {}, { kind: 'versus' });
+    const ownerCli = mkClient({ own: own(png, glb) });
+    const viewCli = mkClient({});
+    const ownerTx = join(room, 'a', impSpec(ID), ownerCli);
+    ownerCli.setOffered(false);
+    await sleepMs(80);
+    check('visuals/client: ⚠️ an owner sends NOTHING to a server that did not say it holds the relay (an older one would drop 1.3 MB without a word)', ownerTx.count('visualPut') === 0);
+    ownerCli.setOffered(true);
+    const viewTx = join(room, 'b', DEFAULT_SPEC, viewCli, 'blue');
+    check('visuals/client: ...and uploads once it is told it may', await until(() => ownerCli.stateForTest().mine.includes(`${ID}|top`)), JSON.stringify(ownerCli.stateForTest()));
+    check('visuals/client: a DECODE owner uploads the picture and no mesh (it has no 3D view)', ownerTx.sent.filter((m) => m.t === 'visualPut' && m.kind === 'mesh').length === 0 && ownerTx.sent.filter((m) => m.t === 'visualPut' && m.kind === 'top').length === IV.visualFrames(png.length));
+    check('visuals/client: the upload is paced (frames are not sent in one burst)', ownerTx.count('visualPut') === IV.visualFrames(png.length));
+    check('visuals/client: ⚠️ the viewer asked for the picture only once it was told it was ready, and for nothing else', await until(() => delivered.length === 1), `${viewTx.count('visualGet')} gets`);
+    check('visuals/client: ...it asked exactly once', viewTx.count('visualGet') === 1);
+    check('visuals/client: ⚠️ the renderers were handed the owner’s picture, byte for byte, under the owner’s robot id',
+      delivered[0]?.id === ID && same(await bytesOf(delivered[0]?.assets.top), png) && delivered[0].assets.top?.type === 'image/png');
+    check('visuals/client: the owner asked for nothing (it has its own picture)', ownerTx.count('visualGet') === 0);
+    // leaving the room takes the blobs back
+    viewCli.reset();
+    check('visuals/client: leaving the room hands the picture back (`unregister`) and clears the state', unregistered.join() === ID && viewCli.stateForTest().delivered.length === 0);
+    ownerCli.reset();
+    room.stop();
+  }
+
+  // ---- the viewer's opt-out ----------------------------------------------------------------------------------
+  {
+    reset();
+    const room = new Room('smoke-visc-2', () => {}, { kind: 'versus' });
+    let show = false;
+    const ownerCli = mkClient({ own: own(png, null) });
+    const viewCli = mkClient({ showOthers: () => show });
+    join(room, 'a', impSpec(ID), ownerCli);
+    ownerCli.setOffered(true);
+    const viewTx = join(room, 'b', DEFAULT_SPEC, viewCli, 'blue');
+    await until(() => ownerCli.stateForTest().mine.length === 1);
+    await sleepMs(150);
+    check('visuals/client: ⚠️ with "Show other players’ imported robots" OFF the viewer sends no request and takes no bytes', viewTx.count('visualGet') === 0 && delivered.length === 0);
+    show = true;
+    viewCli.refresh();
+    check('visuals/client: ...turning it on asks for what is ready', await until(() => delivered.length === 1));
+    show = false;
+    viewCli.refresh();
+    check('visuals/client: ...and turning it off again takes the picture back (an outline once more)', unregistered.includes(ID) && viewCli.stateForTest().delivered.length === 0);
+    ownerCli.reset();
+    viewCli.reset();
+    room.stop();
+  }
+
+  // ---- BIOBUZZ: the mesh, only for a viewer who wants it --------------------------------------------------------
+  {
+    reset();
+    const room = new Room('smoke-visc-3', () => {}, { kind: 'versus' });
+    let mesh = false;
+    const ownerCli = mkClient({ own: own(png, glb) });
+    const viewCli = mkClient({ meshWanted: () => mesh });
+    ownerCli.setGame('biobuzz');
+    viewCli.setGame('biobuzz');
+    join(room, 'a', impSpec(ID), ownerCli);
+    ownerCli.setOffered(true);
+    const viewTx = join(room, 'b', DEFAULT_SPEC, viewCli, 'blue');
+    check('visuals/client: a BIOBUZZ owner uploads the picture and then the mesh', await until(() => ownerCli.stateForTest().mine.length === 2, 6000), JSON.stringify(ownerCli.stateForTest().mine));
+    await until(() => delivered.length === 1);
+    await sleepMs(100);
+    check('visuals/client: ⚠️ a viewer who is not in the 3D view asks for the picture and NOT the mesh (the mesh is only sent to a viewer who asks)',
+      viewTx.sent.filter((m) => m.t === 'visualGet').every((m) => m.kind === 'top') && delivered.every((d) => !d.assets.mesh));
+    mesh = true;
+    viewCli.refresh();
+    check('visuals/client: ...switching to the 3D view asks for it, and gets it identical', await until(() => delivered.some((d) => d.assets.mesh), 6000) && same(await bytesOf(delivered.find((d) => d.assets.mesh)?.assets.mesh), glb));
+    ownerCli.reset();
+    viewCli.reset();
+    room.stop();
+  }
+
+  // ---- an owner that has nothing to send, or whose robot changed ----------------------------------------------------
+  {
+    reset();
+    const room = new Room('smoke-visc-4', () => {}, { kind: 'versus' });
+    const gone = mkClient({ own: own(null, null) });
+    const goneTx = join(room, 'a', impSpec(ID), gone);
+    gone.setOffered(true);
+    await sleepMs(150);
+    check('visuals/client: a robot whose files are not on this device (opened on another) uploads nothing, and does not retry', goneTx.count('visualPut') === 0 && !gone.stateForTest().uploading);
+    gone.reset();
+    room.stop();
+
+    const room2 = new Room('smoke-visc-5', () => {}, { kind: 'versus' });
+    const junk = mkClient({ own: own(new Uint8Array(500).fill(9), null) });
+    const junkTx = join(room2, 'a', impSpec(ID), junk);
+    junk.setOffered(true);
+    await sleepMs(150);
+    check('visuals/client: bytes that are not a PNG are caught on the owner’s side and never sent', junkTx.count('visualPut') === 0);
+    junk.reset();
+    room2.stop();
+
+    // the robot changes mid-upload: the frames stop
+    const room3 = new Room('smoke-visc-6', () => {}, { kind: 'versus' });
+    const big = mkClient({ own: own(null, glb) });
+    big.setGame('biobuzz');
+    const bigTx = join(room3, 'a', impSpec(ID), big);
+    big.setOffered(true);
+    await until(() => bigTx.count('visualPut') >= 3);
+    big.noteRoster('a', [{ clientId: 'a', name: 'a', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(ID2), assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer]);
+    const n = bigTx.count('visualPut');
+    await sleepMs(150);
+    check('visuals/client: an owner who picks another robot mid-upload stops sending the old one’s frames', bigTx.count('visualPut') <= n + 1 && bigTx.count('visualPut') < IV.visualFrames(glb.length), `${n} → ${bigTx.count('visualPut')} of ${IV.visualFrames(glb.length)}`);
+    big.reset();
+    room3.stop();
+  }
+
+  // ---- a refused upload is not retried; a lost frame is, twice at most; a new seat uploads again ------------------------
+  {
+    const tx = new FakeTx();
+    const cli = mkClient({ own: own(png, null) });
+    cli.bind(tx);
+    cli.setOffered(true);
+    cli.onWelcome('me');
+    cli.noteRoster('me', [{ clientId: 'me', name: 'me', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(ID), assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer]);
+    await until(() => tx.count('visualPut') === IV.visualFrames(png.length));
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'budget', message: IV.VISUAL_REFUSAL_COPY.budget });
+    const n = tx.count('visualPut');
+    cli.poke();
+    await sleepMs(120);
+    check('visuals/client: ⚠️ an upload the room refused for budget is not sent again (viewers keep the footprint)', tx.count('visualPut') === n && !cli.stateForTest().uploading);
+    cli.onWelcome('me'); // a new seat on the room's side: it holds none of this
+    check('visuals/client: ...until the seat is a new one (a reconnect), which starts over', await until(() => tx.count('visualPut') === 2 * n));
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'seq', message: '' });
+    check('visuals/client: an interrupted upload (`seq`) is tried again', await until(() => tx.count('visualPut') === 3 * n));
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'seq', message: '' });
+    await until(() => tx.count('visualPut') === 4 * n);
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'seq', message: '' });
+    await sleepMs(120);
+    check('visuals/client: ...but only twice', tx.count('visualPut') === 4 * n);
+    cli.reset();
+  }
+
+  // ---- a viewer does not believe what it is sent ----------------------------------------------------------------------------
+  {
+    reset();
+    const asks = async (cli: IVC.ImportVisualsClient, tx: FakeTx, kind: IV.VisualKind, id = ID): Promise<void> => {
+      cli.noteRoster('me', [{ clientId: 'o', name: 'o', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(id), assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer]);
+      cli.handle({ t: 'visualReady', owner: 'o', id, kind, bytes: 1 });
+      await until(() => tx.sent.some((m) => m.t === 'visualGet' && m.kind === kind));
+    };
+    const feed = (cli: IVC.ImportVisualsClient, kind: IV.VisualKind, bytes: Uint8Array, id = ID, skip = -1): void => {
+      for (let seq = 0; seq < IV.visualFrames(bytes.length); seq++) {
+        if (seq === skip) continue;
+        const sp = IV.visualSpan(bytes.length, seq);
+        cli.handle({ t: 'visualChunk', owner: 'o', id, kind, total: bytes.length, seq, data: IV.bytesToBase64(bytes, sp.start, sp.end) });
+      }
+    };
+    // unsolicited: nothing was asked for
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      cli.noteRoster('me', [{ clientId: 'o', name: 'o', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(ID), assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer]);
+      feed(cli, 'top', png);
+      check('visuals/client: ⚠️ a chunk stream nobody asked for is ignored (a room, or a LAN host, cannot push a picture at a viewer)', delivered.length === 0 && tx.count('visualGet') === 0);
+      cli.reset();
+    }
+    // the roster does not name this robot for that owner
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      await asks(cli, tx, 'top');
+      feed(cli, 'top', png, ID2);
+      check('visuals/client: a stream for a robot id other than the one asked for is ignored', delivered.length === 0);
+      feed(cli, 'top', png);
+      check('visuals/client: ...and the right one is taken', await until(() => delivered.length === 1));
+      cli.reset();
+      reset();
+    }
+    // bytes that are not a picture
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      await asks(cli, tx, 'top');
+      feed(cli, 'top', new Uint8Array(png.length).fill(3));
+      await sleepMs(30);
+      check('visuals/client: ⚠️ bytes that are not a PNG are not handed to the renderers, and are not asked for again', delivered.length === 0 && tx.count('visualGet') === 1 && cli.stateForTest().incoming === 0);
+      cli.reset();
+    }
+    // a mesh with an external reference
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({ meshWanted: () => true });
+      cli.bind(tx);
+      await asks(cli, tx, 'mesh');
+      feed(cli, 'mesh', glbBytes({ tris: 2000, edit: (j) => { j.buffers[0].uri = 'https://example.invalid/x.bin'; } }));
+      await sleepMs(30);
+      check('visuals/client: ⚠️ a mesh that names an external file is not handed to the renderers either', delivered.length === 0 && !BR.hasRelayedAsset(ID, 'mesh'));
+      cli.reset();
+    }
+    // a gap in the stream
+    {
+      const png3 = pngBytes(128, 128, { noise: true, seed: 3 }); // three chunks
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      await asks(cli, tx, 'top');
+      feed(cli, 'top', png3, ID, 1);
+      check('visuals/client: a gap in the sequence drops the download and asks once more', await until(() => tx.count('visualGet') === 2) && delivered.length === 0);
+      feed(cli, 'top', png3, ID, 1);
+      await sleepMs(60);
+      check('visuals/client: ...and not a third time', tx.count('visualGet') === 2 && delivered.length === 0);
+      cli.reset();
+    }
+    // a refusal
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      await asks(cli, tx, 'top');
+      cli.handle({ t: 'visualRefused', op: 'get', owner: 'o', id: ID, kind: 'top', reason: 'busy', message: IV.VISUAL_REFUSAL_COPY.busy });
+      cli.poke();
+      await sleepMs(60);
+      check('visuals/client: a refused request is not repeated (the footprint stays)', tx.count('visualGet') === 1 && cli.stateForTest().incoming === 0);
+      cli.reset();
+    }
+    // the same robot id from a second owner is not requested twice
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      cli.noteRoster('me', [
+        { clientId: 'o', name: 'o', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(ID), assists: { ...DEFAULT_ASSISTS } },
+        { clientId: 'p', name: 'p', alliance: 'blue', startIndex: 0, ready: true, spec: impSpec(ID), assists: { ...DEFAULT_ASSISTS } },
+      ] as PROTO.LobbyPlayer[]);
+      cli.handle({ t: 'visualReady', owner: 'o', id: ID, kind: 'top', bytes: 1 });
+      cli.handle({ t: 'visualReady', owner: 'p', id: ID, kind: 'top', bytes: 1 });
+      await until(() => tx.count('visualGet') >= 1);
+      feed(cli, 'top', png);
+      await until(() => delivered.length === 1);
+      cli.poke();
+      await sleepMs(60);
+      check('visuals/client: two seats holding one robot id share the picture that arrived first (the second is not fetched to overwrite it)', delivered.length === 1 && tx.sent.filter((m) => m.t === 'visualGet' && m.owner === 'p').length <= 1);
+      cli.reset();
+    }
+  }
+
+  // ---- the connection ------------------------------------------------------------------------------------------------
+  {
+    reset();
+    const a = new FakeTx();
+    const b = new FakeTx();
+    const cli = mkClient({});
+    cli.bind(a);
+    cli.noteRoster('me', [{ clientId: 'o', name: 'o', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(ID), assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer]);
+    cli.handle({ t: 'visualReady', owner: 'o', id: ID, kind: 'top', bytes: 1 });
+    await until(() => a.count('visualGet') === 1);
+    cli.bind(a); // the lobby hands its transport to the match: the same room
+    check('visuals/client: binding the SAME transport (a lobby → match hand-off) keeps what the session knows', cli.stateForTest().incoming === 1);
+    cli.bind(b); // another connection is another room
+    check('visuals/client: ...and a different transport starts clean', cli.stateForTest().incoming === 0);
+    cli.release(a);
+    check('visuals/client: releasing a transport that is not the bound one does nothing', true);
+    cli.reset();
+    // by default the adapter lends to the renderers' own registry (`src/render/importedAssets.ts`)
+    reset();
+    const IA = await import('../src/render/importedAssets');
+    BR.setRelayedAssetSink(null);
+    IA.resetImportedAssetsForTests();
+    BR.registerRelayedAsset(ID, 'top', png);
+    check('visuals/client: ⚠️ by default a relayed asset is lent to the renderers’ registry (`registerImportedAssets`), where it wins over the device library', IA.importedAssetCacheSizes().registered === 1 && BR.hasRelayedAsset(ID, 'top'));
+    BR.registerRelayedAsset(ID, 'mesh', glb);
+    const lent = await IA.importedMeshBlob(ID);
+    check('visuals/client: ...a relayed mesh is what the 3D scene is handed for that id, byte for byte', !!lent && lent.type === 'model/gltf-binary' && same(new Uint8Array(await lent.arrayBuffer()), glb));
+    BR.unregisterRelayedAssets([ID]);
+    check('visuals/client: ...and `unregisterImportedAssets` takes it back when the room is left', IA.importedAssetCacheSizes().registered === 0 && !BR.hasRelayedAsset(ID, 'top') && BR.relayedAssetIds().length === 0);
+    IA.resetImportedAssetsForTests();
+    BR.setRelayedAssetSink(null);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SOURCE PINS for what a socket or a worker has to do, which no headless Room can show
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const rd = (f: string): string => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  const room = rd(joinPath('server', 'room.ts'));
+  const idx = rd(joinPath('server', 'index.ts'));
+  const rw = rd(joinPath('server', 'roomWorker.ts'));
+  const rh = rd(joinPath('server', 'roomHost.ts'));
+  check('visuals/pins: the room answers the relay’s two messages BEFORE it looks the sender up, so a watcher (who is not a seat) can ask',
+    /onMessage\(id: string, msg: ClientMsg\): void \{[\s\S]{0,400}msg\.t === 'visualPut' \|\| msg\.t === 'visualGet'[\s\S]{0,200}const c = this\.clients\.get\(id\);/.test(room));
+  check('visuals/pins: every place the room drops a seat frees its assets, and the room closing disposes the relay',
+    (room.match(/this\.visuals\.freeOwner\(/g) ?? []).length === 4 && /this\.visuals\.dispose\(\);\s*this\.onEmpty\(\);/.test(room) && !/[^.]this\.onEmpty\(\)/.test(room.replace(/this\.visuals\.dispose\(\);\s*this\.onEmpty\(\);/, '')));
+  check('visuals/pins: a joiner, a watcher and a reclaimed seat are greeted; a seat’s robot change re-checks its assets',
+    (room.match(/this\.visuals\.greet\(/g) ?? []).length === 3 && /this\.visuals\.specChanged\(c\.id\)/.test(room) && /this\.visuals\.reconcile\(\)/.test(room));
+  check('visuals/pins: ⚠️ the socket thread does not compress a `visualChunk` (base64 of a PNG or GLB: no gain, a zlib pass, and it would foul the snapshots’ shared deflate window)',
+    /compress: s\.length >= COMPRESS_THRESHOLD && !s\.startsWith\('\{"t":"visualChunk"'\)/.test(idx));
+  check('visuals/pins: a worker room does not hash or mirror a `visualChunk` (unique per viewer, no state change)', /s\.startsWith\('\{"t":"snapshot"'\) \|\| s\.startsWith\('\{"t":"visualChunk"'\)/.test(rw));
+  check('visuals/pins: the process budget is shared across threads — the pool makes the buffer, hands each worker a slot, zeroes a dead one’s',
+    /makeSharedVisualBudget\(\)/.test(rh) && /workerData: \{ visualBudget: this\.visualBudget, visualSlot: slot\.index \+ 1 \}/.test(rh) && /resetVisualSlot\(this\.visualBudget, slot\.index \+ 1\)/.test(rh) && /configureVisualBudget\(wd\?\.visualBudget/.test(rw));
+  const hw = rd(joinPath('src', 'lan', 'hostWorker.ts'));
+  check('visuals/pins: ⚠️ on a LAN tab host a `visualChunk` takes the RELIABLE lane (only snapshot and pong are the lossy hot path), so a chunk is never silently dropped by `maxRetransmits: 0`',
+    /const HOT = \/\^\\\{"t":"\(snapshot\|pong\)"\//.test(hw) && !/visual/.test(hw.slice(hw.indexOf('const HOT'), hw.indexOf('const isHot'))));
+  const bundled = [rd(joinPath('server', 'importVisuals.ts')), rd(joinPath('src', 'net', 'importVisuals.ts'))];
+  check('visuals/pins: the relay and its shared rules import nothing from `node:` (the LAN tab host bundles them for a browser)', bundled.every((s) => !/from 'node:/.test(s) && !/require\(/.test(s)));
+  const cl = rd(joinPath('src', 'net', 'importVisualsClient.ts'));
+  check('visuals/pins: the client reaches the importer engine only through its loader, and imports no three.js', /loadImporterEngine/.test(cl) && !/from 'three/.test(cl) && !/import\(['"]\.\.\/robotImport\/engine/.test(cl));
+  const lc = rd(joinPath('src', 'net', 'lobbyClient.ts'));
+  const ss = rd(joinPath('src', 'net', 'serverSession.ts'));
+  check('visuals/pins: the lobby and the match session both bind the transport and forward the relay’s three server frames',
+    /importVisuals\.bind\(transport\)/.test(lc) && /importVisuals\.bind\(transport\)/.test(ss)
+    && /m\.t === 'visualReady' \|\| m\.t === 'visualChunk' \|\| m\.t === 'visualRefused'/.test(lc) && /m\.t === 'visualReady' \|\| m\.t === 'visualChunk' \|\| m\.t === 'visualRefused'/.test(ss)
+    && /importVisuals\.noteRoster\(/.test(lc) && /importVisuals\.noteRoster\(/.test(ss) && /importVisuals\.release\(this\.transport\)/.test(lc) && /importVisuals\.release\(this\.transport\)/.test(ss));
+  check('visuals/pins: the lobby offers an upload only once the server says it relays (`roomTakesImportVisuals`), after the client exists',
+    /roomTakesImportVisuals\(\)\.then\(\(ok\) => importVisuals\.setOffered\(ok\)\)/.test(rd(joinPath('src', 'ui', 'Lobby.tsx'))));
+  const api = rd(joinPath('src', 'net', 'api.ts'));
+  check('visuals/pins: the capability check follows the server THIS room is on (a tab host: yes; a LAN address: its own presence; else the cloud)',
+    /export function roomTakesImportVisuals\(\)[\s\S]{0,200}tabHosting\(\)[\s\S]{0,200}IMPORT_VISUALS_CAP/.test(api));
+  const netSec = rd(joinPath('src', 'ui', 'NetworkSection.tsx'));
+  check('visuals/pins: the viewer opt-out is a row in Network (per device, and shown for EVERY game: Graphics is hidden for a game with no 3D view) with the agreed label',
+    /label="Show other players’ imported robots"/.test(netSec) && /setShowOthersImported/.test(netSec) && !/ShowOthersImported/.test(rd(joinPath('src', 'ui', 'GraphicsSection.tsx'))));
+  const keys = rd(joinPath('src', 'storageKeys.ts'));
+  check('visuals/pins: the preference’s storage key is registered with the privacy table, and the library entry says what a room receives',
+    /export const IMPORT_VISUALS_KEY = 'decodesim\.importVisuals'/.test(keys) && /key: IMPORT_VISUALS_KEY,/.test(keys) && /sent to the other people in that room, kept in memory only/.test(keys));
+  const lib = rd(joinPath('src', 'robotImport', 'library.ts'));
+  check('visuals/pins: the lighter mesh is cached on the library record, dropped when the robot is re-saved, and removed with it',
+    /files\.delete\(fileKey\(robot\.id, LITE\)\)/.test(lib) && /for \(const k of \[\.\.\.KINDS, LITE\]\) files\.delete/.test(lib) && /export function meshLiteFor/.test(lib) && /export function putMeshLite/.test(lib));
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE LIGHTER MESH (`liteMesh`, `src/robotImport/engine/lite.ts`) against REAL exporter output
+// ════════════════════════════════════════════════════════════════════════════
+{
+  // three.js and the engine are imported HERE, inside the block, so only this block's shard pays
+  // for them. three's exporter reads a Blob back through FileReader, which Node does not have.
+  const THREE = await import('three');
+  const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+  const { exportGlbStored } = await import('../src/robotImport/engine/bake');
+  const { liteMesh } = await import('../src/robotImport/engine/lite');
+  const { creaseParts } = await import('../src/robotImport/engine/meshGroup');
+  const { triangleCount } = await import('../src/robotImport/geometry');
+  const g = globalThis as unknown as { FileReader?: unknown };
+  const hadReader = !!g.FileReader;
+  if (!hadReader) {
+    g.FileReader = class {
+      result: unknown = null;
+      onloadend: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      readAsArrayBuffer(blob: Blob): void {
+        void blob.arrayBuffer().then((b) => {
+          this.result = b;
+          this.onloadend?.();
+          this.onload?.();
+        });
+      }
+      readAsDataURL(blob: Blob): void {
+        void blob.arrayBuffer().then((b) => {
+          this.result = `data:application/octet-stream;base64,${Buffer.from(b).toString('base64')}`;
+          this.onloadend?.();
+          this.onload?.();
+        });
+      }
+    };
+  }
+  try {
+    const partOf = (geo: import('three').BufferGeometry, color: [number, number, number], name: string) => {
+      const pos = geo.getAttribute('position');
+      return {
+        positions: new Float32Array(pos.array as Float32Array),
+        indices: geo.index ? Uint32Array.from(geo.index.array as ArrayLike<number>) : Uint32Array.from({ length: pos.count }, (_, i) => i),
+        color,
+        name,
+      };
+    };
+    const body = new THREE.SphereGeometry(0.19, 260, 200);
+    const box = new THREE.BoxGeometry(0.2, 0.1, 0.3, 55, 55, 55);
+    box.translate(0.05, 0.1, 0);
+    const parts = [partOf(body, [0.8, 0.1, 0.1], 'body'), partOf(box, [0.1, 0.2, 0.7], 'box')];
+    const glb = await exportGlbStored(creaseParts(parts));
+    check('visuals/lite: the stored mesh of a dense robot (140k triangles) is over the relay’s 1 MiB', triangleCount(parts) > 100_000 && glb.byteLength > IV.VISUAL_MAX_BYTES.mesh, `${glb.byteLength} B`);
+    check('visuals/lite: ⚠️ REAL GLTFExporter output passes the structural validator (size lifted), so the relay accepts what the importer writes', IV.validateMeshGlb(new Uint8Array(glb), 64 * 1024 * 1024) === null);
+    check('visuals/lite: ...and at the real cap the full mesh is refused, which is why a lighter one is made', IV.validateMeshGlb(new Uint8Array(glb)) === 'too large');
+    const lite = await liteMesh(glb, IV.VISUAL_MAX_BYTES.mesh);
+    check('visuals/lite: the lighter mesh fits the cap and passes the validator', !!lite && lite.byteLength <= IV.VISUAL_MAX_BYTES.mesh && IV.validateMeshGlb(new Uint8Array(lite)) === null, String(lite?.byteLength));
+    if (lite) {
+      const l = await new GLTFLoader().parseAsync(lite, '');
+      const o = await new GLTFLoader().parseAsync(glb, '');
+      const bl = new THREE.Box3().setFromObject(l.scene);
+      const bo = new THREE.Box3().setFromObject(o.scene);
+      check('visuals/lite: ⚠️ it stays in the stored mesh frame — the bounding box is the original’s to a tenth of a millimetre', bl.min.distanceTo(bo.min) < 1e-4 && bl.max.distanceTo(bo.max) < 1e-4, `${bl.min.distanceTo(bo.min)}`);
+      const colours = new Set<string>();
+      l.scene.traverse((n) => {
+        const m = (n as import('three').Mesh).material as import('three').MeshStandardMaterial | undefined;
+        if (m?.color) colours.add(m.color.getHexString());
+      });
+      check('visuals/lite: the colours are kept (one material per source colour)', colours.size === 2);
+      let tris = 0;
+      l.scene.traverse((n) => {
+        const m = n as import('three').Mesh;
+        if (m.isMesh) tris += (m.geometry.index?.count ?? m.geometry.getAttribute('position').count) / 3;
+      });
+      check('visuals/lite: it is a simplification, not a truncation (fewer triangles, still a shape)', tris > 2000 && tris < triangleCount(parts), String(tris));
+    }
+    check('visuals/lite: a target no mesh can meet answers null, and the relay then sends the picture alone', (await liteMesh(glb, 2000)) === null);
+  } finally {
+    if (!hadReader) delete g.FileReader;
   }
 }
 

@@ -200,6 +200,10 @@ export interface LibraryRobot {
   top: Blob;
   /** 3/4 view PNG for cards, `THUMB_PX` */
   thumb: Blob;
+  /** a lighter GLB (same frame) for a room's visuals relay, made once by the engine's `liteMesh` when
+   *  `mesh` is over the relay's 1 MiB cap; absent when `mesh` already fits or has not been needed. A
+   *  re-save of the robot drops it, because the mesh it was cut from may have changed. */
+  meshLite?: Blob;
   source: LibrarySource;
   setup: ImportSetup;
   created: number;
@@ -207,4 +211,4 @@ export interface LibraryRobot {
 }
 
 /** a library row without its blobs, for lists */
-export type LibraryEntry = Omit<LibraryRobot, 'mesh' | 'top' | 'thumb'>;
+export type LibraryEntry = Omit<LibraryRobot, 'mesh' | 'top' | 'thumb' | 'meshLite'>;
