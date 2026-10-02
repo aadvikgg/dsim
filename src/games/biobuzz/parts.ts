@@ -22,6 +22,7 @@
 import type { RobotSpec, RobotState } from '../../types';
 import * as C from '../../config';
 import { roundRect, strokeInside, tintColor } from '../../render/drawRobot';
+import { wheelLocals } from '../../sim/robot';
 import { bbShooterEdgeOf, edgeGeom, turretLocal, turretRadius, type BbMountPos } from './mounts';
 import { bbIsTurreted, bbLauncherOf, bbLiftOf } from './mechs';
 import {
@@ -116,16 +117,8 @@ export function drawChassisBody(
  * at ±45° (an X), and butterfly shows the set that is currently on the floor.
  */
 export function drawWheels(ctx: CanvasRenderingContext2D, r: RobotState, color: string, accent: string): void {
-  const hl = r.spec.length / 2;
-  const hw = r.spec.width / 2;
-  const wx = Math.max(hl - C.WHEEL_INSET, 1);
-  const wy = Math.max(hw - C.WHEEL_INSET, 1);
-  const corners = [
-    [wx, wy],
-    [wx, -wy],
-    [-wx, wy],
-    [-wx, -wy],
-  ] as const;
+  // [FL, FR, BL, BR] — `wheelLocals`, the list the sim steers `moduleAngles` against
+  const corners = wheelLocals(r.spec).map((w) => [w.x, w.y] as const);
   /**
    * ONE WHEEL, drawn as the wheel it actually is. `kind` picks the tread, which is the only
    * thing that distinguishes these from above and is exactly what the drivetrain choice buys:

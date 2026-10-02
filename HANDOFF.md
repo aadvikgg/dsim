@@ -1,7 +1,8 @@
-# HANDOFF — 2026-10-02a (robot import: all lanes merged on `feat/robot-import`; integration fixes open)
+# HANDOFF — 2026-10-02b (robot import: all lanes merged on `feat/robot-import`; integration fixes open)
 
 **State: on `feat/robot-import` only (semi-permanent branch off `alpha`, owner request). Not on `alpha` or `main`, nothing deployed.** At this commit: `npm test` (shared 3611, BIOBUZZ 5426), `build`, `server:check`, `test:workers` 149, `test:mm` 222, `bundleaudit` (baselines raised with reasons), `uiaudit`, `docaudit`, `contrast` pass. Server code changed, so merging to alpha needs an alpha redeploy.
 
+- **Alpha merged in** (swerve pod order, `SIM_VERSION` 5): `wheelLocals` returns an import's wheels in `WHEEL_CORNERS` order as they are (the old FL, FR, BR, BL conversion is gone, so imported swerves read their own pods), and `wheelContacts` walks them by `WHEEL_PERIMETER`.
 - **Built:** import from GLB/glTF/STEP/STL/OBJ/3MF/PLY (workers, no main-thread task over 50 ms up to 3.85 M triangles), auto units/up/front/wheels, FTC motor/gear/wheel drivetrain readout, mechanisms placed on the CAD, plain-language checks, test drive, library (rename/duplicate/delete/export `.glb` share file), hull collision and hull-aware fouls/starts, mechanisms on the hull in all three games, 2D/3D rendering, custom/LAN-room visuals relay, ranked/record/upload refusal on the server. Guide: `docs/area/robot-import.md`; contract: `docs/robot-import-plan.md`.
 - **OPEN, from the integration review** (`scratchpad` probes not committed; repro steps here):
   1. HIGH: BIOBUZZ G402 `bbIntrusion` (`src/games/biobuzz/penalties.ts:956`) measures depth with a box centred on the origin; an off-centre hull fully on its own half gets billed (and a long side can cross 3 in unseen). Fix: for an import, depth = max over `chassisCorners(r)` along the line normal.
@@ -14,7 +15,40 @@
 - **Owner decisions:** imports simulate the starting configuration only (deploying intakes/lifts beyond the CAD are not modelled, except the BIOBUZZ ramp); the pre-existing swerve pod-order bug in the traction loop (fixing changes standard step output, so `SIM_VERSION`); whether imports ever reach ranked (no today).
 - **Not tested:** a real FTC robot CAD file (synthetic fixtures and generated stress models only).
 
-# HANDOFF — 2026-10-01a (robot import, branch `feat/robot-import`, IN PROGRESS)
+# HANDOFF — 2026-10-02a (swerve pod order, SIM_VERSION 5)
+
+**State: pushed on `alpha` (92d87739).** `npm test` (shared 2877, BIOBUZZ 5399), `build`, `server:check`, `docaudit`, `bundleaudit` pass. **Server change** (`step()` output): needs `./scripts/fly-deploy.sh --alpha`. Not deployed. Not on `main`.
+
+- **Bug:** the traction loop in `updateRobot` read `moduleAngles[i]` (FL, FR, BL, BR) against `wheelLocals[i]` (FL, FR, BR, BL), so a swerve's two rear wheels resisted contact slip along each other's pod axes. The IK/FK, the three canvas `drawWheels` and BIOBUZZ 3D's pods already used FL, FR, BL, BR. No existing check caught it.
+- **Fix:** one order, `WHEEL_CORNERS` in `config.ts`. `wheelLocals`, the IK/FK, the traction loop, the canvas sprites and `buildWheels` derive from it. `wheelContacts` stays a perimeter walk (`WHEEL_PERIMETER`, same points; Chain's `beamRide` indexes it by pairs). The traction loop sums in perimeter order so non-swerve robots step bit-identically.
+- **Measured** (`scratch/swerve-measure.ts`, not committed; 11 scenarios × 5 drivetrains × DECODE / Chain / BIOBUZZ 2D / 3D, plus brawls): every non-swerve run and all of BIOBUZZ 3D digest-identical (3D never runs the traction loop). Swerve free-space drift and wobble unchanged in DECODE and BB2D (Chain strafing, where Chain's own terrain model leaves slip on the books, ends at −2.3° of yaw instead of −1.8). Spinning off a wall: clears it in 2.05 s, was 1.6 (DECODE; Chain 2.07/1.55, BB2D 1.90/1.47). X-locked swerve shoved off-centre from the side: yaw 7.9°, was 13.1. Spinning under a side push: shoved 3.1 in, was 5.1. Pushing a robot or ramming a wall: under 0.05 in and 0.05° of change.
+- **SIM_VERSION 4 → 5:** replays stamped 4 play as DRIFT. `SIM_PATCH` unchanged (monotonic).
+- **Checks:** shared smoke "pod order: …" (where each pod's angle acts, read back out of the traction force; a spin slides no tangent pod; each sprite draws pod i at wheel i); RENDER lane "pod i is BUILT at WHEEL_CORNERS[i]". With the bug put back, the traction and sprite checks fail and nothing else does.
+- **For `feat/robot-import`:** its `wheelLocals` converts `importedWheels` (FL, FR, BL, BR) to FL, FR, BR, BL. After merging this, return the import's wheels as-is; the conversion would bring the bug back for imported swerves.
+
+# HANDOFF — 2026-10-01b (Zenith host: `newAuto` and `hostBuild` in `open`)
+
+**State: branch `feat/zenith-host-newauto-hostbuild`, built on `fix/zenith-host-library-safety` (merge that first), for a PR into `alpha`.** Client only, no server deploy. Not on `main`.
+
+- **What:** the two optional `open` fields of Zenith's host protocol. New in Zenith sends the library (left-out autos excepted) with `newAuto: true`, so Zenith names the new auto clear of them and starts it at the merged file's `start`; every `open` carries `hostBuild`.
+- **`HOST_BUILD` = 1** in `src/ui/zenithOpen.ts` (DOM-free, with `PROTOCOL`, the project types and `openMessage`). Raise it by one with any change to what `open` carries. Zenith's DSIM row sets `minBuild: 1` (Zenith PR #55), so Zenith requires DSIM build 1 and asks the user to reload an older DSIM page before editing.
+- **Naming:** Zenith's `new-auto-2` is stored as `new-auto-2` (no second rename); a left-out auto's name Zenith could not see is renamed once (`freeAutoName` counts on from the root, so never `new-auto-2-2`).
+- **Checks:** AUTO lane "AUTO host open …" and the naming saves.
+- **Not done:** a real-browser run against a local Zenith.
+
+# HANDOFF — 2026-10-01a (Zenith host: reloads, name clashes, a full library, merged waypoints)
+
+**State: branch `fix/zenith-host-library-safety`, for a PR into `alpha`.** `build`, `server:check`, `bundleaudit`, `docaudit`, `uiaudit` and the AUTO lane pass; see the PR for the full `npm test` run against the baseline (BIOBUZZ `fieldDims.gen.ts is exactly what emit-dims.mjs renders` and the machine-dependent `step3d`/reconcile timing checks fail on this machine on any tree). Client only, no server deploy. Not on `main`.
+
+- **Owner:** fix the DSIM-side bugs from Zenith's pre-release UX sweep (DSIM-1, DSIM-2, DSIM-3, DSIM-5, DSIM-13), PRs into `alpha` only. On DSIM-5 the owner ruled **option A**: DSIM merges its library's waypoints into the one file it sends, no protocol change.
+- **DSIM-1** (`zenithHost.ts`): `project` is a function, called at every `ready`. `zenithLaunch.ts` rebuilds from `loadAutoLibrary` and reopens the auto the session saved last.
+- **DSIM-2** (`hostLibrary.ts` `planHostSave`): the session owns the names it sent or saved; a save under any other existing name goes to `freeAutoName` (`new-auto-2`, …) and `alias` keeps Zenith's name on it. Zenith's own bar still says it saved `new-auto`; DSIM's notice names the real entry.
+- **DSIM-3:** a new name into a full library is refused (`saved` `ok:false`, `LIBRARY_FULL_SAVE`); `upsertAuto` itself still caps, for the other callers.
+- **DSIM-5** (`hostLibraryView`): the opened auto's file is the base, the others fill in names, newest first. **An auto with a name at a different pose is left out of `autos`** (it used to be shown with the other auto's pose, and Simulate in DSIM ran it against its own, so the plan edited was not the one played); `onLeftOut` puts one sentence in the Autonomous panel (the match log for Open run in Zenith). Edit in Zenith on that auto makes it the base. Saves store the auto's own file unchanged plus only the names its text uses that the own file lacks (`waypointsForSave`), so a pose never moves; before, a new auto saved from an Edit session got the opened auto's whole file and lost any name it used from another auto.
+- **DSIM-13** (`AutonomousSetup.tsx`): at 12 autos Import and New in Zenith stay, disabled, saying the library is full, with `LIBRARY_FULL` under them.
+- **Checks:** AUTO lane "AUTO host …" (no clash, same pose, a clash left out + its sentence, the base switch, five save cases, the stored pair loads).
+- **Not done:** a real-browser run against a local Zenith; DSIM-4, DSIM-6 to DSIM-12. The `open` flags `newAuto`/`hostBuild` are a separate PR.
+# HANDOFF — 2026-10-01c (robot import, branch `feat/robot-import`, IN PROGRESS)
 
 **State: on `feat/robot-import` only (semi-permanent feature branch off `alpha`, owner request). Not on `alpha` or `main`.** At `485ff5df`: `npm test` (shared 3145, BIOBUZZ 5384), `build`, `server:check`, `bundleaudit`, `docaudit`, `uiaudit` pass. Server code changed (lane 5), so nothing ships until the branch is merged and alpha is redeployed.
 

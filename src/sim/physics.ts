@@ -105,27 +105,26 @@ export function robotCorners(r: RobotState): Vec2[] {
 
 /** the four wheel ground-contact points (wheel centers), inset INSIDE the
  * chassis — no intake or turret overhang. Base parking counts ONLY these:
- * what touches the floor is what's "in" the zone. */
+ * what touches the floor is what's "in" the zone.
+ *
+ * ⚠️ PERIMETER order (`WHEEL_PERIMETER`: FL, FR, BR, BL), not the `WHEEL_CORNERS` order a pod
+ * index means — Chain's `beamRide` reads it as front/rear/left/right pairs. Never pair
+ * `wheelContacts(r)[i]` with `moduleAngles[i]`; `wheelLocals` is the per-wheel list. */
 export function wheelContacts(r: RobotState): Vec2[] {
   if (r.spec.imported) {
-    // the import's own wheels (or its hull-derived default), re-ordered from the descriptor's
-    // FL, FR, BL, BR to this function's FL, FR, BR, BL — Chain Reaction's beams index it
+    // the import's own wheels (or its hull-derived default), walked in the same perimeter order
     const w = importedWheels(r.spec.imported);
-    return [w[0], w[1], w[3], w[2]].map((p) => {
+    return C.WHEEL_PERIMETER.map((i) => {
+      const p = w[i];
       const q = rot(p, r.heading);
       return { x: q.x + r.pos.x, y: q.y + r.pos.y };
     });
   }
   const ix = Math.max(r.spec.length / 2 - C.WHEEL_INSET, 1);
   const iy = Math.max(r.spec.width / 2 - C.WHEEL_INSET, 1);
-  const local = [
-    { x: ix, y: iy },
-    { x: ix, y: -iy },
-    { x: -ix, y: -iy },
-    { x: -ix, y: iy },
-  ];
-  return local.map((p) => {
-    const w = rot(p, r.heading);
+  return C.WHEEL_PERIMETER.map((i) => {
+    const [sx, sy] = C.WHEEL_CORNERS[i];
+    const w = rot({ x: sx * ix, y: sy * iy }, r.heading);
     return { x: w.x + r.pos.x, y: w.y + r.pos.y };
   });
 }

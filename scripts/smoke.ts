@@ -41,7 +41,9 @@ import { Keyboard } from '../src/input/keyboard';
 import { createTokenCache, readAccountSettings, sendWithTokenRetry } from '../src/net/authFetch';
 import { startPollLoop } from '../src/ui/pollLoop';
 import { updatePenalties } from '../src/sim/penalties';
-import { aimSolution, robotInLaunchZone } from '../src/sim/robot';
+import { aimSolution, robotInLaunchZone, updateRobot, wheelLocals } from '../src/sim/robot';
+import { drawWheels as drawWheelsDecode } from '../src/render/drawRobot';
+import { drawWheels as drawWheelsBiobuzz } from '../src/games/biobuzz/parts';
 import { updateHumanPlayers } from '../src/sim/humanPlayer';
 import { startMatch } from '../src/sim/match';
 import { availableVideoFormats, videoFormat, videoBitrate } from '../src/ui/replayVideo';
@@ -179,6 +181,8 @@ import {
   ENDGAME_START,
   PRE_COUNTDOWN,
   COLORS,
+  WHEEL_CORNERS,
+  WHEEL_PERIMETER,
 } from '../src/config';
 import {
   CHASSIS_COLOR_KEYS, ACCENT_KEYS, DECAL_KEYS, PLATE_KEYS, COSMETIC_DEFAULTS,
@@ -7590,6 +7594,137 @@ function ramOffCentreSamples(
   const fwd = r2.vel.x * Math.cos(r2.heading) + r2.vel.y * Math.sin(r2.heading);
   check('swerve pod-flips a 180° reversal (pods stay, no big rotation)', r2.moduleAngles.every((a) => Math.abs(a) < 0.35), `${r2.moduleAngles.map((a) => a.toFixed(2)).join(',')}`);
   check('swerve reversal drives BACKWARD via flipped motors', fwd < -5, `${fwd.toFixed(1)} in/s fwd`);
+}
+
+// ---- SWERVE POD ORDER: pod i acts, and is drawn, at wheel i (SIM_VERSION 5) --------------------
+// `moduleAngles` is [FL, FR, BL, BR] (`WHEEL_CORNERS`). The traction loop used to read it against
+// `wheelLocals` in perimeter order (FL, FR, BR, BL), so a swerve's two REAR wheels resisted contact
+// slip along each other's pod axes: invisible driving straight, a different machine in a shove or
+// spinning against a wall. These read the traction force back out of `updateRobot` to find WHERE
+// each pod's angle acts, and run every canvas sprite to find where each pod is drawn.
+{
+  const SPEC: Partial<RobotSpec> = { drivetrain: 'swerve', length: 16, width: 17 };
+  const probe = createWorld('free', 3, [setup(0, 'blue', SPEC, 0)]).robots[0];
+  const wl = wheelLocals(probe.spec);
+  const NAMES = ['FL', 'FR', 'BL', 'BR'];
+  check(
+    'pod order: wheelLocals is WHEEL_CORNERS — FL, FR, BL, BR (+x forward, +y left)',
+    JSON.stringify(WHEEL_CORNERS) === JSON.stringify([[1, 1], [1, -1], [-1, 1], [-1, -1]]) &&
+      wl.length === 4 &&
+      wl.every((p, i) => Math.sign(p.x) === WHEEL_CORNERS[i][0] && Math.sign(p.y) === WHEEL_CORNERS[i][1]),
+    JSON.stringify(wl),
+  );
+  {
+    const r = createWorld('free', 3, [setup(0, 'blue', SPEC, 0)]).robots[0];
+    r.pos = { x: 10, y: -20 };
+    r.heading = 0.7;
+    const wc = wheelContacts(r);
+    const c = Math.cos(0.7);
+    const s = Math.sin(0.7);
+    check(
+      'pod order: wheelContacts walks the SAME wheels round the perimeter (WHEEL_PERIMETER = FL, FR, BR, BL)',
+      JSON.stringify(WHEEL_PERIMETER) === '[0,1,3,2]' &&
+        wc.length === 4 &&
+        wc.every((p, k) => {
+          const q = wl[WHEEL_PERIMETER[k]];
+          return Math.abs(p.x - (10 + q.x * c - q.y * s)) < 1e-9 && Math.abs(p.y - (-20 + q.x * s + q.y * c)) < 1e-9;
+        }),
+    );
+  }
+  /** the wrench a contact's slip adds in `updateRobot`, isolated: the same state run once with
+   * the slip on the books and once without, so the motor and cornering terms cancel */
+  const tractionOf = (
+    pods: number[],
+    st: { vx?: number; vy?: number; w?: number; slipX?: number; slipY?: number; slipW?: number },
+  ): { fx: number; fy: number; tau: number } => {
+    const once = (slip: boolean) => {
+      const w = createWorld('free', 3, [setup(0, 'blue', SPEC, 0)]);
+      const r = w.robots[0];
+      r.fieldCentric = false;
+      r.pos = { x: 0, y: 0 };
+      r.heading = 0;
+      r.vel = { x: st.vx ?? 0, y: st.vy ?? 0 };
+      r.angVel = st.w ?? 0;
+      r.moduleAngles = pods.slice();
+      r.moduleTargets = pods.slice();
+      r.slipX = slip ? (st.slipX ?? 0) : 0;
+      r.slipY = slip ? (st.slipY ?? 0) : 0;
+      r.slipW = slip ? (st.slipW ?? 0) : 0;
+      return updateRobot(w, r, cmd({}), SIM_DT);
+    };
+    const a = once(true);
+    const b = once(false);
+    return { fx: a.fx - b.fx, fy: a.fy - b.fy, tau: a.tau - b.tau };
+  };
+  // (1) A PURE SPIN SLIDES NO POD SIDEWAYS when every pod is tangent at its OWN corner (the
+  // pattern the IK steers a rotation to), so a contact that spins the chassis meets no lateral
+  // grip. Read at each other's corners, the two rear pods are radial and grip hard. Pods all
+  // forward are the yardstick for "hard".
+  const tangent = wl.map((p) => {
+    const a = Math.atan2(p.x, -p.y); // under +ω the wheel at (x, y) rolls along (−y, x)
+    return Math.abs(a) > Math.PI / 2 ? Math.atan2(-Math.sin(a), -Math.cos(a)) : a;
+  });
+  const spinTan = tractionOf(tangent, { w: 2, slipW: 0.5 });
+  const spinFwd = tractionOf([0, 0, 0, 0], { w: 2, slipW: 0.5 });
+  check(
+    'pod order: a spin slides no TANGENT pod sideways (each pod read at its own corner)',
+    Math.abs(spinFwd.tau) > 1 &&
+      Math.abs(spinTan.tau) < 1e-9 * Math.abs(spinFwd.tau) &&
+      Math.hypot(spinTan.fx, spinTan.fy) < 1e-9 * Math.abs(spinFwd.tau),
+    `traction torque: tangent pods ${spinTan.tau.toExponential(2)}, forward pods ${spinFwd.tau.toFixed(1)}`,
+  );
+  // (2) WHERE POD k ACTS. Turn pod k across its roll axis from the other three: dragged
+  // sideways, it is the one wheel that gives no grip, so the force and torque left over name its
+  // x; dragged fore-aft with the pattern inverted, they name its y.
+  const found = [0, 1, 2, 3].map((k) => {
+    const lat = tractionOf([0, 1, 2, 3].map((i) => (i === k ? Math.PI / 2 : 0)), { vy: 0.01, slipY: 2 });
+    const lon = tractionOf([0, 1, 2, 3].map((i) => (i === k ? 0 : Math.PI / 2)), { vx: 0.01, slipX: 2 });
+    return { x: (-3 * lat.tau) / lat.fy, y: (3 * lon.tau) / lon.fx };
+  });
+  check(
+    "pod order: pod k's angle acts at wheelLocals[k], for every k",
+    found.every((p, k) => Math.abs(p.x - wl[k].x) < 0.01 && Math.abs(p.y - wl[k].y) < 0.01),
+    found.map((p, k) => `${NAMES[k]} (${p.x.toFixed(2)},${p.y.toFixed(2)}) want (${wl[k].x},${wl[k].y})`).join(' '),
+  );
+  // (3) THE SPRITES DRAW POD i AT WHEEL i — all three canvas `drawWheels`, against a recording
+  // stub that notes where each `rotate` happens. Each pod gets an angle no other pod has.
+  type DrawWheels = (ctx: CanvasRenderingContext2D, r: RobotState, color: string, accent: string) => void;
+  const podsAt = (draw: DrawWheels): boolean[] => {
+    let tx = 0;
+    let ty = 0;
+    const stack: [number, number][] = [];
+    const rots: { a: number; x: number; y: number }[] = [];
+    const noop: object = new Proxy(() => noop, { get: () => noop });
+    const base: Record<string, unknown> = {
+      save() { stack.push([tx, ty]); },
+      restore() { [tx, ty] = stack.pop() ?? [0, 0]; },
+      translate(x: number, y: number) { tx += x; ty += y; },
+      rotate(a: number) { rots.push({ a, x: tx, y: ty }); },
+    };
+    const ctx = new Proxy(base, {
+      get: (t, k) => (typeof k === 'string' && k in t ? t[k] : noop),
+      set: () => true,
+    }) as unknown as CanvasRenderingContext2D;
+    const angs = [0.11, 0.22, 0.33, 0.44];
+    const r = { spec: { ...probe.spec }, moduleAngles: angs.slice(), butterflyTank: false } as unknown as RobotState;
+    draw(ctx, r, '#ffffff', '#888888');
+    return angs.map((a, k) => {
+      const at = rots.filter((q) => Math.abs(q.a - a) < 1e-12);
+      return at.length > 0 && at.every((q) => Math.abs(q.x - wl[k].x) < 1e-9 && Math.abs(q.y - wl[k].y) < 1e-9);
+    });
+  };
+  for (const [name, draw] of [
+    ['DECODE', drawWheelsDecode],
+    ['Chain Reaction', drawWheels],
+    ['BIOBUZZ', drawWheelsBiobuzz],
+  ] as [string, DrawWheels][]) {
+    const ok = podsAt(draw);
+    check(
+      `pod order: the ${name} sprite draws pod i at wheel i`,
+      ok.every(Boolean),
+      ok.map((v, k) => `${NAMES[k]} ${v ? 'ok' : 'WRONG'}`).join(' '),
+    );
+  }
 }
 
 // ---- tank reads side-drive only (control STYLE resolved at the input layer) --
@@ -29695,13 +29830,15 @@ function impWorld(g: GameId | 'bb3d', patches: Partial<RobotSpec>[], seed = 4242
  * unreachable for a standard robot. If a later, deliberate sim change moves them, re-record them
  * in the same change and say so — never to make an import change pass.
  */
+// Re-pinned 2026-10-02 when alpha's swerve pod-order fix (`SIM_VERSION` 5) merged in: the 2D scenes
+// carry a swerve robot, so their digests moved with it; the bb3d pins (no traction loop in 3D) did not.
 const IMP_STANDARD_PINS: Record<string, string> = {
-  'decode auto': 'rr=2324 1006033633:1372421968 1849460967:3738870646 2634382012:359690952',
-  'decode teleop': 'rr=2360 946394307:2501367006 225761869:605743936 493986716:472312443',
-  'chain auto': 'rr=1433 3899381732:727221967 2184232317:3864926550 897801041:2939605261',
-  'chain teleop': 'rr=1433 1362733034:813588600 2503125743:2162952480 406299361:2823494343',
-  'biobuzz auto': 'rr=968 1984371732:49567932 4205179930:3782745673 1144607943:1933172749',
-  'biobuzz teleop': 'rr=968 3213868192:1380961708 3246259018:1300608822 3349287379:3315032226',
+  'decode auto': 'rr=2293 1318016677:3380270344 122560760:2278617322 910756242:1473121615',
+  'decode teleop': 'rr=2385 2830526011:638886374 1035015855:1468188252 2338123926:3682425943',
+  'chain auto': 'rr=1281 2431124453:1990244503 2262003531:670134973 4134157598:4089625147',
+  'chain teleop': 'rr=1281 2256841879:3095239556 3284001669:73183289 1872871630:404922659',
+  'biobuzz auto': 'rr=991 4255951604:2662367511 660269574:1959277593 4168578138:2355650975',
+  'biobuzz teleop': 'rr=991 1190480768:2589840997 1619190486:802938886 1865481434:3779862946',
   'bb3d auto': 'rr=536 3017453969:3234063733 3359223633:3518342206',
   'bb3d teleop': 'rr=536 1542058217:1431457225 162820593:121201075',
 };
@@ -30381,7 +30518,7 @@ function impPlayCheck(g: GameId): void {
 {
   const narrow = coerceSpec({ ...DEFAULT_SPEC, imported: { ...IMP_NOSE, wheels: [{ x: 2, y: 2 }, { x: 2, y: -2 }, { x: -2, y: 2 }, { x: -2, y: -2 }] } }, DEFAULT_SPEC, 'decode');
   const wide = coerceSpec({ ...DEFAULT_SPEC, imported: { ...IMP_NOSE, wheels: [{ x: 5, y: 6.5 }, { x: 5, y: -6.5 }, { x: -6, y: 6.5 }, { x: -6, y: -6.5 }] } }, DEFAULT_SPEC, 'decode');
-  check('wheels: wheelLocals reads the stated wheels, in its own FL, FR, BR, BL order', isDeepStrictEqual(wheelLocals(wide), [{ x: 5, y: 6.5 }, { x: 5, y: -6.5 }, { x: -6, y: -6.5 }, { x: -6, y: 6.5 }]));
+  check('wheels: wheelLocals reads the stated wheels, in `WHEEL_CORNERS` order (FL, FR, BL, BR, the descriptor’s own)', isDeepStrictEqual(wheelLocals(wide), [{ x: 5, y: 6.5 }, { x: 5, y: -6.5 }, { x: -6, y: 6.5 }, { x: -6, y: -6.5 }]));
   const tn = driveParams(narrow).maxTurn;
   const tw = driveParams(wide).maxTurn;
   check('wheels: a narrower wheelbase turns faster', tn > tw * 1.2, `${tn.toFixed(2)} vs ${tw.toFixed(2)} rad/s`);
@@ -31732,8 +31869,9 @@ function impPlayCheck(g: GameId): void {
  * reached a standard robot moves the pin. Recorded on feat/robot-import a882e8c2, BEFORE the
  * mechanism branches existed; never re-record one to make an import change pass.
  */
+// `decode` re-pinned 2026-10-02 with the swerve pod-order fix (`SIM_VERSION` 5): its scene drives a swerve.
 const L2_MECH_PINS: Record<string, string> = {
-  decode: 'held=2872 2299820267:1516006287 2380413841:306312656 1300675608:205143914',
+  decode: 'held=3611 2049313317:4014017715 2788731338:1360918128 1577943677:2318776227',
   chain: 'held=2913 280568408:432347152 3067491810:3978456955 2730570165:2501872899',
   biobuzz: 'held=1025 2762021873:2009800956 2776997930:279128570 4136908741:1973256459',
   bb3d: 'held=907 4176744764:1760924406 112866128:1298346330',

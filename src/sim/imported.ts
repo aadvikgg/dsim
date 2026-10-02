@@ -548,7 +548,8 @@ const defaultWheels = new WeakMap<ImportedRobot, Vec2[]>();
  * corners of the hull's bounding box inset by `WHEEL_INSET` (floored at 1 in, as `wheelLocals`
  * does) — each walked inside the hull if the box corner is outside it (a pointed nose).
  *
- * ⚠️ ORDER: `wheelLocals` and `wheelContacts` speak FL, FR, BR, BL. Convert, never index across.
+ * ORDER: FL, FR, BL, BR, which is `WHEEL_CORNERS` (`config.ts`): `wheelLocals` returns these as they
+ * are, and `wheelContacts` walks them in `WHEEL_PERIMETER` order.
  */
 export function importedWheels(imp: ImportedRobot): Vec2[] {
   if (imp.wheels && imp.wheels.length === 4) return imp.wheels.map((w) => ({ x: w.x, y: w.y }));

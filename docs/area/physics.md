@@ -395,7 +395,20 @@ modeled motor is the **MATRIX / goBILDA 5000-series 12VDC** brushed motor (5800 
 - **SWERVE = FOUR INDEPENDENT modules** (`RobotState.moduleAngles[4]`, FL/FR/BL/BR): real
   per-module inverse kinematics (target vel = translation + ω×r), WPILib-style module
   optimization (a >90° change FLIPS the pod + REVERSES drive, `MODULE_SLEW_RATE` 7), and
-  forward kinematics of the pods for the achieved chassis motion. **Balancing weakness is
+  forward kinematics of the pods for the achieved chassis motion.
+  **ONE WHEEL ORDER: `WHEEL_CORNERS` (`config.ts`) — FL, FR, BL, BR, +x forward, +y left.**
+  Pod i is the wheel at `WHEEL_CORNERS[i]`, and every site that pairs a pod with a position gets
+  the position from `wheelLocals` (or the constant): the IK/FK and the traction loop in
+  `updateRobot`, the three canvas `drawWheels` and BIOBUZZ 3D's `buildWheels`. Never index
+  `moduleAngles` against a hand-written corner list. `wheelLocals` used to walk the perimeter
+  (FL, FR, BR, BL), so the traction loop resisted the two REAR wheels' contact slip along each
+  other's pod axes (fixed in `SIM_VERSION` 5; measured, a swerve spinning off a wall took 2.05 s
+  to clear it where the bug took 1.6, and an X-locked swerve shoved off-centre from the side
+  yawed 7.9° where the bug gave 13.1°). Free-space drift and wobble did not move — they come from
+  the IK/FK, which was always consistent. `wheelContacts` is a polygon and still walks the
+  PERIMETER (`WHEEL_PERIMETER`); never pair its index with a pod. Smoke pins where each pod's
+  angle acts (read back out of the traction force) and where each sprite draws it.
+  **Balancing weakness is
   WOBBLE, not weight** (a heavy-swerve nerf was tried and reverted): each module's control
   loop is imperfect (`SWERVE_WOBBLE_AMP`/`_FREQ`, INDEPENDENT phase per pod) → real path
   drift + yaw wobble driving straight. **X-drive renders as a DIAMOND, not an X**: the omnis

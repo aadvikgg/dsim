@@ -2958,7 +2958,7 @@ function endPlateChecks(check: Check): void {
     );
     check(
       'endplate-cover/source: endWheelSpanY’s swerve centre AND half are the pod’s own inset',
-      robotsCode.includes('pod.position.set((Math.sign(x) || 1) * (hl - BB_POD_INSET), sy * (hw - BB_POD_INSET), 0);') &&
+      robotsCode.includes('pod.position.set(sx * (hl - BB_POD_INSET), sy * (hw - BB_POD_INSET), 0);') &&
         robotsCode.includes('return { center: s * (hw - BB_POD_INSET), half: BB_POD_INSET };'),
     );
   }
@@ -6388,7 +6388,7 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
         // steer — put the pivot anywhere else and the wheel sweeps a circle on the floor.
         check(
           'the pod pivots about the wheel’s contact patch',
-          robotsCode.includes('pod.position.set((Math.sign(x) || 1) * (hl - BB_POD_INSET), sy * (hw - BB_POD_INSET), 0);') &&
+          robotsCode.includes('pod.position.set(sx * (hl - BB_POD_INSET), sy * (hw - BB_POD_INSET), 0);') &&
             robotsCode.includes('wheel.position.set(0, 0, BB_POD_WHEEL_R);'),
         );
         // ══ (2) THE WHEEL READS AS A WHEEL — BUILT AND MEASURED, NOT GREPPED ═══════════════
@@ -6536,6 +6536,21 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
           '...in the SAME corner order the 2D map reads it in — [FL, FR, BL, BR]',
           /FL, FR, BL, BR/.test(robotsSrc) && /moduleAngles/.test(typesSrc),
         );
+        // MEASURED (SIM_VERSION 5, the swerve pod-order fix): pod i is built at corner
+        // `WHEEL_CORNERS[i]`, the order the sim steers `moduleAngles` in and the traction model
+        // reads it in. A pod's steer on another corner is invisible driving straight.
+        {
+          const built = buildWheels({ ...BB_DEFAULT_SPEC, drivetrain: 'swerve' } as RobotSpec).pods;
+          check(
+            '...and pod i is BUILT at WHEEL_CORNERS[i] (FL, FR, BL, BR, +x forward, +y left)',
+            built.length === 4 &&
+              built.every(
+                (p, i) => Math.sign(p.position.x) === C.WHEEL_CORNERS[i][0] && Math.sign(p.position.y) === C.WHEEL_CORNERS[i][1],
+              ),
+            built.map((p) => `(${p.position.x.toFixed(2)},${p.position.y.toFixed(2)})`).join(' '),
+          );
+          for (const p of built) disposeRobotGroup(p);
+        }
         // ══ THE POD FITS UNDER THE DECK, AND INSIDE THE FRAME AT EVERY STEER ANGLE ═══════════
         //
         // ⚠️ THE CHECK THAT WAS HERE MEASURED THE WRONG CEILING. It computed a pod top of 5.81
