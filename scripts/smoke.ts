@@ -32692,6 +32692,11 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
   const mainSide = ['src/ui/Menu.tsx', 'src/robotImport/ui/ImportedRobots.tsx', 'src/robotImport/ui/LibraryDialogs.tsx', 'src/robotImport/ui/useLibrary.ts', 'src/robotImport/ui/handoff.ts', 'src/robotImport/ui/exportRobot.ts', 'src/robotImport/ui/pageCopy.ts'];
   const leaks = mainSide.filter((f) => /from '\.\.?\/(?:\.\.\/)*(?:robotImport\/)?(?:geometry|ui\/copy|copy|ImportEditor|editorModel)'|robotImport\/ui\/copy'/.test(readFileSync(f, 'utf8')));
   check('import UI bundle: the robot page’s files import neither geometry.ts nor the editor’s copy or code', leaks.length === 0, leaks.join(', '));
+  const row = readFileSync('src/robotImport/ui/ImportedRobots.tsx', 'utf8');
+  check(
+    'import UI bundle: the robot page reaches the library dialogs and the export by import() on a click, never statically',
+    !/^import [^;]*from '\.\/(?:LibraryDialogs|exportRobot)'/m.test(row) && /import\('\.\/LibraryDialogs'\)/.test(row) && /import\('\.\/exportRobot'\)/.test(row),
+  );
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

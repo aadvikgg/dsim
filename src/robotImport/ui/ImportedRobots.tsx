@@ -1,4 +1,4 @@
-import { useEffect, useState, type DragEvent } from 'react';
+import { Suspense, lazy, useEffect, useState, type DragEvent } from 'react';
 import type { GameSettings } from '../../game';
 import type { RobotSpec } from '../../types';
 import type { LibraryEntry } from '../types';
@@ -10,8 +10,6 @@ import { FootprintSvg } from '../../ui/FootprintSvg';
 import { polyBounds as bbox } from '../../sim/imported';
 import { invalidateImportedAssets } from '../../render/importedAssets';
 import { libraryChanged, onRobotNotice, peekRobotNotice, postRobotNotice, takeRobotNotice } from './handoff';
-import { ConfirmDialog, RenameDialog } from './LibraryDialogs';
-import { exportLibraryRobot } from './exportRobot';
 import type { LibraryView } from './useLibrary';
 
 /**
@@ -19,7 +17,13 @@ import type { LibraryView } from './useLibrary';
  * per library robot and the add card), the Imported robot panel that stands in for Build while an
  * import is active, and the library actions both of them trigger (rename, duplicate, export,
  * delete). Everything heavier — the editor, the engine, three.js — is behind the editor's route.
+ *
+ * The DIALOGS and the EXPORT are not in the main chunk either: they load on the click that needs
+ * them (a sub-1 KB chunk the editor shares), so the robot page pays only for what it draws.
  */
+
+const RenameDialog = lazy(() => import('./LibraryDialogs').then((m) => ({ default: m.RenameDialog })));
+const ConfirmDialog = lazy(() => import('./LibraryDialogs').then((m) => ({ default: m.ConfirmDialog })));
 
 /** how long a "Saved Ironclad." notice holds the Start from title (Controls' NOTICE_MS) */
 const NOTICE_MS = 4000;
@@ -261,12 +265,13 @@ export function useImportedActions({
   };
 
   const exportIt = async (entry: LibraryEntry): Promise<void> => {
+    const { exportLibraryRobot } = await import('./exportRobot');
     const msg = await exportLibraryRobot(entry.id);
     setError(msg);
   };
 
   const fallback = standardRobotFor(settings);
-  const dialogs =
+  const open =
     dialog?.kind === 'rename' ? (
       <RenameDialog name={dialog.entry.spec.name} onRename={(n) => void rename(dialog.entry, n)} onClose={() => setDialog(null)} />
     ) : dialog?.kind === 'delete' ? (
@@ -284,6 +289,7 @@ export function useImportedActions({
         onClose={() => setDialog(null)}
       />
     ) : null;
+  const dialogs = open ? <Suspense fallback={null}>{open}</Suspense> : null;
 
   return {
     error,

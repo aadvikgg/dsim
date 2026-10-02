@@ -193,10 +193,10 @@ function routeFor(file, buf) {
   // seam (`src/render/importedAssets.ts`) reaches it with a dynamic `import()` the first time an
   // imported robot is drawn, so it is its own small chunk rather than a cost in `main`.
   if (/^library-[^/]*\.js$/.test(base)) return 'library';
-  // THE IMPORTER'S UI (lane 4): the editor route and the share-file reader and writer the robot page
-  // reaches by `import()`. By FILENAME, before the
-  // content scans: none of them carries three.js, so they would otherwise land in `other`.
-  if (/^(ImportEditor|shareFile|draftStore)-[^/]*\.js$/.test(base)) return 'importerui';
+  // THE IMPORTER'S UI (lane 4): the editor route, and what the robot page reaches by `import()` on a
+  // click (the share-file reader and writer, the export, the library dialogs). By FILENAME, before
+  // the content scans: none of them carries three.js, so they would otherwise land in `other`.
+  if (/^(ImportEditor|shareFile|draftStore|LibraryDialogs|exportRobot)-[^/]*\.js$/.test(base)) return 'importerui';
   // Vite's preload helper is split out only when a SECOND entry shares it (the measurement
   // build); in the app it is part of the entry chunk, so it is billed there
   if (/^preload-helper-[^/]*\.js$/.test(base)) return 'main';
@@ -560,12 +560,13 @@ const BASELINE = {
   // import branches, the asset seam, FootprintSvg) and +2.86 in `scene` (`renderImported.ts`),
   // both inside tolerance against the robot-import branch measured the same minute.
   library: { gzip: 1.85 * 1000 },
-  // 2026-10-01: NEW, the importer's UI (lane 4). `ImportEditor-*.js` 18.50 (the steps, the top-down
-  // editor, the preview host, drafts, the review checks) and `shareFile-*.js` 1.38, which the robot
-  // page `import()`s to export. Fetched when a player opens the importer or exports a robot. What the
-  // robot page itself carries for imports (the row, the panel, the dialogs, the test-drive wiring)
-  // is in `main`: +4.69 KB against the feature branch at 89aa8323 (1014.33 -> 1019.02).
-  importerui: { gzip: 19.88 * 1000 },
+  // 2026-10-01: NEW, the importer's UI (lane 4). `ImportEditor-*.js` 18.75 (the steps, the top-down
+  // editor, the preview host, drafts, the review checks), and what the robot page `import()`s on a
+  // click: `shareFile-*.js` 1.38, `LibraryDialogs-*.js` 0.75 and `exportRobot-*.js` 0.66. Fetched
+  // when a player opens the importer or acts on an imported robot. What the robot page itself
+  // carries for imports (the row, the panel, the notice, the test-drive and lobby wiring) is in
+  // `main`: +4.30 KB against the feature branch at 89aa8323 (1014.33 -> 1018.63).
+  importerui: { gzip: 21.55 * 1000 },
   other: { gzip: 1 * 1000 },
 };
 
