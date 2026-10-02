@@ -42,6 +42,11 @@ import {
 import { SIM_DT, BALANCE_VERSION, SIM_VERSION } from '../config';
 import { parsePenaltyEvent } from '../sim/penaltyLog';
 import { PenaltyLog, ScoreEditor, type PenaltyEntry } from './ReplayRail';
+import { importedTopsSettled } from '../render/importedAssets';
+
+/** the longest an export waits for an imported robot's picture or mesh before its first frame (ms):
+ *  a GLB of the library's 4 MB cap parses in well under a second; past this it is not coming */
+const IMPORT_ASSET_WAIT_MS = 5000;
 
 /** how many times faster than real time the WebCodecs path encodes, measured across VP9, VP8
  *  and H.264 at a 1920 long edge (5.2-5.7×; the low end is the honest one to quote) */
@@ -977,6 +982,20 @@ export function ReplayView({
       dpr: rend.camera.dpr,
       insets: sceneInsets,
     };
+
+    /**
+     * AN IMPORTED ROBOT'S PICTURE OR MESH BEFORE THE FIRST FRAME, for the same reason as the
+     * sponsor mark: they load lazily (`render/importedAssets.ts`), a draw asks and a later task
+     * delivers, and `recordFast` draws frame after frame with the browser getting a turn only
+     * now and then. Exported from a viewer that had not shown them yet (the 3D file from a 2D
+     * view, or the reverse), the first seconds came out as the robot's silhouette. Bounded: an
+     * asset that never settles costs the export at most a few seconds, never the file.
+     */
+    const importIds = [...new Set(shot.world.robots.flatMap((rb) => (rb.spec.imported ? [rb.spec.imported.id] : [])))];
+    if (importIds.length > 0) {
+      const settled = scene ? (scene.assetsSettled?.(shot.world) ?? Promise.resolve()) : importedTopsSettled(importIds);
+      await Promise.race([settled, new Promise<void>((done) => setTimeout(done, IMPORT_ASSET_WAIT_MS))]);
+    }
 
     let blob: Blob | null = null;
     try {

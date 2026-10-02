@@ -308,7 +308,12 @@ Contract: `docs/robot-import-plan.md` §3.1 and §4.
   is game-blind (points moved inside the hull, z in `[0, heightIn]`, one span per edge in a fixed
   order); each game's ranges are applied where it READS them, never written back.
 - **Import geometry reads `imported.hull`, never `spec.length/width`** (the clamped fallback), and
-  never assumes the hull's box is centred on the origin.
+  never assumes the hull's box is centred on the origin. The integration review (2026-10-02) found
+  four game rules that still measured an import as a box about its origin, each wrong by the
+  offset: BIOBUZZ G402's depth, Chain's beam block, Chain's start extents, and the BIOBUZZ 3D
+  LIGHT predictor. A one-sided question (how far toward THIS beam, wall or line) reads the hull
+  turned to the heading on THAT side (`rotatedPolyBounds`, or the deepest vertex); a symmetric
+  `max(front, rear, half)` over-reaches on the short side and teleports.
 - **A mouth is resolved, not stored** (`resolveImportMouth`): the roller line is where the hull ends
   inside the span (less archetype hardware that stands past it inside the CAD — BIOBUZZ side
   rollers), the face is the PRESET's reach behind it (the nip, lid, held slots and flower windows

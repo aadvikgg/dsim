@@ -1,3 +1,18 @@
+# HANDOFF — 2026-10-02c (robot import: integration review fixed, merged on `feat/robot-import`)
+
+**State: merged on `feat/robot-import` (with alpha's swerve fix, `SIM_VERSION` 5); not on `alpha`/`main`; the feature is not deployed (the alpha server runs alpha, swerve included).** `npm test` (shared 3641, BIOBUZZ 5434), `build`, `server:check`, `test:workers` 149, `bundleaudit`, `uiaudit`, `docaudit` pass. Standard robots step byte-identically (`IMP_STANDARD_PINS`, `L2_MECH_PINS` untouched); no `SIM_VERSION`/`BALANCE_VERSION` change. Every fix has a smoke check that failed on the old code.
+
+- **Fixed** (the 2026-10-02b list below, items 1–7):
+  1. BIOBUZZ G402 depth for an import = deepest vertex of `bbImportSolids().chassis` along the line normal (IMPORT lane).
+  2. Chain `beamBlock`: the hull's extent toward the beam by side.
+  3. Chain starts: `chainStartExtents` returns the box centre offset; every rule works on `pos + o`; red is judged on the hull flipped left for right (a reflection, not a rotation); anchors are fitted by `chainFitAnchor` (spawn and editor), a STAND anchor turns a quarter if it must to stay at the stand; an 18 × 18 hull is never legal and snaps flush, not into the post.
+  4. LIGHT predictor: turned-hull wall clamp, `polySatGap` separation for pairs with an import (5.0 → 0.0 in at a wall, 5.5 → 0.2 in against a robot).
+  5. Two devices: `src/robotImport/libraryIds.ts` (rule in `docs/area/robot-import.md` "The active robot across devices"). Records answer by id, else `sharedFrom`; a share file that IS the account's active robot (same descriptor) keeps the active id.
+  6. Start editors: handle at `startHandleReach` (past the hull's front), Chain and BIOBUZZ outline the hull, Chain draws the tested box where the rule puts it, preview key includes the import. DECODE tutorial drops its artifact past the hull's front in line with the mouth. Zenith robot file: hull box, centre of rotation on both axes, placed mouths.
+  7. Video export: real (the first frames drew the silhouette when the viewer had not shown the import yet). The export now awaits `importedTopsSettled` / `GameScene.assetsSettled` (bounded 5 s) before frame 0.
+- **OPEN, owner decision — older clients strip the import from the account.** main and alpha (until this merges) rebuild the spec field by field in `coerceSettings`, and `POST /api/user/settings` stores the blob verbatim, so ANY settings save there (picking Free Drive on Modes is one) drops `spec.imported`, `lastStandardSpec` and imported loadouts. Proposed, not built: new clients send a capability header on that POST; for a request WITHOUT it the server carries over `lastStandardSpec` and imported loadouts when they are missing, and re-attaches `spec.imported` when the incoming active spec equals the stored one minus `imported` (field by field). Server-side, so one deploy covers every client version; backward-compatible.
+- **Known edges, not fixed:** editing an import on one device leaves the other's model stale; a copy saved under its own id before the rule is found but re-keys the active robot if edited; a fitted Chain STAND anchor may turn the robot a quarter (it is legal and at the stand, but not the anchor's heading).
+
 # HANDOFF — 2026-10-02b (robot import: all lanes merged on `feat/robot-import`; integration fixes open)
 
 **State: on `feat/robot-import` only (semi-permanent branch off `alpha`, owner request). Not on `alpha` or `main`, nothing deployed.** At this commit: `npm test` (shared 3611, BIOBUZZ 5426), `build`, `server:check`, `test:workers` 149, `test:mm` 222, `bundleaudit` (baselines raised with reasons), `uiaudit`, `docaudit`, `contrast` pass. Server code changed, so merging to alpha needs an alpha redeploy.

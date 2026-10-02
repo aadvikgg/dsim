@@ -8,7 +8,8 @@ import { loadImporterEngine, type ImporterEngine } from '../engineLoader';
 import type { ImportProgress, NormalisedModel, PreparedModel } from '../engine/importerEngine';
 import type { LoadStage } from '../engine/load';
 import { defaultImportSetup, orientKey, transformParts } from '../geometry';
-import { getRobot, listRobots, newRobotId, putRobot } from '../library';
+import { deleteRobot, getRobot, listRobots, newRobotId, putRobot } from '../library';
+import { planShareAdd } from '../libraryIds';
 import { readShareFile, type SharePayload } from '../shareFile';
 import { STORED_MESH_TO_ROBOT, type ImportSetup, type LibraryRobot } from '../types';
 import { defaultMechFor, mechHandlesFor, mechRobotToModel, validateMechFor } from './placement';
@@ -265,7 +266,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         const now = Date.now();
         // the file's own id names the robot only inside the file: this device's copy gets a fresh
         // one (see `LibraryRobot.sharedFrom`), and a copy already added from it is offered for
-        // replacement under ITS id
+        // replacement under ITS id — UNLESS it is the account's active robot arriving on a second
+        // device, which keeps the active id (`planShareAdd`, `libraryIds.ts` has the rule)
         const fileId = spec.imported.id;
         const record = (s: RobotSpec): LibraryRobot => ({
           id: s.imported!.id,
@@ -280,13 +282,18 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
           created: now,
           updated: now,
         });
-        const finish = async (s: RobotSpec): Promise<void> => {
+        const finish = async (s: RobotSpec, retire: string | null = null): Promise<void> => {
           setDialog(null);
           const r = await putRobot(record(s));
           setPhase(null);
           if (!r.ok) {
             setError({ text: r.message });
             return;
+          }
+          // an older copy of the same robot under another id is replaced, not kept beside it
+          if (retire && retire !== s.imported!.id) {
+            await deleteRobot(retire);
+            invalidateImportedAssets(retire);
           }
           invalidateImportedAssets(s.imported!.id);
           libraryChanged();
@@ -295,8 +302,16 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         };
         const withId = (id: string, name = spec.name): RobotSpec => ({ ...spec, name, imported: { ...spec.imported!, id } });
         const listed = await listRobots(game);
-        const have = listed.ok ? listed.value.find((r) => r.sharedFrom === fileId || r.id === fileId) : undefined;
-        if (have) {
+        const plan = planShareAdd(spec.imported, settings.spec.imported, listed.ok ? listed.value : [], (e) => e.spec.imported);
+        if (plan.kind === 'adopt') {
+          // the account's active robot, arriving on this device: the file brings its MODEL, and the
+          // robot stays the account's spec as it is, id included — so the synced spec resolves here
+          // AND on the device it came from, and nothing new syncs back
+          await finish({ ...settings.spec }, plan.retire);
+          return;
+        }
+        if (plan.kind === 'ask') {
+          const have = plan.have;
           setDialog({
             kind: 'dup',
             name: spec.name,

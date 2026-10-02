@@ -13,7 +13,7 @@ import {
 import { createWorld, DEFAULT_ASSISTS, DEFAULT_SPEC, PLAYER_ASSISTS, coerceAssists, coerceAutoPath, coerceSpec, coerceSetup, coerceStartPose } from '../src/sim/spawn';
 import { drawWheels } from '../src/games/chain/parts';
 import { sanitizePlayer, sanitizePlayerPatch } from '../src/net/sanitize';
-import { allianceDuo, derivedRole, savedStartCap } from '../src/ui/startPositions';
+import { allianceDuo, derivedRole, savedStartCap, startHandleReach } from '../src/ui/startPositions';
 import { queuedModes, queuedGames, queuesFor, anyoneQueued, widenHint } from '../src/ui/queueDepth';
 import { roomJoinRegion } from '../src/net/roomRegion';
 import { PRIMARY_HOSTS, primaryWsBase } from '../src/net/primaryHost';
@@ -465,7 +465,7 @@ import {
   CHAIN_PRISM,
   chainArmReach,
 } from '../src/games/chain/config';
-import { CHAIN_HOOKS_PER_GOAL, accelMultiplier, catalystRailHalf, catalystRailTarget, catalystMouth, catalystTrackTarget, chainEvalStart, chainStartExtents, chainHeadingFits, chainNearestFittingHeading, chainSnapStartPose, chainIntakeMouths, chainMirrorStart, chainSnapStart, chainStartLegal, hookPos, labAreas, onRingStand, ringStandBoxes, ringStands } from '../src/games/chain/state';
+import { CHAIN_HOOKS_PER_GOAL, accelMultiplier, catalystRailHalf, catalystRailTarget, catalystMouth, catalystTrackTarget, chainEvalStart, chainFitAnchor, chainStartExtents, chainHeadingFits, chainNearestFittingHeading, chainSnapStartPose, chainIntakeMouths, chainMirrorStart, chainSnapStart, chainStartLegal, hookPos, labAreas, onRingStand, ringStandBoxes, ringStands } from '../src/games/chain/state';
 import {
   CHAIN_CATALYSTS,
   CHAIN_CATALYST_TYPES,
@@ -504,6 +504,7 @@ import {
   IMPORT_QUANTUM,
   coerceImported,
   importedHalfDiag,
+  polyAtPose,
   polyBounds,
   polyCentroid,
   polyFeature,
@@ -524,6 +525,7 @@ import {
   importedMeshVersion,
   importedTopFrame,
   importedTopImage,
+  importedTopsSettled,
   importedTopUrl,
   invalidateImportedAssets,
   registerImportedAssets,
@@ -550,6 +552,8 @@ import type { SolidShape } from '../src/sim/artifactSolids';
 import { heldSlotPos } from '../src/sim/physics';
 import { turretWorldPos } from '../src/sim/robot';
 import { decodeImportLaunchZ, decodeImportMouth, DECODE_IMPORT_LAUNCH_MIN } from '../src/sim/importedMech';
+import { libraryEntryFor, planShareAdd, sameImportedRobot } from '../src/robotImport/libraryIds';
+import { DECODE_TUTORIAL } from '../src/games/decode/tutorial';
 import { defaultImportedMech, mechHandles, validateImportedMech } from '../src/games/importMechChecks';
 import { BB_DEFAULT_SPEC } from '../src/games/biobuzz/coerce';
 import { bbMouths, bbRobotSolids, mouthAxes } from '../src/games/biobuzz/robot';
@@ -32255,6 +32259,367 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// IMPORTED ROBOTS: INTEGRATION (review 2026-10-02) — off-centre hulls where the sim core meets
+// each game's own rules (Chain beams and starts, the start editors, the DECODE tutorial, the
+// Zenith robot file) and the library's id rule across two devices. The hulls are the review's.
+// ════════════════════════════════════════════════════════════════════════════
+
+/** the review's test hulls, robot-local inches, +x forward. The origin (the wheelbase centre)
+ *  is OFF the middle of most of them, which is the whole point. */
+const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
+  nose: IMP_NOSE,
+  diamond: IMP_DIAMOND,
+  longFront: { v: 1, id: '1111111111111111', hull: [{ x: -6, y: -8 }, { x: 12, y: -8 }, { x: 12, y: 8 }, { x: -6, y: 8 }], heightIn: 14 },
+  longRear: { v: 1, id: '2222222222222222', hull: [{ x: -12, y: -8 }, { x: 6, y: -8 }, { x: 6, y: 8 }, { x: -12, y: 8 }], heightIn: 14 },
+  asymL: { v: 1, id: '3333333333333333', hull: [{ x: -8, y: -4 }, { x: 8, y: -4 }, { x: 8, y: 9 }, { x: -8, y: 9 }], heightIn: 14 },
+  sq18: { v: 1, id: '5555555555555555', hull: [{ x: -9, y: -9 }, { x: 9, y: -9 }, { x: 9, y: 9 }, { x: -9, y: 9 }], heightIn: 14 },
+};
+
+// ---- Chain Reaction: a beam blocks an import at the hull's extent TOWARD it ----------------
+{
+  const LONG = IMP_REVIEW_HULLS.longFront;
+  const run = (patch: Partial<RobotSpec>, heading: number) => {
+    const spec = coerceSpec({ ...DEFAULT_SPEC, ...patch, groundClearance: 0.5, drivetrain: 'tank' }, DEFAULT_SPEC, 'chain');
+    const w = createChainWorld('free', 5, [{ id: 0, alliance: 'blue', spec, assists: { fieldCentric: false, aimAssist: false, autoIntake: false, autoFire: false }, startIndex: 0 }]);
+    w.balls.length = 0;
+    const r = w.robots[0];
+    r.pos = { x: 40, y: -22 };
+    r.heading = heading;
+    r.vel = { x: 0, y: 0 };
+    const toward = Math.sin(heading) > 0 ? 1 : -1; // drive toward +y (the beam on y = 0)
+    const m = new Map<number, RobotCommand>([[0, { driveX: 0, driveY: 0.6 * toward, rotate: 0, leftDrive: 0.6 * toward, rightDrive: 0.6 * toward, intake: false, fire: false }]]);
+    let jump = 0;
+    let prev = r.pos.y;
+    for (let t = 0; t < 240; t++) {
+      simModuleFor('chain').step(w, SIM_DT, m);
+      jump = Math.max(jump, prev - r.pos.y);
+      prev = r.pos.y;
+    }
+    return { jump, gap: -0.5 - polyBounds(robotHullWorld(r)).maxY };
+  };
+  const rear = run({ imported: LONG }, -Math.PI / 2);
+  const front = run({ imported: LONG }, Math.PI / 2);
+  const std = run({ length: 18, width: 16 }, -Math.PI / 2);
+  check(
+    'imports/chain beam: a hull with a short rear, driven rear-first into a beam it cannot cross, is held at the beam (no jump bigger than a standard chassis takes)',
+    rear.jump <= std.jump + 1e-9 && rear.jump < 1 && rear.gap >= 0 && rear.gap < 1,
+    `rear-first jump ${rear.jump.toFixed(2)} gap ${rear.gap.toFixed(2)}; front-first jump ${front.jump.toFixed(2)} gap ${front.gap.toFixed(2)}; standard jump ${std.jump.toFixed(2)}`,
+  );
+  check('imports/chain beam: ...and front-first the same', front.jump < 1 && front.gap >= 0 && front.gap < 1, `jump ${front.jump.toFixed(2)} gap ${front.gap.toFixed(2)}`);
+}
+
+// ---- Chain Reaction starts: an import's anchors are FITTED to its off-centre hull ----------
+{
+  const bad: string[] = [];
+  const standLost: string[] = [];
+  for (const [name, imp] of Object.entries(IMP_REVIEW_HULLS)) {
+    const spec = coerceSpec({ ...DEFAULT_SPEC, imported: imp }, DEFAULT_SPEC, 'chain');
+    for (const alliance of ['blue', 'red'] as const) {
+      for (let idx = 0; idx < CHAIN_START_POSES.length; idx++) {
+        const w = createChainWorld('free', 7, [{ id: 0, alliance, spec, assists: { ...DEFAULT_ASSISTS }, startIndex: idx }]);
+        const r = w.robots[0];
+        const p0 = { x: r.pos.x, y: r.pos.y };
+        const b = polyBounds(robotHullWorld(r));
+        // the REAL hull, completely inside an own-side Lab square (touching counts, G04)
+        const s = alliance === 'red' ? -1 : 1;
+        const x0 = Math.min(b.minX * s, b.maxX * s);
+        const x1 = Math.max(b.minX * s, b.maxX * s);
+        const inLab = x0 >= CHAIN_HALF_X - CHAIN_LAB - 1e-6 && x1 <= CHAIN_HALF_X + 1e-6 &&
+          ((b.minY >= CHAIN_HALF_Y - CHAIN_LAB - 1e-6 && b.maxY <= CHAIN_HALF_Y + 1e-6) || (b.maxY <= -CHAIN_HALF_Y + CHAIN_LAB + 1e-6 && b.minY >= -CHAIN_HALF_Y - 1e-6));
+        const hs = CHAIN_RINGSTAND_BOX / 2;
+        const pen = Math.max(0, ...ringStandBoxes().map((c) => Math.min(b.maxX - (c.x - hs), c.x + hs - b.minX, b.maxY - (c.y - hs), c.y + hs - b.minY)));
+        const m = new Map<number, RobotCommand>([[0, { driveX: 0, driveY: 0, rotate: 0, leftDrive: 0, rightDrive: 0, intake: false, fire: false }]]);
+        for (let t = 0; t < 30; t++) simModuleFor('chain').step(w, SIM_DT, m);
+        const moved = hyp(r.pos.x - p0.x, r.pos.y - p0.y);
+        if (!inLab || pen > 1e-6 || moved > 0.05) bad.push(`${name} ${alliance} #${idx} lab=${inLab} pen=${pen.toFixed(2)} moved=${moved.toFixed(2)}`);
+        if (onRingStand(CHAIN_START_POSES[idx].pos) && !onRingStand(p0)) standLost.push(`${name} ${alliance} #${idx}`);
+      }
+    }
+  }
+  check('imports/chain starts: at EVERY anchor, both alliances, every review hull starts completely in its Lab, clear of the ring-stand solid, and does not move on tick one', bad.length === 0, bad.join('; '));
+  check('imports/chain starts: a STAND anchor still starts an import at the stand (the descent is armed), turning it a quarter if its hull needs to', standLost.length === 0, standLost.join('; '));
+
+  // the review's three cases, against the rule the editor colours with
+  const sp = (name: string) => coerceSpec({ ...DEFAULT_SPEC, imported: IMP_REVIEW_HULLS[name] }, DEFAULT_SPEC, 'chain');
+  check(
+    'imports/chain starts: the raw LAB anchor is NOT legal for a long nose (it would start outside the Lab), the fitted one is',
+    !chainStartLegal(sp('longFront'), CHAIN_START_POSES[0].pos, 180) &&
+      (() => {
+        const f = chainFitAnchor(sp('longFront'), { x: 57, y: 57, headingDeg: 180 }, 'blue');
+        return chainStartLegal(sp('longFront'), f, f.headingDeg);
+      })(),
+  );
+  const found = (name: string, a: 'blue' | 'red') => {
+    let n = 0;
+    for (let x = 48; x <= 72; x += 0.5) for (let y = 48; y <= 72; y += 0.5) if (chainStartLegal(sp(name), { x, y }, 180, a)) n++;
+    return n;
+  };
+  check(
+    'imports/chain starts: an 18-in hull with its origin 3 in off the middle HAS legal custom poses (the editor can save one) — longFront and longRear, both alliances',
+    chainHeadingFits(sp('longFront'), 180) && chainHeadingFits(sp('longRear'), 180) && found('longFront', 'blue') > 0 && found('longRear', 'blue') > 0 && found('longFront', 'red') > 0 && found('longRear', 'red') > 0,
+    `${found('longFront', 'blue')} / ${found('longRear', 'blue')} poses at 180°`,
+  );
+  // RED SEES THE HULL MIRRORED: a pose that is legal for red's asymL and not for blue's
+  const asym = sp('asymL');
+  const pose = { x: 57, y: 54, headingDeg: 180 };
+  const redLegal = chainStartLegal(asym, pose, 180, 'red');
+  const blueLegal = chainStartLegal(asym, pose, 180, 'blue');
+  const w = createChainWorld('match', 3, [{ id: 0, alliance: 'red', spec: asym, assists: { ...DEFAULT_ASSISTS }, startIndex: 0, startPose: pose }]);
+  const r = w.robots[0];
+  const hb = polyBounds(robotHullWorld(r));
+  check(
+    'imports/chain starts: red is judged on its hull MIRRORED (a reflection is not a rotation): a red-legal pose spawns where it was placed, with the real hull in the Lab',
+    redLegal && !blueLegal && Math.abs(r.pos.x + pose.x) < 1e-9 && Math.abs(r.pos.y - pose.y) < 1e-9 && hb.minY >= CHAIN_HALF_Y - CHAIN_LAB - 1e-6 && hb.maxY <= CHAIN_HALF_Y + 1e-6,
+    `red ${redLegal} blue ${blueLegal}; spawned (${r.pos.x.toFixed(2)}, ${r.pos.y.toFixed(2)}), hull y ${hb.minY.toFixed(2)}…${hb.maxY.toFixed(2)}`,
+  );
+  check('imports/chain starts: the module predicate passes the alliance through', simModuleFor('chain').startLegal!(asym, 'red', pose) && !simModuleFor('chain').startLegal!(asym, 'blue', pose));
+  // whatever the custom snap returns is legal, for every review hull that fits at all, both alliances
+  const snapBad: string[] = [];
+  for (const name of Object.keys(IMP_REVIEW_HULLS)) {
+    if (name === 'sq18') continue;
+    for (const a of ['blue', 'red'] as const) {
+      for (const p of [{ x: 0, y: 0, headingDeg: 180 }, { x: 71, y: 71, headingDeg: 0 }, { x: 60, y: -60, headingDeg: 45 }, { x: 50, y: 66, headingDeg: 90 }]) {
+        const s = chainSnapStartPose(sp(name), p, a);
+        if (!chainStartLegal(sp(name), s, s.headingDeg, a)) snapBad.push(`${name} ${a} (${p.x},${p.y},${p.headingDeg})`);
+      }
+    }
+  }
+  check('imports/chain starts: the snap lands every review hull on a pose its own rule calls legal', snapBad.length === 0, snapBad.join('; '));
+  // an 18 × 18 hull has no room for the clearance margin (a standard chassis is capped at 17 for
+  // this): it is never legal, and the snap seats it FLUSH rather than in the post
+  const big = sp('sq18');
+  const flush = chainSnapStartPose(big, { x: 57, y: 57, headingDeg: 180 });
+  const fb = polyBounds(polyAtPose(big.imported!.hull, flush, dcos(Math.PI), dsin(Math.PI)));
+  const post = CHAIN_HALF_X - CHAIN_RINGSTAND_BOX; // the stand's inner faces
+  const lab = CHAIN_HALF_X - CHAIN_LAB;
+  check(
+    'imports/chain starts: an 18 × 18 hull is never legal, and its snap is flush against the ring stand, not in it',
+    found('sq18', 'blue') === 0 && (fb.maxX <= post + 1e-6 || fb.maxY <= post + 1e-6) && fb.minX >= lab - 1e-6 && fb.minY >= lab - 1e-6,
+    `hull x ${fb.minX.toFixed(2)}…${fb.maxX.toFixed(2)} y ${fb.minY.toFixed(2)}…${fb.maxY.toFixed(2)}`,
+  );
+  // the spawn and the editor read the one fit
+  const rd = (f: string) => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  check(
+    'imports/chain starts: the spawn and the start editor both place an imported anchor with chainFitAnchor',
+    /chainFitAnchor\(spec, \{ x: p\.pos\.x/.test(rd('src/games/chain/spawn.ts')) && /chainFitAnchor\(spec, anchorPose, alliance\)/.test(rd('src/ui/ChainStartEditor.tsx')),
+  );
+}
+
+// ---- the start editors: the heading handle is past the HULL's front, and they draw the hull --
+{
+  // DECODE caps an import's `length` at 15 (sloped intake) while its hull runs to 18, and the
+  // origin is the wheelbase centre: `length / 2 + 8` put the handle on or inside a long nose
+  const frontLong: ImportedRobot = { v: 1, id: '6666666666666666', hull: [{ x: -1, y: -8 }, { x: 17, y: -8 }, { x: 17, y: 8 }, { x: -1, y: 8 }], heightIn: 14 };
+  const inside: string[] = [];
+  for (const g of ['decode', 'chain', 'biobuzz'] as const) {
+    for (const [name, imp] of Object.entries({ ...IMP_REVIEW_HULLS, frontLong })) {
+      const s = coerceSpec({ ...DEFAULT_SPEC, imported: imp }, DEFAULT_SPEC, g);
+      if (!s.imported) continue;
+      const reach = startHandleReach(s);
+      // the grab radius is 6 in: the whole grab disc is off the hull
+      if (polyFeature(s.imported.hull, { x: reach, y: 0 }).depth > -6) inside.push(`${g} ${name} ${reach.toFixed(2)}`);
+    }
+  }
+  const s = coerceSpec({ ...DEFAULT_SPEC, imported: frontLong }, DEFAULT_SPEC, 'decode');
+  check(
+    'imports/start editors: the heading handle sits a full grab radius off every imported hull, in every game (`length / 2 + 8` did not: non-vacuous)',
+    inside.length === 0 && polyFeature(frontLong.hull, { x: s.length / 2 + 8, y: 0 }).depth > -6,
+    inside.join('; ') || `decode length ${s.length}, old handle ${s.length / 2 + 8} vs hull front 17`,
+  );
+  check('imports/start editors: a standard robot’s handle is where it always was', startHandleReach(DEFAULT_SPEC) === DEFAULT_SPEC.length / 2 + 8);
+  const rd = (f: string) => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  const eds = ['src/ui/StartPositionEditor.tsx', 'src/games/biobuzz/StartEditor.tsx', 'src/ui/ChainStartEditor.tsx'];
+  check(
+    'imports/start editors: all three place the handle with startHandleReach (draw and grab), none with length / 2 + 8',
+    eds.every((f) => (rd(f).match(/startHandleReach\(spec\)/g) ?? []).length === 2 && !/spec\.length \/ 2 \+ 8/.test(rd(f))),
+  );
+  check(
+    'imports/start editors: BIOBUZZ and Chain Reaction outline an import’s HULL (footprintCorners), and the Chain preview is rebuilt when only the import changes',
+    /footprintCorners\(spec/.test(rd('src/games/biobuzz/StartEditor.tsx')) && /footprintCorners\(spec/.test(rd('src/ui/ChainStartEditor.tsx')) &&
+      /const specKey[\s\S]{0,300}JSON\.stringify\(s\.imported\)/.test(rd('src/ui/ChainStartEditor.tsx')),
+  );
+}
+
+// ---- the DECODE tutorial drops its artifact ahead of an import's HULL, in line with its mouth --
+{
+  const intakeStep = DECODE_TUTORIAL.steps.find((x) => x.id === 'intake')!;
+  // the review's long nose, and one with its placed mouth off the centreline
+  const hulls: Record<string, ImportedRobot> = {
+    ...IMP_REVIEW_HULLS,
+    frontOff: { v: 1, id: '7777777777777777', hull: [{ x: -3, y: -8 }, { x: 15, y: -8 }, { x: 15, y: 8 }, { x: -3, y: 8 }], heightIn: 14, mech: { intakes: [{ edge: 'front', from: -8, to: 0 }] } },
+  };
+  const bad: string[] = [];
+  for (const [name, imp] of Object.entries(hulls)) {
+    for (const alliance of ['blue', 'red'] as const) {
+      const spec = coerceSpec({ ...DEFAULT_SPEC, imported: imp }, DEFAULT_SPEC, 'decode');
+      const w = createWorld('free', 20260918, [{ id: 0, alliance, spec, assists: { ...DEFAULT_ASSISTS, fieldCentric: false, autoIntake: false, autoFire: false }, startIndex: 0 }]);
+      DECODE_TUTORIAL.seedWorld?.(w, 0);
+      const held = new Set(w.balls.filter((b) => b.state.kind === 'held').map((b) => b.id));
+      intakeStep.stage!(w, 0);
+      const r = w.robots[0];
+      const ball = w.balls.find((b) => b.state.kind === 'ground' && held.has(b.id))!;
+      const loc = rot({ x: ball.pos.x - r.pos.x, y: ball.pos.y - r.pos.y }, -r.heading);
+      const depth = polyFeature(spec.imported!.hull, loc).depth;
+      const p0 = { x: ball.pos.x, y: ball.pos.y };
+      const idle: RobotCommand = { driveX: 0, driveY: 0, rotate: 0, leftDrive: 0, rightDrive: 0, intake: false, fire: false };
+      for (let t = 0; t < 20; t++) step(w, SIM_DT, new Map([[0, idle]]));
+      const moved = hyp(ball.pos.x - p0.x, ball.pos.y - p0.y);
+      let taken = -1;
+      for (let t = 0; t < 180 && taken < 0; t++) {
+        step(w, SIM_DT, new Map([[0, { ...idle, driveY: 0.4, leftDrive: 0.4, rightDrive: 0.4, intake: true }]]));
+        if (ball.state.kind === 'held') taken = t;
+      }
+      const mouthY = decodeImportMouth(spec).yc;
+      if (depth > -(IMPC.BALL_RADIUS + 1) || moved > 0.01 || taken < 0 || Math.abs(loc.y - mouthY) > 1e-6) {
+        bad.push(`${name} ${alliance}: depth ${depth.toFixed(2)} moved ${moved.toFixed(2)} taken ${taken} lateral ${loc.y.toFixed(2)} vs mouth ${mouthY.toFixed(2)}`);
+      }
+    }
+  }
+  check('imports/decode tutorial: the intake step’s artifact rests clear of every review hull, in front of its mouth, and driving straight at it takes it', bad.length === 0, bad.join('; '));
+}
+
+// ---- THE ACTIVE ROBOT ACROSS TWO DEVICES (`src/robotImport/libraryIds.ts`) -----------------
+{
+  const X: ImportedRobot = { v: 1, id: 'aaaaaaaaaaaaaaaa', hull: [{ x: -8, y: -8 }, { x: 9, y: -8 }, { x: 9, y: 8 }, { x: -8, y: 8 }], heightIn: 14 };
+  const withId = (imp: ImportedRobot, id: string): ImportedRobot => ({ ...imp, id });
+  type Row = { id: string; sharedFrom?: string; spec: { imported?: ImportedRobot } };
+  const row = (imp: ImportedRobot, sharedFrom?: string): Row => ({ id: imp.id, ...(sharedFrom ? { sharedFrom } : {}), spec: { imported: imp } });
+  const specOf = (e: Row) => e.spec.imported;
+
+  // the lookup: its own id first, then a share-file copy that carried it, else nothing
+  const own = row(X);
+  const copy = row(withId(X, 'bbbbbbbbbbbbbbbb'), X.id);
+  check('imports/library ids: a record answers for its own id first, then for the share-file id it carried, else nothing',
+    libraryEntryFor([copy, own], X.id) === own && libraryEntryFor([copy], X.id) === copy && libraryEntryFor([copy], 'cccccccccccccccc') === null && libraryEntryFor(null, X.id) === null);
+  check('imports/library ids: the same robot is the same descriptor whatever its id; a moved vertex is another robot',
+    sameImportedRobot(X, withId(X, 'dddddddddddddddd')) && !sameImportedRobot(X, { ...X, hull: [{ x: -8, y: -8 }, { x: 10, y: -8 }, { x: 10, y: 8 }, { x: -8, y: 8 }] }) && !sameImportedRobot(X, undefined));
+
+  /**
+   * THE PING-PONG, PLAYED OUT. One account, two devices. The account holds ONE active spec; each
+   * device a library. A makes X; B gets the synced spec, has no model, and imports A's file. Under
+   * the old rule B minted Y, Y became active and synced, and A's own X was "not on this device".
+   */
+  let active: ImportedRobot = X;
+  const devA: Row[] = [row(X)];
+  const devB: Row[] = [];
+  const addShared = (dev: Row[], file: ImportedRobot): void => {
+    const plan = planShareAdd(file, active, dev, specOf);
+    const id = plan.kind === 'adopt' ? plan.id : plan.kind === 'ask' ? plan.have.id : 'eeeeeeeeeeeeeeee';
+    const at = dev.findIndex((e) => e.id === id);
+    const rec = row(withId(file, id), file.id);
+    if (at >= 0) dev[at] = rec;
+    else dev.push(rec);
+    if (plan.kind === 'adopt' && plan.retire) dev.splice(dev.findIndex((e) => e.id === plan.retire), 1);
+    active = rec.spec.imported!; // the add makes it the active robot, which syncs
+  };
+  addShared(devB, X);
+  check('imports/library ids: B adding A’s file for the account’s active robot keeps its id, so the synced robot is on BOTH devices (no ping-pong)',
+    active.id === X.id && libraryEntryFor(devA, active.id) !== null && libraryEntryFor(devB, active.id) !== null && devB.length === 1, JSON.stringify({ active: active.id, b: devB.map((e) => e.id) }));
+  addShared(devA, X);
+  check('imports/library ids: ...and A adding it back changes nothing either', active.id === X.id && devA.length === 1);
+
+  // a TEAMMATE (another account) still gets a fresh id per device, or one room could not seat both
+  const mate = planShareAdd(X, withId({ ...X, heightIn: 12 }, 'ffffffffffffffff'), [], specOf);
+  check('imports/library ids: a share file that is not the account’s active robot still gets a fresh id (two teammates, one room)', mate.kind === 'fresh');
+  // ...and THAT teammate's second device adopts the teammate's id, which the file does not carry
+  const z = withId(X, '1212121212121212');
+  const t2 = planShareAdd(X, z, [], specOf);
+  check('imports/library ids: a teammate’s second device adopts the TEAMMATE’s id for the same robot (the descriptor decides, not the file’s id)', t2.kind === 'adopt' && t2.id === z.id);
+  // a copy made under its own id before this rule is replaced, not kept beside the adopted one
+  const legacy = planShareAdd(X, X, [copy], specOf);
+  check('imports/library ids: an older copy of the active robot under another id is retired when the file is added again', legacy.kind === 'adopt' && legacy.id === X.id && legacy.retire === copy.id);
+  // this device already has the file's robot but it is not the active one: the old question
+  const dup = planShareAdd(X, withId({ ...X, heightIn: 12 }, 'ffffffffffffffff'), [own], specOf);
+  check('imports/library ids: a file whose robot is here but not active asks replace or keep both, as before', dup.kind === 'ask' && dup.have === own);
+
+  // every place that turns the active id into a library record reads the rule
+  const rd = (f: string) => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  check('imports/library ids: the robot page, the lobby picker, the actions, the asset source and the share-file add all resolve through libraryIds',
+    /libraryEntryFor\(library\.entries, importedId\)/.test(rd('src/ui/Menu.tsx')) &&
+      /libraryEntryFor\(importLibrary\.entries, mySpec\.imported\?\.id\)/.test(rd('src/ui/Lobby.tsx')) &&
+      /libraryEntryFor\(entries, active\)/.test(rd('src/robotImport/ui/ImportedRobots.tsx')) &&
+      /const rid = await answeringId\(db, id\)/.test(rd('src/robotImport/library.ts')) &&
+      /planShareAdd\(spec\.imported, settings\.spec\.imported/.test(rd('src/robotImport/ui/ImportEditor.tsx')));
+  check('imports/library ids: a duplicate is a robot of its own and does not answer for the original’s share file', /const \{ sharedFrom: _from, \.\.\.rest \} = src/.test(rd('src/robotImport/library.ts')));
+  check('imports/library ids: libraryIds.ts imports types only (the robot page and the lobby are in `main`)',
+    rd('src/robotImport/libraryIds.ts').split('\n').filter((l) => /^import /.test(l)).every((l) => /^import type /.test(l)));
+}
+
+// ---- THE REPLAY EXPORT waits for an import's picture (2D) or mesh (3D) before frame 0 --------
+{
+  // the export draws its frames in one synchronous burst, so a picture still decoding when it
+  // starts is drawn as the silhouette until the browser gets a turn. `importedTopsSettled` is the
+  // wait; Node has no `Image`, so a stub decodes on a later macrotask, as a browser would.
+  const g = globalThis as unknown as { Image?: unknown };
+  const hadImage = 'Image' in g;
+  const prevImage = g.Image;
+  const realCreate = URL.createObjectURL;
+  const realRevoke = URL.revokeObjectURL;
+  let n = 0;
+  URL.createObjectURL = (): string => `blob:settle/${++n}`;
+  URL.revokeObjectURL = (): void => {};
+  class SlowImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    decoding = '';
+    set src(_v: string) {
+      setTimeout(() => this.onload?.(), 5);
+    }
+  }
+  g.Image = SlowImage;
+  try {
+    resetImportedAssetsForTests();
+    let release: (() => void) | null = null;
+    setImportedAssetSource({
+      // the picture comes back only when the test says so (the library's IndexedDB read)
+      top: (id) => (id.startsWith('0') ? Promise.resolve(null) : new Promise<Blob>((r) => (release = () => r(new Blob([id]))))),
+      mesh: async () => null,
+    });
+    const id = 'abcabcabcabcabc1';
+    const missing = '0000000000000002';
+    let done = false;
+    const wait = importedTopsSettled([id, missing]).then(() => {
+      done = true;
+    });
+    await new Promise<void>((r) => setTimeout(r, 10));
+    const heldBack = !done && importedTopImage(id) === null;
+    release!();
+    await wait;
+    check(
+      'imports/export: importedTopsSettled waits until an import’s top picture is DECODED (and a missing one settles too), so frame 0 has it',
+      heldBack && done && importedTopImage(id) !== null && importedTopImage(missing) === null,
+    );
+    // an entry dropped while loading settles too, rather than holding the export to its timeout
+    let release2: (() => void) | null = null;
+    setImportedAssetSource({ top: () => new Promise<Blob>((r) => (release2 = () => r(new Blob(['x'])))), mesh: async () => null });
+    const id2 = 'abcabcabcabcabc2';
+    let done2 = false;
+    const wait2 = importedTopsSettled([id2]).then(() => {
+      done2 = true;
+    });
+    invalidateImportedAssets(id2);
+    release2!();
+    await Promise.race([wait2, new Promise<void>((r) => setTimeout(r, 200))]);
+    check('imports/export: ...and a load that is dropped meanwhile settles as well', done2);
+  } finally {
+    resetImportedAssetsForTests();
+    URL.createObjectURL = realCreate;
+    URL.revokeObjectURL = realRevoke;
+    if (hadImage) g.Image = prevImage;
+    else delete g.Image;
+  }
+  const rd = (f: string) => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  const rv = rd('src/ui/ReplayView.tsx');
+  const at = rv.indexOf('blob = await recordFast({');
+  const wait = rv.indexOf('await Promise.race([settled');
+  check(
+    'imports/export: the replay export awaits the pictures (2D) or the scene’s assetsSettled (3D), bounded, BEFORE recordFast draws frame 0; the BIOBUZZ scene implements it',
+    wait > 0 && wait < at && /scene\.assetsSettled\?\.\(shot\.world\)/.test(rv) && /importedTopsSettled\(importIds\)/.test(rv) &&
+      /assetsSettled\(world: World\): Promise<void> \{\s*return importedMeshesSettled\(/.test(rd('src/games/biobuzz/scene/renderScene.ts')),
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // IMPORTED ROBOT VISUALS RELAY (docs/area/netcode.md, VISUALS RELAY) — the wire rules, pure
 // ════════════════════════════════════════════════════════════════════════════
 {
@@ -33911,8 +34276,9 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
   // the file's id: two teammates who load one file must be able to sit in one room
   const edN = ed.replace(/\r\n/g, '\n');
   check(
-    'import UI share file: an added robot gets a fresh id and remembers the file’s (sharedFrom), and a second add of that file offers Replace under the local id',
-    ['await finish(withId(newRobotId()));', 'sharedFrom: fileId,', 'r.sharedFrom === fileId || r.id === fileId', 'replace: () => void finish(withId(have.id))'].every((t) => edN.includes(t)) &&
+    'import UI share file: an added robot gets a fresh id and remembers the file’s (sharedFrom), and a second add of that file offers Replace under the local id (unless it is the account’s active robot: `libraryIds.ts`)',
+    ['await finish(withId(newRobotId()));', 'sharedFrom: fileId,', 'planShareAdd(spec.imported, settings.spec.imported', 'replace: () => void finish(withId(have.id))'].every((t) => edN.includes(t)) &&
+      readFileSync('src/robotImport/libraryIds.ts', 'utf8').includes('entries.find((e) => e.sharedFrom === file.id || e.id === file.id)') &&
       readFileSync('src/robotImport/library.ts', 'utf8').includes('...(r.sharedFrom ? { sharedFrom: r.sharedFrom } : {}),'),
   );
 }

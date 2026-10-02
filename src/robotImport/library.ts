@@ -13,6 +13,7 @@
 import { ROBOT_LIBRARY_DB } from '../storageKeys';
 import type { GameId } from '../types';
 import type { LibraryEntry, LibraryRobot } from './types';
+import { libraryEntryFor } from './libraryIds';
 
 /** 2 added the two DRAFT stores (lane 4, the editor): `drafts` holds an unfinished import's editor
  *  state (keyPath `key`, index `game`), `draftModels` its simplified source-frame model, written
@@ -185,7 +186,7 @@ export function putRobot(robot: LibraryRobot): Promise<LibraryResult<LibraryEntr
     else files.delete(fileKey(robot.id, LITE));
     const e = await done(tx);
     if (e) return err(e);
-    topCache.delete(robot.id);
+    topCache.clear(); // any id may answer through this robot (`answeringId`), not only its own
     return ok(entry);
   });
 }
@@ -216,7 +217,11 @@ export async function duplicateRobot(id: string): Promise<LibraryResult<LibraryE
     name: `${src.spec.name} copy`.slice(0, 64),
     ...(src.spec.imported ? { imported: { ...src.spec.imported, id: nid } } : {}),
   };
-  return putRobot({ ...src, id: nid, spec, created: now, updated: now });
+  // a copy is a robot of its own: it does not answer for the share file the original came from
+  // (`sharedFrom`, read by `libraryEntryFor`), or the synced spec could resolve to either
+  const { sharedFrom: _from, ...rest } = src;
+  void _from;
+  return putRobot({ ...rest, id: nid, spec, created: now, updated: now });
 }
 
 /** remove a robot and its blobs */
@@ -228,17 +233,32 @@ export function deleteRobot(id: string): Promise<LibraryResult<void>> {
     for (const k of [...KINDS, LITE]) files.delete(fileKey(id, k));
     const e = await done(tx);
     if (e) return err(e);
-    topCache.delete(id);
+    topCache.clear();
     return ok(undefined);
   });
+}
+
+/**
+ * The id of the record that ANSWERS for imported-robot `id` here (`libraryEntryFor`): `id` itself
+ * when a robot has it, else a copy added from a share file that carried it. The account syncs the
+ * active robot's spec and never its model, so a renderer or the room relay asking for the synced
+ * id must find this device's copy whatever id it was saved under (`libraryIds.ts`).
+ */
+async function answeringId(db: IDBDatabase, id: string): Promise<string> {
+  const store = db.transaction(ROBOTS, 'readonly').objectStore(ROBOTS);
+  if ((await request(store.getKey(id))) !== undefined) return id;
+  const rows = (await request(store.getAll())) as LibraryEntry[];
+  rows.sort((a, b) => b.updated - a.updated || (a.id < b.id ? -1 : 1));
+  return libraryEntryFor(rows, id)?.id ?? id;
 }
 
 async function fileFor(id: string, kind: FileKind | typeof LITE): Promise<Blob | null> {
   const db = await openDb();
   if (!db) return null;
   try {
+    const rid = await answeringId(db, id);
     const tx = db.transaction(FILES, 'readonly');
-    const blob = (await request(tx.objectStore(FILES).get(fileKey(id, kind)))) as Blob | undefined;
+    const blob = (await request(tx.objectStore(FILES).get(fileKey(rid, kind)))) as Blob | undefined;
     return blob ?? null;
   } catch {
     return null;
@@ -349,10 +369,11 @@ export function meshLiteFor(id: string): Promise<Blob | null> {
 /** cache the lighter mesh on the robot's record (a no-op when the robot is gone) */
 export function putMeshLite(id: string, blob: Blob): Promise<LibraryResult<void>> {
   return withDb(async (db) => {
+    const rid = await answeringId(db, id); // the relay asks by the synced id (see `answeringId`)
     const tx = db.transaction([ROBOTS, FILES], 'readwrite');
-    const entry = (await request(tx.objectStore(ROBOTS).get(id))) as LibraryEntry | undefined;
+    const entry = (await request(tx.objectStore(ROBOTS).get(rid))) as LibraryEntry | undefined;
     if (!entry) return err('not-found');
-    tx.objectStore(FILES).put(blob, fileKey(id, LITE));
+    tx.objectStore(FILES).put(blob, fileKey(rid, LITE));
     const e = await done(tx);
     return e ? err(e) : ok(undefined);
   });

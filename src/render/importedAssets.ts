@@ -215,6 +215,8 @@ interface TopEntry {
   state: 'loading' | 'ready' | 'missing';
   img: HTMLImageElement | null;
   url: string | null;
+  /** resolves when this load is over: decoded, missing, or the entry was dropped meanwhile */
+  settled: Promise<void>;
 }
 
 /** LRU by insertion order: a hit is re-inserted at the end, eviction takes from the front */
@@ -265,15 +267,16 @@ function topBlob(id: string): Promise<Blob | null> {
 }
 
 function startTop(id: string): TopEntry {
-  const entry: TopEntry = { state: 'loading', img: null, url: null };
+  let done!: () => void;
+  const entry: TopEntry = { state: 'loading', img: null, url: null, settled: new Promise<void>((r) => (done = r)) };
   tops.set(id, entry);
   evictTops();
   void topBlob(id).then((blob) => {
     // a load that finishes for an entry that was evicted or replaced meanwhile is discarded
-    if (tops.get(id) !== entry) return;
+    if (tops.get(id) !== entry) return done();
     if (!blob) {
       entry.state = 'missing';
-      return;
+      return done();
     }
     const url = URL.createObjectURL(blob);
     const img = new Image();
@@ -281,20 +284,33 @@ function startTop(id: string): TopEntry {
     img.onload = () => {
       if (tops.get(id) !== entry) {
         URL.revokeObjectURL(url);
-        return;
+        return done();
       }
       entry.state = 'ready';
       entry.img = img;
       entry.url = url;
       bump(id);
+      done();
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
       if (tops.get(id) === entry) entry.state = 'missing';
+      done();
     };
     img.src = url;
   });
   return entry;
+}
+
+/**
+ * Resolves once the top pictures of `ids` have SETTLED — decoded, or known not to be on this device
+ * — starting any load not yet asked for. For a host that draws frames in one synchronous burst and
+ * so never sees a picture land between them: the replay export awaited nothing and drew an import
+ * as its silhouette until the decode happened to finish (integration review 2026-10-02). It does
+ * not reject; a caller that must not wait forever races it against a timer.
+ */
+export function importedTopsSettled(ids: readonly string[]): Promise<void> {
+  return Promise.all(ids.map((id) => topEntry(id)?.settled)).then(() => undefined);
 }
 
 function topEntry(id: string): TopEntry | null {

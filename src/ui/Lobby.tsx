@@ -44,6 +44,7 @@ import type { RoomInvite } from '../net/api';
 import { FriendsPanel, type RoomInviteTarget } from './FriendsPanel';
 import { copyText } from './copyText';
 import { useLibrary } from '../robotImport/ui/useLibrary';
+import { libraryEntryFor } from '../robotImport/libraryIds';
 
 interface Props {
   settings: GameSettings;
@@ -1562,7 +1563,7 @@ export function Lobby({
                       key={e.id}
                       spec={e.spec}
                       game={settings.game}
-                      on={mySpec.imported?.id === e.id}
+                      on={libraryEntryFor(importLibrary.entries, mySpec.imported?.id)?.id === e.id}
                       imported
                       team={teamLine(e.spec)}
                       thumb={

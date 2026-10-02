@@ -15,6 +15,7 @@ import {
   bbHopperCap,
 } from './config';
 import { bbKindOf } from './score';
+import { bbImportSolids } from './importMech';
 import { biobuzzPhysics } from './state';
 
 /**
@@ -955,6 +956,23 @@ export const BB_G402_REARM_S = 1; // APPROX, s
 
 export function bbIntrusion(r: RobotState): number {
   const want = r.alliance === 'red' ? 1 : -1; // the sign of x that is the OPPONENT's half
+  /**
+   * AN IMPORT'S FRAME IS ITS HULL BEHIND THE MOUTHS (`bbImportSolids().chassis`, the polygon the
+   * POLLEN solve meets), and its origin is the wheelbase centre, not the middle of that shape. So
+   * the depth is its deepest vertex along the line normal. The centred `length/2 × width/2` box
+   * below billed a hull wholly on its own half (a 6-in rear toward the line read 2.5 in across)
+   * and let a long side cross 3 in unseen.
+   */
+  if (r.spec.imported) {
+    const c = dcos(r.heading);
+    const s = dsin(r.heading);
+    let deepest = -Infinity;
+    for (const p of bbImportSolids(r.spec).chassis) {
+      const d = (r.pos.x + p.x * c - p.y * s) * want;
+      if (d > deepest) deepest = d;
+    }
+    return deepest > 0 ? deepest : 0;
+  }
   const reach =
     Math.abs((r.spec.length / 2) * dcos(r.heading)) + Math.abs((r.spec.width / 2) * dsin(r.heading));
   const deepest = r.pos.x * want + reach;

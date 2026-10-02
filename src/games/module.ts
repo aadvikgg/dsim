@@ -582,6 +582,16 @@ export interface GameScene {
    * that is missing, and every scene before this existed drew none of them.
    */
   readonly camera?: SceneCamera;
+  /**
+   * RESOLVES ONCE every asset this scene would draw for `world` has SETTLED: an imported robot's
+   * mesh parsed, or known not to be on this device. It never rejects.
+   *
+   * A live view does not need it — a mesh that lands re-keys the robot on the next frame. A host
+   * that draws its frames in one synchronous burst does: the replay EXPORT draws every frame
+   * before the browser gets a turn, so a parse still in flight left the first seconds of the file
+   * on the placeholder. OPTIONAL: a scene with no lazy assets need not implement it.
+   */
+  assetsSettled?(world: World): Promise<void>;
 }
 
 /**

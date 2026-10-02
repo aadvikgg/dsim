@@ -41,6 +41,7 @@ import { setClearPanelCap } from './renderFieldGlb';
 import { buildBiobuzzElements, setElementDetail, setElementShadows, updateBiobuzzElements, type BbElements } from './renderElements';
 import { loadElementGeometries } from './renderElementsGlb';
 import { bbWheelDetail, buildBiobuzzRobots, updateBiobuzzRobots, type BbRobots } from './renderRobots';
+import { importedMeshesSettled } from './renderImported';
 import { buildBiobuzzReticle, updateBiobuzzReticle, type BbReticle } from './renderReticle';
 import { applyVenueLayers, bbVenueDetail, buildBiobuzzVenue } from './renderVenue';
 import { createCameras, setCameraTuning, setDriverHeightIn, type BbCameras } from './renderCameras';
@@ -1244,6 +1245,11 @@ class BiobuzzScene implements GameScene {
     r.setScissorTest(false);
     r.autoClear = true;
     r.setViewport(0, 0, this.cssW, this.cssH);
+  }
+
+  /** `GameScene.assetsSettled`: every imported robot's mesh in `world`, parsed or known absent */
+  assetsSettled(world: World): Promise<void> {
+    return importedMeshesSettled(world.robots.map((r) => r.spec));
   }
 
   /**

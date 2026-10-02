@@ -11,6 +11,7 @@ import { polyBounds as bbox } from '../../sim/imported';
 import { invalidateImportedAssets } from '../../render/importedAssets';
 import { libraryChanged, onRobotNotice, peekRobotNotice, postRobotNotice, takeRobotNotice } from './handoff';
 import type { LibraryView } from './useLibrary';
+import { libraryEntryFor } from '../libraryIds';
 
 /**
  * CONFIGURE ▸ ROBOT'S HALF OF THE IMPORTER, in the main chunk: the Imported robots row (one card
@@ -224,20 +225,26 @@ export function ImportedPanel({
 export function useImportedActions({
   settings,
   applySpec,
+  entries,
 }: {
   settings: GameSettings;
   applySpec: (s: RobotSpec) => void;
+  /** this device's library, so the record that answers for the active robot is the one the robot
+   *  page shows (`libraryEntryFor`: its id, else a share-file copy that carried it) */
+  entries?: readonly LibraryEntry[] | null;
 }) {
   const [dialog, setDialog] = useState<{ kind: 'rename' | 'delete'; entry: LibraryEntry } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const active = settings.spec.imported?.id ?? null;
+  const activeEntryId = libraryEntryFor(entries, active)?.id ?? active;
+  const isActive = (e: LibraryEntry): boolean => !!active && e.id === activeEntryId;
 
   const rename = async (entry: LibraryEntry, name: string): Promise<void> => {
     setDialog(null);
     const { renameRobot } = await import('../library');
     const r = await renameRobot(entry.id, name);
     if (!r.ok) return setError(r.message);
-    if (active === entry.id) applySpec({ ...settings.spec, name });
+    if (isActive(entry)) applySpec({ ...settings.spec, name });
     setError(null);
     invalidateImportedAssets(entry.id);
     libraryChanged();
@@ -249,7 +256,7 @@ export function useImportedActions({
     const r = await deleteRobot(entry.id);
     if (!r.ok) return setError(r.message);
     await deleteDraft(`${entry.game}:${entry.id}`);
-    if (active === entry.id) applySpec(standardRobotFor(settings));
+    if (isActive(entry)) applySpec(standardRobotFor(settings));
     setError(null);
     invalidateImportedAssets(entry.id);
     libraryChanged();
@@ -280,7 +287,7 @@ export function useImportedActions({
         body={
           <p className="ds-hint">
             {COPY.deleteBody}
-            {active === dialog.entry.id ? ` ${COPY.deleteFallback(fallback.name || 'your standard robot')}` : ''}
+            {isActive(dialog.entry) ? ` ${COPY.deleteFallback(fallback.name || 'your standard robot')}` : ''}
           </p>
         }
         confirm={COPY.del}
