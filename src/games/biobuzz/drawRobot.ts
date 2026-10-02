@@ -3,8 +3,18 @@ import * as C from '../../config';
 import { clamp } from '../../math';
 import { robotsEnabled } from '../../sim/match';
 import { drawDecal, ROBOT_TRIM, roundRect, tintColor } from '../../render/drawRobot';
+import {
+  clipToHull,
+  drawAimMark,
+  drawImportedBody,
+  drawImportedFrontBack,
+  drawImportedOutline,
+  drawMouthState,
+  pullInsideHull,
+} from '../../render/drawImported';
 import { accentFill, clampCosmetics } from '../../cosmetics';
 import {
+  BB_END_BAR_T,
   BB_FRONT_INK,
   BB_PLACE_MARK_R,
   BB_REAR_INK,
@@ -204,26 +214,38 @@ export function drawBiobuzzRobot(
    * it is the Box Tube's placement marker, after the clip is restored — that point lies past the
    * footprint by construction, and it is a marker of where the robot REACHES, not of the robot.
    */
+  // AN IMPORTED ROBOT (`render/drawImported.ts`): the clip is its HULL, the body is the hull or the
+  // import's own top-down picture, and over a PICTURE only state is drawn — the mouths' grab areas,
+  // the held elements, the placement marker, the turrets' aim — never a second set of hardware.
+  // Every branch below is gated on `imp`, so a standard robot draws exactly what it did.
+  const imp = r.spec.imported;
+  let pictured = false;
   const fx = bbFootprint(r.spec);
   ctx.save();
-  ctx.beginPath();
-  ctx.rect(-fx.rear, -fx.half, fx.rear + fx.front, fx.half * 2);
-  ctx.clip();
+  if (imp) {
+    clipToHull(ctx, imp);
+    pictured = drawImportedBody(ctx, r, { fill: C.chassisFill(r.spec.chassisColor), accent, shadow: true });
+  } else {
+    ctx.beginPath();
+    ctx.rect(-fx.rear, -fx.half, fx.rear + fx.front, fx.half * 2);
+    ctx.clip();
 
-  // the SHARED body (deck, rails, structure) and the drivetrain, so a robot is recognisably
-  // the same object across games
-  drawChassisBody(ctx, r, C.chassisFill(r.spec.chassisColor));
-  drawDecal(ctx, hl, r.spec.width / 2, cosm.decal, accent);
-  drawWheels(ctx, r, ROBOT_TRIM, accent);
+    // the SHARED body (deck, rails, structure) and the drivetrain, so a robot is recognisably
+    // the same object across games
+    drawChassisBody(ctx, r, C.chassisFill(r.spec.chassisColor));
+    drawDecal(ctx, hl, r.spec.width / 2, cosm.decal, accent);
+    drawWheels(ctx, r, ROBOT_TRIM, accent);
+  }
 
-  drawBiobuzzIntake(ctx, r, intaking, accent);
+  if (pictured) drawMouthState(ctx, bbMouths(r.spec), intaking);
+  else drawBiobuzzIntake(ctx, r, intaking, accent);
 
   // The turretless launcher (chassis-fixed). The dumper sits just inside its MOUNTED edge: rotate
   // the local frame to that edge and draw the same shape, so a left/right mount spans the chassis
   // LENGTH exactly as `bbLaunch` fires it. Turrets are drawn LAST, in the world frame, because
   // they rotate independently of the chassis. Geometry keys off `launcher.mount`, the slot's OWN
   // resolved position, rather than `r.spec.shooterMount` read cold.
-  if (launcher.kind === 'dumper') {
+  if (launcher.kind === 'dumper' && !pictured) {
     const edge = bbShooterEdgeOf({ shooterMount: launcher.mount });
     const g = edgeGeom(r.spec, edge);
     ctx.save();
@@ -235,35 +257,69 @@ export function drawBiobuzzRobot(
   // The BOX TUBE's BASE — its pivot plates, pulley and spool, bolted to the deck at its mount.
   // The tower above them is drawn after the clip (`drawBoxTubeTower`): leaning out over a
   // FLOWER it passes the footprint, and it stands above everything on the deck.
-  if (lift) drawBoxTubeBase(ctx, r.spec, lift);
+  if (lift && !pictured) drawBoxTubeBase(ctx, r.spec, lift);
 
   // WHICH END IS THE FRONT — light bar, deck arrow, hazard bar. Drawn LAST inside the clip, over
   // every mechanism, because a cue that a sweeper can cover is not a cue. `bbFrontMarks`'
-  // header (`parts.ts`) is the language and the reason it is not the alliance colour.
-  drawFrontBack(ctx, r.spec);
+  // header (`parts.ts`) is the language and the reason it is not the alliance colour. An import
+  // draws the same two marks on its hull: the bar along the edge(s) facing forward, the arrow at
+  // its centroid.
+  if (imp) {
+    const rings = bbIsTurreted(launcher)
+      ? [launcher.mount, ...(launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount2] : [])].map((m) => ({
+          ...turretLocal(r.spec, m),
+          r: turretRadius(r.spec),
+        }))
+      : [];
+    drawImportedFrontBack(ctx, imp, BB_FRONT_INK, BB_END_BAR_T, rings);
+  }
+  else drawFrontBack(ctx, r.spec);
 
-  drawChassisOutline(ctx, r, ROBOT_TRIM); // the silhouette line — neutral; the alliance is the name label + the fills
+  // the silhouette line — neutral; the alliance is the name label + the fills
+  if (imp) drawImportedOutline(ctx, imp, ROBOT_TRIM);
+  else drawChassisOutline(ctx, r, ROBOT_TRIM);
 
   ctx.restore(); // ...end of the footprint clip
 
   // THE INTAKE'S REACH PAST THE FRAME — siderollers/ramp only, and only out here, unclipped
-  // (see the function header).
-  drawBiobuzzIntakeReach(ctx, r, intaking, world);
+  // (see the function header). Over a picture only the RAMP, whose deploy is state.
+  if (!pictured || bbIntakeKindOf(r.spec) === 'ramp') drawBiobuzzIntakeReach(ctx, r, intaking, world);
 
   // WHAT IT IS HOLDING, at fixed slots on the deck — before the turrets, which sit on top.
   drawHeldElements(ctx, r, launcher, lift);
 
   // THE PLACEMENT MARKER — outside the clip (see above), lit while a FLOWER ring is in reach —
-  // and the Box Tube's tower: folded, or deployed with its claw over that FLOWER's bore.
+  // and the Box Tube's tower: folded, or deployed with its claw over that FLOWER's bore. Over a
+  // picture the folded tower is already in it; only a DEPLOYED one is state.
   if (lift) {
     const flower = world !== undefined ? bbFlowerInReach(world, r) : null;
     drawPlaceMarker(ctx, r.spec, flower !== null);
-    drawBoxTubeTower(ctx, r, lift, flower);
+    if (!pictured || flower !== null) drawBoxTubeTower(ctx, r, lift, flower);
   }
 
   ctx.restore();
 
-  if (bbIsTurreted(launcher)) {
+  if (bbIsTurreted(launcher) && pictured) {
+    // over a picture: each turret's AIM at its own cell, the NECTAR one with the alliance rim
+    const pollen = r.hopper.some((c) => c === 'yellow');
+    const nectar = r.hopper.some((c) => c === 'red' || c === 'blue');
+    const ring = turretRadius(r.spec);
+    const at = (pos: BbMountPos): Vec2 => {
+      const l = turretLocal(r.spec, pos);
+      return {
+        x: r.pos.x + Math.cos(r.heading) * l.x - Math.sin(r.heading) * l.y,
+        y: r.pos.y + Math.sin(r.heading) * l.x + Math.cos(r.heading) * l.y,
+      };
+    };
+    const p0 = at(launcher.mount);
+    if (launcher.kind === 'twinturret') {
+      drawAimMark(ctx, p0.x, p0.y, r.turretHeading, ring, pollen);
+      const p1 = at(launcher.mount2 ?? launcher.mount);
+      drawAimMark(ctx, p1.x, p1.y, r.bbTurret2Heading ?? r.turretHeading, ring, nectar, color);
+    } else {
+      drawAimMark(ctx, p0.x, p0.y, r.turretHeading, ring, loaded);
+    }
+  } else if (bbIsTurreted(launcher)) {
     // A DOUBLE turret is TWO INDIVIDUAL turrets, each at its own cell with its own yaw and pitch:
     // turret 0 (`mount`) launches POLLEN, turret 1 (`mount2`) launches NECTAR and wears the
     // alliance colour on its rim. Each one's live accent says whether an element of ITS kind is
@@ -1007,7 +1063,12 @@ function drawHeldElements(
 ): void {
   const n = Math.min(r.hopper.length, HELD_LAYOUTS[0].length);
   if (n === 0) return;
-  const slots = bbHeldSlots(r.spec, launcher, lift);
+  // an IMPORT's slots are searched on its bounding box like any build's, then each is pulled onto
+  // the deck the hull actually has — a pointed nose leaves the box's corners empty
+  const imp = r.spec.imported;
+  const slots = imp
+    ? bbHeldSlots(r.spec, launcher, lift).map((s) => pullInsideHull(imp, s, HELD_R + 0.3))
+    : bbHeldSlots(r.spec, launcher, lift);
   for (let i = 0; i < n; i++) {
     const c = r.hopper[i] as ArtifactColor;
     const s = slots[i];

@@ -319,10 +319,10 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-robot` | src/ui/shell.css:1457 | 7 |
+| `.ds-robot` | src/ui/shell.css:1457 | 8 |
 | `.ds-robot-card` | src/ui/shell.css:4894 | 3 |
 | `.ds-robot-card-thumb` | src/ui/shell.css:4904 | 2 |
-| `.ds-robot-sprite` | src/ui/shell.css:4972 | 3 |
+| `.ds-robot-sprite` | src/ui/shell.css:4972 | 4 |
 
 ## `ds-roleswap` — 4
 
