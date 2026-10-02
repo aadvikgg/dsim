@@ -497,16 +497,59 @@ import {
   coerceImported,
   importedHalfDiag,
   polyBounds,
+  polyCentroid,
   polyFeature,
   rotatedPolyBounds,
 } from '../src/sim/imported';
 import { robotHullWorld } from '../src/sim/physics';
 import { robotHullLocal } from '../src/sim/field';
+import {
+  ANY_ID,
+  IMPORTED_MESH_CAP,
+  IMPORTED_MESH_TO_ROBOT,
+  IMPORTED_TOP_CAP,
+  importedAssetCacheSizes,
+  importedAssetVersion,
+  importedMeshBlob,
+  importedMeshVersion,
+  importedTopFrame,
+  importedTopImage,
+  importedTopUrl,
+  invalidateImportedAssets,
+  registerImportedAssets,
+  resetImportedAssetsForTests,
+  robotToTopPixel,
+  setImportedAssetSource,
+  subscribeImportedAssets,
+  topImageTransform,
+  topPixelToRobot,
+  unregisterImportedAssets,
+} from '../src/render/importedAssets';
+import { frontArrowSpot, pullInsideHull } from '../src/render/drawImported';
+import { drawRobot as drawDecodeSprite } from '../src/render/drawRobot';
+import { drawChainRobot } from '../src/games/chain/drawRobot';
+import { drawBiobuzzRobot } from '../src/games/biobuzz/drawRobot';
 import { wheelLocals, chassisInertia } from '../src/sim/robot';
 import { placeGroundArtifact } from '../src/sim/world';
 import { bbFootprintGap, bbRobotsContact } from '../src/games/biobuzz/penalties';
 import { bbEvalStart, bbStartBox } from '../src/games/biobuzz/start';
 import type { ImportedRobot } from '../src/types';
+import type { Vec2 } from '../src/types';
+import * as IMPC from '../src/config';
+import type { SolidShape } from '../src/sim/artifactSolids';
+import { heldSlotPos } from '../src/sim/physics';
+import { turretWorldPos } from '../src/sim/robot';
+import { decodeImportLaunchZ, decodeImportMouth, DECODE_IMPORT_LAUNCH_MIN } from '../src/sim/importedMech';
+import { defaultImportedMech, mechHandles, validateImportedMech } from '../src/games/sim';
+import { BB_DEFAULT_SPEC } from '../src/games/biobuzz/coerce';
+import { bbMouths, bbRobotSolids, mouthAxes } from '../src/games/biobuzz/robot';
+import * as PROTO from '../src/net/protocol';
+import * as IV from '../src/net/importVisuals';
+import * as SV from '../server/importVisuals';
+import * as VF from './visualFixtures';
+import * as IVC from '../src/net/importVisualsClient';
+import * as BR from '../src/net/importedAssetsBridge';
+import type { Transport } from '../src/net/transport';
 
 // the sim now steps a Rapier physics world (robots) — load the WASM before any
 // step() runs. tsx runs this file as ESM, so top-level await is available.
@@ -9143,7 +9186,7 @@ function pushContest(A: Partial<RobotSpec>, B: Partial<RobotSpec>, seconds = 3):
     const roomSrc = readFileSync('server/room.ts', 'utf8');
     check(
       'lan tab: the room itself stops its loop when it empties, so nothing steps an empty room',
-      /if \(this\.clients\.size === 0\) \{\s*\n\s*this\.stop\(\);\s*\n\s*this\.onEmpty\(\);/.test(roomSrc),
+      /if \(this\.clients\.size === 0\) \{\s*\n\s*this\.stop\(\);\s*\n\s*this\.emptied\(\);/.test(roomSrc) && /private emptied\(\): void \{\s*\n\s*this\.visuals\.dispose\(\);\s*\n\s*this\.onEmpty\(\);/.test(roomSrc),
     );
     /**
      * ⚠️ **A SOLO RECORD RUN NEVER BLOCKS ITS OWN OWNER, AND THE RESTART BUTTON IS WHY.**
@@ -29076,7 +29119,9 @@ const dumperSetup = (): RobotSetup => {
     readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
       d.isDirectory() ? walk(joinPath(dir, d.name)) : /\.tsx?$/.test(d.name) ? [joinPath(dir, d.name)] : [],
     );
-  const revokers = walk('src').filter((f) => /revokeObjectURL/.test(readFileSync(f, 'utf8')));
+  // `render/importedAssets.ts` is the one owner of DISPLAY object URLs (an imported robot's top-down
+  // picture, revoked when its cache entry goes) — never a download, so it is not this rule's case
+  const revokers = walk('src').filter((f) => /revokeObjectURL/.test(readFileSync(f, 'utf8')) && !/importedAssets\.ts$/.test(f));
   const sb = readFileSync('src/ui/saveBlob.ts', 'utf8');
   check(
     '⚠️ downloads: only saveBlob revokes an object URL, and it waits well past the hand-off',
@@ -29177,9 +29222,8 @@ const dumperSetup = (): RobotSetup => {
  * The capability, the predicates, the one admission rule every door asks, the replay stamp and
  * the device-only rule for practice and LAN runs. The rooms are next.
  *
- * ⚠️ LANE NOTE: `coerceSpec` carries `imported` across only once the sim lane lands. Nothing in
- * THIS block needs it — specs are built with `imported` directly — and the two checks that do are
- * marked `[needs coerceSpec carry]` and say so when they are skipped.
+ * `coerceSpec` carries `imported` (the sim lane landed), so the roster checks below read what the
+ * room actually kept.
  */
 {
   const IMP = {
@@ -29352,7 +29396,6 @@ const dumperSetup = (): RobotSetup => {
   const started = (s: Sink, id: string) => s[id].find((m) => m.t === 'matchStart') as Extract<ServerMsg, { t: 'matchStart' }> | undefined;
   const result = (s: Sink, id: string) => s[id].find((m) => m.t === 'matchResult') as Extract<ServerMsg, { t: 'matchResult' }> | undefined;
   const anyImport = (m: Extract<ServerMsg, { t: 'matchStart' }> | undefined): boolean => !!m && m.setups.some((x) => isImportedSpec(x.spec));
-  const carried = isImportedSpec(coerceSpec(impSpec, DEFAULT_SPEC, 'decode'));
 
   // ---- a CUSTOM room (and a LAN room is this same class) ----------------------------------
   {
@@ -29422,13 +29465,9 @@ const dumperSetup = (): RobotSetup => {
     room.add(mk(s, 'b', CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
     room.onMessage('a', { t: 'update', patch: { spec: impSpec } });
     check('imports/room: a custom room takes an update that brings an import (no refusal)', errs(s, 'a').length === 0, JSON.stringify(errs(s, 'a')));
-    if (carried) {
-      check('imports/room: [needs coerceSpec carry] ...and the roster now carries it', isImportedSpec(rosterSpec(s, 'b', 'a')));
-      room.onMessage('a', { t: 'update', patch: { spec: { ...DEFAULT_SPEC } } });
-      check('imports/room: [needs coerceSpec carry] a re-pick of a STANDARD robot drops the import (the base spec must not keep it)', !isImportedSpec(rosterSpec(s, 'b', 'a')));
-    } else {
-      console.log('SKIP imports/room: [needs coerceSpec carry] roster carries the import / a standard re-pick drops it — coerceSpec does not carry `imported` yet');
-    }
+    check('imports/room: ...and the roster now carries it', isImportedSpec(rosterSpec(s, 'b', 'a')));
+    room.onMessage('a', { t: 'update', patch: { spec: { ...DEFAULT_SPEC } } });
+    check('imports/room: a re-pick of a STANDARD robot drops the import (the base spec must not keep it)', !isImportedSpec(rosterSpec(s, 'b', 'a')));
     room.stop();
   }
 
@@ -29673,7 +29712,17 @@ function impBroken(c: ImportedRobot): string[] {
   }
   if (c.mech?.intakes) {
     if (c.mech.intakes.length > 4) bad.push('more than 4 intakes');
-    for (const it of c.mech.intakes) if (!(it.from < it.to)) bad.push('intake from >= to');
+    for (const it of c.mech.intakes) if (!(it.to - it.from >= 1)) bad.push('intake narrower than 1 in or from >= to');
+    const order = ['front', 'back', 'left', 'right'];
+    for (let i = 1; i < c.mech.intakes.length; i++) {
+      if (!(order.indexOf(c.mech.intakes[i - 1].edge) < order.indexOf(c.mech.intakes[i].edge))) bad.push('intakes not one per edge, front/back/left/right');
+    }
+  }
+  for (const k of ['shooter', 'shooter2', 'place'] as const) {
+    const p = c.mech?.[k];
+    if (!p) continue;
+    if (polyFeature(h, p).depth < 0 || !onGrid(p.x) || !onGrid(p.y)) bad.push(`${k} outside the hull / off grid`);
+    if (!(p.z >= 0 && p.z <= c.heightIn) || !onGrid(p.z)) bad.push(`${k} z ${p.z}`);
   }
   if (JSON.stringify(c).length > 2048) bad.push(`descriptor is ${JSON.stringify(c).length} bytes`);
   return bad;
@@ -29738,6 +29787,19 @@ function impBroken(c: ImportedRobot): string[] {
       },
     }],
     ['mech with nothing valid', { ...base, mech: { shooter: { x: NaN, y: 0, z: 0 }, intakes: [{ edge: 'front', from: 2, to: 2 }] } }],
+    ['mech: duplicate edges out of order, a narrow span, a second head off the robot', {
+      ...base,
+      mech: {
+        shooter2: { x: -40, y: 3, z: 6 },
+        intakes: [
+          { edge: 'left', from: -3, to: 4 },
+          { edge: 'right', from: 1, to: 1.5 },
+          { edge: 'front', from: -6, to: 6 },
+          { edge: 'left', from: -8, to: 8 },
+          { edge: 'back', from: 2, to: -2 },
+        ],
+      },
+    }],
     ['100 000 points', { ...base, hull: circle(100000, 8) }],
     ['null', null],
     ['a string', 'imported'],
@@ -29782,8 +29844,25 @@ function impBroken(c: ImportedRobot): string[] {
     check('coerceImported: bands — at most 3, the inverted one dropped, sorted by z0', bands.length === 3 && bands[0].z0 <= bands[1].z0 && bands[1].z0 <= bands[2].z0, JSON.stringify(bands.map((b) => [b.z0, b.z1, b.hull.length])));
   }
   {
-    const m = want('mech: far shooter, bad edges, reversed spans, ten intakes')!.mech!;
-    check('coerceImported: mech — shooter clamped near the hull, intakes capped at 4 with from < to', m.shooter!.x <= 16 && m.shooter!.y >= -14 && m.shooter!.z <= 24 && m.intakes!.length === 4 && m.intakes![0].edge === 'front' && m.intakes![0].from === -5, JSON.stringify(m));
+    const c = want('mech: far shooter, bad edges, reversed spans, ten intakes')!;
+    const m = c.mech!;
+    check(
+      'coerceImported: mech — the shooter is moved INSIDE the hull with z capped at heightIn, a negative z is 0, and the ten left spans keep only the first',
+      polyFeature(c.hull, m.shooter!).depth >= 0 && m.shooter!.z === c.heightIn && m.place!.z === 0 &&
+        m.intakes!.length === 2 && m.intakes![0].edge === 'front' && m.intakes![0].from === -5 && m.intakes![0].to === 5 &&
+        m.intakes![1].edge === 'left' && m.intakes![1].from === 0 && m.intakes![1].to === 1,
+      JSON.stringify(m),
+    );
+  }
+  {
+    const c = want('mech: duplicate edges out of order, a narrow span, a second head off the robot')!;
+    const m = c.mech!;
+    check(
+      'coerceImported: mech — one span per edge (the first wins), sorted front/back/left/right, a span under 1 in dropped, shooter2 kept inside the hull',
+      isDeepStrictEqual(m.intakes!.map((i) => [i.edge, i.from, i.to]), [['front', -6, 6], ['back', -2, 2], ['left', -3, 4]]) &&
+        polyFeature(c.hull, m.shooter2!).depth >= 0 && m.shooter2!.z === 6,
+      JSON.stringify(m),
+    );
   }
   check('coerceImported: a mech with nothing valid is dropped', want('mech with nothing valid')!.mech === undefined);
 }
@@ -30062,21 +30141,30 @@ function impPlayCheck(g: GameId): void {
 }
 
 /**
- * AN ARTIFACT IS NEVER LEFT INSIDE AN IMPORT: the solids are the closed hull (every game, BIOBUZZ's
- * slot included), and `placeGroundArtifact` walks one dropped onto the robot's centre out of it.
+ * AN ARTIFACT IS NEVER LEFT INSIDE AN IMPORT: the solids are the hull CARVED by the game's intake
+ * (`importedMech.ts` — the chassis behind the mouth face, the funnel wedges or side plates), every
+ * piece inside the hull (a funnel's lip pokes `INTAKE_LIP` past it, as on a standard robot), and
+ * `placeGroundArtifact` walks one dropped onto the robot's centre out of every piece.
  */
 {
   const { w } = impWorld('decode', [{ imported: IMP_NOSE }]);
   const r = w.robots[0];
   const sol = robotSolids(r, []);
-  check('robotSolids of an import: the closed hull, no intake structure', sol.chassis.kind === 'poly' && sol.structure.length === 0 && isDeepStrictEqual((sol.chassis as { pts: unknown }).pts, r.spec.imported!.hull));
+  const hull = r.spec.imported!.hull;
+  const ptsOf = (sh: { kind: string; pts?: Vec2[] }) => sh.pts ?? [];
+  const inHull = (p: Vec2, pad: number) => polyFeature(hull, p).depth >= -pad - 1e-9;
+  check(
+    'robotSolids of an import: the hull behind the intake face plus the funnel wedges, every piece inside the hull (the lip excepted)',
+    sol.chassis.kind === 'poly' && sol.structure.length === 2 && ptsOf(sol.chassis).every((p) => inHull(p, 0)) && sol.structure.every((s) => ptsOf(s).every((p) => inHull(p, INTAKE_LIP))),
+    JSON.stringify(sol.structure.map(ptsOf)).slice(0, 200),
+  );
   const bb = simModuleFor('biobuzz').artifactSolids!(r, [], 1.4);
-  check('BIOBUZZ artifactSolids of an import: the same closed hull', isDeepStrictEqual(bb.chassis, sol.chassis) && bb.structure.length === 0);
+  check('BIOBUZZ artifactSolids of an import: its own carve — the hull behind the sweeper face and a plate either side, all inside the hull', bb.chassis.kind === 'poly' && bb.structure.length === 2 && [bb.chassis, ...bb.structure].every((s) => ptsOf(s).every((p) => inHull(p, 0))));
   const ball = w.balls.find((b) => b.state.kind === 'ground')!;
   ball.pos = { x: r.pos.x + 1, y: r.pos.y + 0.5 };
   placeGroundArtifact(w, ball, new Map([[r.id, sol]]));
-  const d = polyFeature(r.spec.imported!.hull, rot({ x: ball.pos.x - r.pos.x, y: ball.pos.y - r.pos.y }, -r.heading)).depth;
-  check('placeGroundArtifact walks an artifact out of an imported hull', d <= -BALL_RADIUS + 1e-6, `skin ${(d + BALL_RADIUS).toFixed(3)} in`);
+  const q = robotPenetration(r, sol, ball.pos, BALL_RADIUS);
+  check('placeGroundArtifact walks an artifact out of every solid of an imported robot', q === null || q.pen <= 1e-6, q ? `pen ${q.pen.toFixed(3)} in ${q.part}` : 'clear');
 }
 
 /**
@@ -30123,6 +30211,412 @@ function impPlayCheck(g: GameId): void {
   };
   const dflt = coerceSpec({ ...DEFAULT_SPEC, imported: IMP_NOSE }, DEFAULT_SPEC, 'decode');
   check('wheels: BASE parking counts the stated wheels (narrow: full, default: partial)', park(narrow) === 10 && park(dflt) === 5, `${park(narrow)} / ${park(dflt)}`);
+}
+
+/**
+ * ---- IMPORTED ROBOT VISUALS: the asset seam and its two frames (`src/render/importedAssets.ts`) ----
+ *
+ * The seam stores nothing: a source answers by id, in-memory blobs are lent, and a capped LRU holds
+ * decoded pictures whose object URLs must be revoked when they leave it. Node has no `Image`, so a
+ * stub decodes on the next microtask; `URL.createObjectURL`/`revokeObjectURL` are wrapped to count.
+ */
+{
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 6; i++) await new Promise<void>((r) => setTimeout(r, 0));
+  };
+  const g = globalThis as unknown as { Image?: unknown };
+  const hadImage = 'Image' in g;
+  const prevImage = g.Image;
+  const realCreate = URL.createObjectURL;
+  const realRevoke = URL.revokeObjectURL;
+  const live = new Set<string>();
+  let created = 0;
+  let revokedTwice = 0;
+  let revokedUnknown = 0;
+  URL.createObjectURL = (b: Blob): string => {
+    const u = `blob:test/${++created}`;
+    live.add(u);
+    void b;
+    return u;
+  };
+  URL.revokeObjectURL = (u: string): void => {
+    if (!live.has(u)) {
+      if (u.startsWith('blob:test/') && Number(u.slice(10)) <= created) revokedTwice++;
+      else revokedUnknown++;
+    }
+    live.delete(u);
+  };
+  class StubImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    decoding = '';
+    naturalWidth = 512;
+    private s = '';
+    set src(v: string) {
+      this.s = v;
+      queueMicrotask(() => this.onload?.());
+    }
+    get src(): string {
+      return this.s;
+    }
+  }
+  g.Image = StubImage;
+  try {
+    resetImportedAssetsForTests();
+    // ── the TOP-DOWN PICTURE's frame — the one map from its pixels to robot inches ──
+    const hull = IMP_NOSE.hull; // x −8..10, y −8..8
+    const f = importedTopFrame(hull);
+    check('imported assets: the top frame is the hull box, centred, max side + 1 in, 512 px',
+      f.cx === 1 && f.cy === 0 && f.sideIn === 19 && f.px === 512 && Math.abs(f.inPerPx - 19 / 512) < 1e-12, JSON.stringify(f));
+    let worst = 0;
+    for (const p of hull) {
+      const { u, v } = robotToTopPixel(p, f);
+      const q = topPixelToRobot(u, v, f);
+      worst = Math.max(worst, Math.hypot(q.x - p.x, q.y - p.y));
+    }
+    check('imported assets: robot → pixel → robot round-trips every hull vertex', worst < 1e-9, worst.toExponential(2));
+    const front = topPixelToRobot(f.px / 2, 0, f);
+    const left = topPixelToRobot(0, f.px / 2, f);
+    check('imported assets: image UP is robot +x (front), image LEFT is robot +y (left)',
+      front.x > f.cx + 9 && Math.abs(front.y - f.cy) < 1e-9 && left.y > f.cy + 9 && Math.abs(left.x - f.cx) < 1e-9);
+    const [a, b, c, d, e, ff] = topImageTransform(f);
+    let tw = 0;
+    for (const [u, v] of [[0, 0], [512, 0], [37, 411], [256, 256]]) {
+      const want = topPixelToRobot(u, v, f);
+      tw = Math.max(tw, Math.hypot(a * u + c * v + e - want.x, b * u + d * v + ff - want.y));
+    }
+    check('imported assets: the canvas transform IS the frame (drawImage lands where topPixelToRobot says)', tw < 1e-9, tw.toExponential(2));
+    // the sprite's chain to the SCREEN: robot frame → world (a nose-up heading, +90°) → the camera's
+    // y-flip. Image right must be screen right and image down screen down: never mirrored.
+    const toScreen = (u: number, v: number): [number, number] => {
+      const rx = a * u + c * v + e;
+      const ry = b * u + d * v + ff;
+      const wx = -ry; // rotate +90°
+      const wy = rx;
+      return [wx, -wy]; // y-flip
+    };
+    const o0 = toScreen(0, 0);
+    const ou = toScreen(1, 0);
+    const ov = toScreen(0, 1);
+    check('imported assets: drawn nose-up, the picture is NOT mirrored (image right = screen right, down = down)',
+      ou[0] - o0[0] > 0 && Math.abs(ou[1] - o0[1]) < 1e-9 && ov[1] - o0[1] > 0 && Math.abs(ov[0] - o0[0]) < 1e-9);
+    // ── the STORED MESH frame: glTF metres (+Y up, +Z front, +X left) → robot inches ──
+    const M = IMPORTED_MESH_TO_ROBOT;
+    const apply = (x: number, y: number, z: number): [number, number, number] => [
+      M[0] * x + M[4] * y + M[8] * z + M[12],
+      M[1] * x + M[5] * y + M[9] * z + M[13],
+      M[2] * x + M[6] * y + M[10] * z + M[14],
+    ];
+    const near = (p: number[], q: number[]): boolean => p.every((v, i) => Math.abs(v - q[i]) < 1e-9);
+    const det =
+      M[0] * (M[5] * M[10] - M[9] * M[6]) - M[4] * (M[1] * M[10] - M[9] * M[2]) + M[8] * (M[1] * M[6] - M[5] * M[2]);
+    check('imported assets: mesh frame — glTF +Z (1 in) is robot front, +X is left, +Y is up, and it is a proper rotation',
+      near(apply(0, 0, 0.0254), [1, 0, 0]) && near(apply(0.0254, 0, 0), [0, 1, 0]) && near(apply(0, 0.0254, 0), [0, 0, 1]) && det > 0,
+      `det ${det}`);
+
+    // ── the SOURCE, the cache, the cap, and revocation ──
+    const asked: string[] = [];
+    const meshAsked: string[] = [];
+    const blob = (s: string): Blob => new Blob([s], { type: 'image/png' });
+    setImportedAssetSource({
+      top: async (id) => {
+        asked.push(id);
+        return id.startsWith('0') ? null : blob(id);
+      },
+      mesh: async (id) => {
+        meshAsked.push(id);
+        return id.startsWith('0') ? null : new Blob([id], { type: 'model/gltf-binary' });
+      },
+    });
+    const ids = Array.from({ length: IMPORTED_TOP_CAP + 3 }, (_, i) => `a${String(i).padStart(15, '0')}`);
+    const heard: string[] = [];
+    const off = subscribeImportedAssets((id) => heard.push(id));
+    check('imported assets: the first ask is null (not loaded YET) and starts exactly one load', importedTopImage(ids[0]) === null && asked.length === 1);
+    importedTopImage(ids[0]);
+    check('...a second ask while it loads does not start another', asked.length === 1);
+    await flush();
+    const img0 = importedTopImage(ids[0]);
+    check('imported assets: once decoded the picture is returned, with its URL, and readers were told',
+      img0 !== null && importedTopUrl(ids[0]) === (img0 as unknown as StubImage).src && heard.includes(ids[0]) && importedAssetVersion(ids[0]) > 0);
+    for (const id of ids) importedTopImage(id);
+    await flush();
+    const sizes = importedAssetCacheSizes();
+    check(`imported assets: the picture cache is capped at ${IMPORTED_TOP_CAP}`, sizes.tops <= IMPORTED_TOP_CAP, String(sizes.tops));
+    check('imported assets: every evicted picture\'s URL was revoked — live URLs = cached pictures, none revoked twice',
+      live.size === sizes.tops && revokedTwice === 0 && revokedUnknown === 0, `live ${live.size} cached ${sizes.tops} twice ${revokedTwice} unknown ${revokedUnknown}`);
+    check('imported assets: the LRU kept the most recent and dropped the oldest',
+      importedTopUrl(ids[ids.length - 1]) !== null && !live.has(`blob:test/1`));
+    // a MISS (not on this device) is remembered for pictures, and never makes a URL
+    const before = created;
+    importedTopImage('0000000000000001');
+    await flush();
+    check('imported assets: a picture this device does not have resolves null and creates no URL',
+      importedTopImage('0000000000000001') === null && created === before);
+
+    // ── LENT blobs win, replace cleanly, and leave cleanly ──
+    const draft = 'b000000000000001';
+    registerImportedAssets(draft, { top: blob('draft-1') });
+    importedTopImage(draft);
+    await flush();
+    const u1 = importedTopUrl(draft);
+    const v1 = importedAssetVersion(draft);
+    const mv1 = importedMeshVersion(draft);
+    registerImportedAssets(draft, { top: blob('draft-2') });
+    check('imported assets: re-lending a draft\'s picture revokes the old URL and moves its version (not its MESH version)',
+      u1 !== null && !live.has(u1) && importedAssetVersion(draft) > v1 && importedMeshVersion(draft) === mv1);
+    importedTopImage(draft);
+    await flush();
+    const u2 = importedTopUrl(draft);
+    check('...and the new picture decodes under a new URL', u2 !== null && u2 !== u1 && live.has(u2));
+    check('imported assets: a lent draft never asked the source', !asked.includes(draft));
+    unregisterImportedAssets(draft);
+    check('imported assets: unregistering revokes the draft\'s URL', u2 !== null && !live.has(u2));
+    const aid = ids[ids.length - 1];
+    const ua = importedTopUrl(aid);
+    const ma = importedMeshVersion(aid);
+    invalidateImportedAssets(aid);
+    check('imported assets: invalidate drops the cached picture (URL revoked) and moves the mesh version',
+      ua !== null && !live.has(ua) && importedMeshVersion(aid) > ma);
+
+    // ── meshes: lent wins, the source is cached (capped), a miss is not ──
+    const lent = new Blob(['lent'], { type: 'model/gltf-binary' });
+    registerImportedAssets('c000000000000001', { mesh: lent });
+    check('imported assets: a lent mesh is returned as is', (await importedMeshBlob('c000000000000001')) === lent && !meshAsked.includes('c000000000000001'));
+    const m1 = importedMeshBlob(ids[1]);
+    check('imported assets: a mesh lookup is cached (same promise, one ask)', importedMeshBlob(ids[1]) === m1 && meshAsked.filter((x) => x === ids[1]).length === 1);
+    for (const id of ids) void importedMeshBlob(id);
+    await flush();
+    check(`imported assets: the mesh lookup cache is capped at ${IMPORTED_MESH_CAP}`, importedAssetCacheSizes().meshes <= IMPORTED_MESH_CAP);
+    await importedMeshBlob('0000000000000002');
+    await flush();
+    await importedMeshBlob('0000000000000002');
+    check('imported assets: a mesh MISS is not cached — a mesh that arrives later is found', meshAsked.filter((x) => x === '0000000000000002').length === 2);
+
+    // ── a load that lands after its entry left the cache is revoked, not leaked ──
+    let release: (b: Blob | null) => void = () => undefined;
+    setImportedAssetSource({ top: () => new Promise((r) => (release = r)), mesh: async () => null });
+    const slow = 'd000000000000001';
+    importedTopImage(slow);
+    invalidateImportedAssets(slow);
+    release(blob('late'));
+    await flush();
+    check('imported assets: a decode that lands for an evicted entry leaves no live URL behind', live.size === importedAssetCacheSizes().tops, `live ${live.size}`);
+    // ── swapping the SOURCE moves every id's version (a settled "no mesh" retries) ──
+    const anyBefore = heard.filter((x) => x === ANY_ID).length;
+    const vBefore = importedMeshVersion('0000000000000003');
+    setImportedAssetSource(null);
+    check('imported assets: swapping the source moves EVERY id\'s mesh version and tells readers',
+      importedMeshVersion('0000000000000003') > vBefore && heard.filter((x) => x === ANY_ID).length === anyBefore + 1);
+    off();
+    // no DOM at all: nothing throws, nothing loads
+    g.Image = undefined;
+    let threw = false;
+    try {
+      threw = importedTopImage('e000000000000001') !== null;
+    } catch {
+      threw = true;
+    }
+    check('imported assets: with no DOM (the server, a worker) a picture ask is a quiet null', !threw);
+    // THE DEFAULT SOURCE IS THE DEVICE LIBRARY, reached lazily: a player who never meets an import
+    // never downloads it, and with no IndexedDB (Node here) a mesh ask is a quiet null
+    resetImportedAssetsForTests();
+    const seamSrc = readFileSync('src/render/importedAssets.ts', 'utf8');
+    check('imported assets: the library is the default source, behind a dynamic import (never a static one)',
+      /let source: ImportedAssetSource \| null = LIBRARY_ASSET_SOURCE;/.test(seamSrc) &&
+        /import\('\.\.\/robotImport\/library'\)/.test(seamSrc) && !/from '\.\.\/robotImport\/library'/.test(seamSrc));
+    check('imported assets: ...and with no IndexedDB the library answers a mesh ask with a quiet null',
+      (await importedMeshBlob('f000000000000001')) === null);
+    check('imported assets: the frames ARE the importer\'s (one definition, re-exported)',
+      /importedTopFrame = topImageFrame/.test(seamSrc) && /IMPORTED_MESH_TO_ROBOT: readonly number\[\] = STORED_MESH_TO_ROBOT/.test(seamSrc));
+  } finally {
+    resetImportedAssetsForTests();
+    URL.createObjectURL = realCreate;
+    URL.revokeObjectURL = realRevoke;
+    if (hadImage) g.Image = prevImage;
+    else delete g.Image;
+  }
+}
+
+/**
+ * ---- IMPORTED ROBOTS, 2D: every game's sprite draws an import from its HULL ----
+ *
+ * Run against a recording context: the first clip after the robot's transform must be the hull
+ * polygon, vertex for vertex (the sprite cannot exceed what collides); with a picture lent the body
+ * is one `drawImage` through `topImageTransform`; without one there is none; a standard robot still
+ * clips to a rectangle. Both turreted and turretless builds, all three games.
+ */
+{
+  interface Rec {
+    ctx: CanvasRenderingContext2D;
+    clips: Vec2[][];
+    images: number[][];
+    calls: number;
+  }
+  const recorder = (): Rec => {
+    let path: Vec2[] = [];
+    let lastTransform: number[] = [];
+    const rec: Rec = { ctx: null as unknown as CanvasRenderingContext2D, clips: [], images: [], calls: 0 };
+    const target: Record<string, unknown> = {
+      beginPath: () => {
+        path = [];
+      },
+      moveTo: (x: number, y: number) => path.push({ x, y }),
+      lineTo: (x: number, y: number) => path.push({ x, y }),
+      rect: (x: number, y: number, w: number, h: number) => {
+        path.push({ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h });
+      },
+      clip: () => rec.clips.push(path.slice()),
+      transform: (...m: number[]) => {
+        lastTransform = m;
+      },
+      drawImage: () => rec.images.push(lastTransform),
+      createLinearGradient: () => ({ addColorStop: () => undefined }),
+      measureText: () => ({ width: 0 }),
+    };
+    rec.ctx = new Proxy(target, {
+      get(t, k) {
+        rec.calls++;
+        if (k in t) return t[k as string];
+        return () => undefined;
+      },
+      set() {
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+    return rec;
+  };
+  const g = globalThis as unknown as { Image?: unknown };
+  const hadImage = 'Image' in g;
+  const prevImage = g.Image;
+  class StubImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    decoding = '';
+    set src(_v: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  g.Image = StubImage;
+  try {
+    resetImportedAssetsForTests();
+    const imp = coerceImported(IMP_NOSE)!;
+    const sameHull = (p: Vec2[]): boolean =>
+      p.length === imp.hull.length && p.every((q, i) => Math.abs(q.x - imp.hull[i].x) < 1e-9 && Math.abs(q.y - imp.hull[i].y) < 1e-9);
+    type Draw = (ctx: CanvasRenderingContext2D, w: World) => void;
+    const games: [GameId, Partial<RobotSpec>[], Draw][] = [
+      ['decode', [{}], (ctx, w) => drawDecodeSprite(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w)],
+      ['chain', [{ scoreMode: 'turret' }, { scoreMode: 'drum' }], (ctx, w) => drawChainRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w)],
+      [
+        'biobuzz',
+        [
+          { bbMech: { launcher: { kind: 'twinturret', mount: 'left', mount2: 'right', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'back' }, intake: { kind: 'sweeper' } } },
+          { bbMech: { launcher: { kind: 'dumper', mount: 'back', hoodDeg: 45 }, lift: null, intake: { kind: 'ramp' } } },
+        ] as Partial<RobotSpec>[],
+        (ctx, w) => drawBiobuzzRobot(ctx, w.robots[0], true, [], { x: 0, y: 1 }, w),
+      ],
+    ];
+    for (const [game, variants, draw] of games) {
+      for (const [vi, patch] of variants.entries()) {
+        const { w } = impWorld(game, [{ ...patch, imported: IMP_NOSE }]);
+        const r = w.robots[0];
+        r.hopper = game === 'biobuzz' ? ['yellow', 'red'] : ['green'];
+        const tag = `${game}#${vi}`;
+        check(`imported 2D ${tag}: the world kept the import`, !!r.spec.imported);
+        // SILHOUETTE: no picture anywhere
+        const s = recorder();
+        let threw = '';
+        try {
+          draw(s.ctx, w);
+        } catch (err) {
+          threw = String(err);
+        }
+        check(`imported 2D ${tag}: the silhouette draws without throwing`, threw === '' && s.calls > 50, threw);
+        check(`imported 2D ${tag}: its clip is the HULL, vertex for vertex`, s.clips.length > 0 && sameHull(s.clips[0]), JSON.stringify(s.clips[0]));
+        check(`imported 2D ${tag}: no picture is drawn without one`, s.images.length === 0);
+        // PICTURED: a picture lent for this id
+        registerImportedAssets(imp.id, { top: new Blob(['png'], { type: 'image/png' }) });
+        importedTopImage(imp.id);
+        for (let i = 0; i < 6; i++) await new Promise<void>((res) => setTimeout(res, 0));
+        const p = recorder();
+        threw = '';
+        try {
+          draw(p.ctx, w);
+        } catch (err) {
+          threw = String(err);
+        }
+        const want = topImageTransform(importedTopFrame(r.spec.imported!.hull));
+        check(`imported 2D ${tag}: with a picture it draws without throwing`, threw === '', threw);
+        check(`imported 2D ${tag}: the picture is ONE drawImage through the frame's transform, inside the hull clip`,
+          p.images.length === 1 && p.images[0].every((v, i) => Math.abs(v - want[i]) < 1e-9) && sameHull(p.clips[0]),
+          JSON.stringify(p.images));
+        unregisterImportedAssets(imp.id);
+      }
+      // a STANDARD robot of the same game still clips to its rectangle and draws no picture
+      const { w } = impWorld(game, [{}]);
+      const s = recorder();
+      draw(s.ctx, w);
+      check(`imported 2D ${game}: a STANDARD robot still clips to a rectangle and draws no picture`,
+        s.clips.length > 0 && s.clips[0].length === 4 && s.images.length === 0, JSON.stringify(s.clips[0]));
+    }
+    // held elements are pulled onto the deck the hull has (BIOBUZZ's slots are searched on the box)
+    const corner = pullInsideHull(imp, { x: 9.5, y: 7.5 }, 1.15);
+    check('imported 2D: a held-element slot in an empty box corner is pulled inside the hull with its clearance',
+      polyFeature(imp.hull, corner).depth >= 1.15 - 1e-9, JSON.stringify(corner));
+    // the deck arrow (which end is the front) is never under a turret ring — a centre turret moves it forward
+    const free = frontArrowSpot(imp.hull);
+    const ring = { ...polyCentroid(imp.hull), r: 3 };
+    const moved = frontArrowSpot(imp.hull, [ring]);
+    check('imported 2D: the deck arrow sits on the centroid, and moves ahead of a centre turret ring rather than under it',
+      Math.hypot(free.x - ring.x, free.y - ring.y) < 1e-9 && Math.hypot(moved.x - ring.x, moved.y - ring.y) >= ring.r + moved.len / 2 &&
+        moved.x > ring.x && polyFeature(imp.hull, { x: moved.x + moved.len / 2, y: moved.y }).depth > 0,
+      JSON.stringify(moved));
+  } finally {
+    resetImportedAssetsForTests();
+    if (hadImage) g.Image = prevImage;
+    else delete g.Image;
+  }
+}
+
+/**
+ * ---- IMPORTED ROBOTS: FootprintSvg (cards, the hero, the SVG builder previews) ----
+ *
+ * Nose up through `matrix(0,-1,-1,0,0,0)` (robot left = screen left), and the picture placed in
+ * screen space by the SAME frame the sprite uses — so a hull vertex and the picture's pixel for
+ * that vertex land on one screen point.
+ */
+{
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { createElement } = await import('react');
+  const { FootprintSvg } = await import('../src/ui/FootprintSvg');
+  const imp = coerceImported(IMP_NOSE)!;
+  const html = renderToStaticMarkup(
+    createElement(FootprintSvg, {
+      imported: imp,
+      drivetrain: 'xdrive',
+      marks: { mouths: [{ edge: 'front', x0: 8, x1: 10, y0: -3, y1: 3 }], turrets: [{ x: -2, y: 0, r: 3 }], place: { x: 11, y: 0 } },
+      image: 'blob:test/x',
+      caption: true,
+      label: 'Imported robot',
+    }),
+  );
+  check('FootprintSvg: draws the hull in the bird\'s-eye frame matrix(0,-1,-1,0,0,0), never rotate(-90)',
+    html.includes('matrix(0,-1,-1,0,0,0)') && !html.includes('rotate(-90') && html.includes(imp.hull.map((p) => `${p.x},${p.y}`).join(' ')));
+  check('FootprintSvg: with a picture — no silhouette wheels, the picture clipped to the hull, the caption, an accessible name',
+    (html.match(/<rect[^>]*rx="0.5"/g) ?? []).length === 0 && html.includes('<image') && html.includes('clip-path="url(#') &&
+      html.includes('wide · ') && html.includes('aria-label="Imported robot"'));
+  const num = (attr: string): number => Number(new RegExp(`<image[^>]* ${attr}="([^"]+)"`).exec(html)?.[1]);
+  const f = importedTopFrame(imp.hull);
+  let worst = 0;
+  for (const p of imp.hull) {
+    const { u, v } = robotToTopPixel(p, f);
+    const sx = num('x') + u * (num('width') / f.px);
+    const sy = num('y') + v * (num('height') / f.px);
+    worst = Math.max(worst, Math.hypot(sx - -p.y, sy - -p.x));
+  }
+  check('FootprintSvg: the picture\'s pixel for each hull vertex lands ON that vertex (one frame, not mirrored)', worst < 1e-9, worst.toExponential(2));
+  const bare = renderToStaticMarkup(createElement(FootprintSvg, { imported: imp }));
+  check('FootprintSvg: without a picture it draws the silhouette and four wheels; unlabelled it is decorative',
+    !bare.includes('<image') && (bare.match(/rx="0.5"/g) ?? []).length === 4 && bare.includes('aria-hidden="true"'));
 }
 
 /**
@@ -30442,6 +30936,1668 @@ function impPlayCheck(g: GameId): void {
     };
     walkIdb('src');
     check('robot import: nothing else in src/ opens an IndexedDB database', opens.length === 1 && opens[0].endsWith(joinPath('robotImport', 'library.ts')), opens.join(', '));
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// IMPORTED ROBOTS: MECHANISMS (`src/sim/importedMech.ts`, each game's `importMech.ts` /
+// `importChecks.ts`; `docs/area/physics.md` "Imported robots: mechanisms"). Mouths carved from the
+// hull at the placed span, the launcher and placer where they were placed, BIOBUZZ 3D built from
+// the CAD bands, and the placement editor's checks. Standard robots step byte-identically.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * THE MECHANISM-HEAVY STANDARD RUN: four standard robots per game, each a different archetype,
+ * driving at the nearest loose element with the intake running, firing whenever they hold
+ * anything, pressing the catalyst / ramp / place buttons on a cadence. Every intake, launch and
+ * placement path the import branches sit beside runs for a standard robot here, so a branch that
+ * reached a standard robot moves the pin. Recorded on feat/robot-import a882e8c2, BEFORE the
+ * mechanism branches existed; never re-record one to make an import change pass.
+ */
+const L2_MECH_PINS: Record<string, string> = {
+  decode: 'held=2872 2299820267:1516006287 2380413841:306312656 1300675608:205143914',
+  chain: 'held=2913 280568408:432347152 3067491810:3978456955 2730570165:2501872899',
+  biobuzz: 'held=1025 2762021873:2009800956 2776997930:279128570 4136908741:1973256459',
+  bb3d: 'held=907 4176744764:1760924406 112866128:1298346330',
+};
+const L2_MECH_SPECS: Record<'decode' | 'chain' | 'biobuzz', Partial<RobotSpec>[]> = {
+  decode: [
+    { intake: 'sloped', canSort: true },
+    { intake: 'vector', drivetrain: 'tank', massLb: 30 },
+    { intake: 'triangle', drivetrain: 'swerve', width: 16, length: 12 },
+    { intake: 'sloped', drivetrain: 'xdrive', flywheelInertia: 0.5 },
+  ],
+  chain: [
+    { scoreMode: 'turret', intakeMount: 'front', catalystType: 'arm', catalystMount: 'front' },
+    { scoreMode: 'drum', intakeMount: 'side', shooterMount: 'front', catalystType: 'rail', catalystMount: 'back' },
+    { scoreMode: 'dumper', intakeMount: 'frontback', shooterMount: 'left', catalystType: 'arm', catalystMount: 'center', catalystSwing: 'lr' },
+    { scoreMode: 'twinturret', intakeMount: 'back', shooterMount: 'frontleft', catalystType: 'turret', catalystMount: 'frontright' },
+  ],
+  biobuzz: [
+    { scoreMode: 'turret', intakeMount: 'front', bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } } },
+    { scoreMode: 'twinturret', intakeMount: 'side', bbMech: { launcher: { kind: 'twinturret', mount: 'frontleft', mount2: 'backright', hoodDeg: 45 }, lift: null, intake: { kind: 'siderollers' } } },
+    { scoreMode: 'dumper', intakeMount: 'frontback', bbMech: { launcher: { kind: 'dumper', mount: 'back', hoodDeg: 50 }, lift: { kind: 'vslide', mount: 'front' }, intake: { kind: 'ramp' } } },
+    { scoreMode: 'turret', intakeMount: 'back', intake: 'triangle', bbMech: { launcher: { kind: 'turret', mount: 'back', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'left' }, intake: { kind: 'sweeper' } } },
+  ],
+};
+
+/** drive at the nearest loose element with the intake running; fire once anything is held */
+function l2MechCmd(w: World, i: number, tick: number): RobotCommand {
+  const r = w.robots[i];
+  let best: { x: number; y: number } | null = null;
+  let bd = Infinity;
+  for (const b of w.balls) {
+    if (b.state.kind !== 'ground') continue;
+    const d = hyp(b.pos.x - r.pos.x, b.pos.y - r.pos.y);
+    if (d < bd) {
+      bd = d;
+      best = b.pos;
+    }
+  }
+  const full = r.hopper.length >= 3;
+  const target = !best || (full && tick % 240 < 120) ? { x: (i % 2 === 0 ? 1 : -1) * 30, y: (i < 2 ? 1 : -1) * 30 } : best;
+  const local = rot({ x: target.x - r.pos.x, y: target.y - r.pos.y }, -r.heading);
+  const ang = datan2(local.y, local.x);
+  const driveY = clamp(local.x / 10, -1, 1);
+  const rotate = clamp(-wrapAngle(ang) * 0.9, -1, 1);
+  return {
+    driveY,
+    driveX: clamp(-local.y / 14, -1, 1),
+    rotate,
+    leftDrive: clamp(driveY - rotate, -1, 1),
+    rightDrive: clamp(driveY + rotate, -1, 1),
+    intake: tick % 200 < 170,
+    fire: r.hopper.length > 0 && tick % 30 < 20,
+    catalyst: tick % 150 === 75,
+    fling: tick % 400 === 390,
+    bbRamp: tick % 300 < 4,
+    bbPlace: tick % 90 < 3,
+    bbPlaceNectar: tick % 90 > 45 && tick % 90 < 48,
+  };
+}
+
+function l2MechRun(g: GameId | 'bb3d', ticks: number): string {
+  const key = g === 'bb3d' ? 'biobuzz' : g;
+  const mod = simModuleFor(key);
+  const w = mod.createWorld(
+    'match',
+    777,
+    L2_MECH_SPECS[key].map((s, i) => ({
+      id: i,
+      alliance: i % 2 === 0 ? 'blue' : 'red',
+      spec: { ...DEFAULT_SPEC, ...s } as RobotSpec,
+      assists: { fieldCentric: false, aimAssist: true, autoIntake: false, autoFire: false },
+      startIndex: Math.floor(i / 2),
+    })),
+    undefined,
+    g === 'biobuzz' ? '2d' : g === 'bb3d' ? '3d' : undefined,
+  );
+  w.match.phase = 'teleop';
+  w.match.phaseTimeLeft = 90;
+  const out: string[] = [];
+  let held = 0;
+  for (let t = 0; t < ticks; t++) {
+    const cmds = new Map<number, RobotCommand>();
+    for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, l2MechCmd(w, i, t));
+    mod.step(w, 1 / 60, cmds);
+    for (const r of w.robots) held += r.hopper.length;
+    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(w))}`);
+  }
+  return `held=${held} ${out.join(' ')}`;
+}
+{
+  const got = l2MechRun('decode', 900);
+  check('imported mechanisms: STANDARD robots step byte-identically through intake/fire/sort — decode (worldHash + whole-world JSON, 900 ticks)', got === L2_MECH_PINS.decode, got);
+}
+{
+  const got = l2MechRun('chain', 900);
+  check('imported mechanisms: STANDARD robots step byte-identically through intake/launch/catalyst — chain (worldHash + whole-world JSON, 900 ticks)', got === L2_MECH_PINS.chain, got);
+}
+{
+  const got = l2MechRun('biobuzz', 900);
+  check('imported mechanisms: STANDARD robots step byte-identically through every intake kind/launcher/Box Tube — biobuzz 2D (worldHash + whole-world JSON, 900 ticks)', got === L2_MECH_PINS.biobuzz, got);
+}
+{
+  await initPhysics3d();
+  const got = l2MechRun('bb3d', 600);
+  check('imported mechanisms: STANDARD robots step byte-identically through every intake kind/launcher/Box Tube — biobuzz 3D (worldHash + whole-world JSON, 600 ticks)', got === L2_MECH_PINS.bb3d, got);
+}
+
+/** an 18 × 16 robot with its front corners chamfered: a hull no box describes */
+const L2_OCT: ImportedRobot = {
+  v: 1,
+  id: 'a1a1a1a1a1a1a1a1',
+  hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 10, y: -6 }, { x: 10, y: 6 }, { x: 8, y: 8 }, { x: -8, y: 8 }],
+  heightIn: 14,
+};
+const L2_ASSISTS = { fieldCentric: false, aimAssist: true, autoIntake: false, autoFire: false };
+
+function l2Pts(sh: SolidShape): Vec2[] {
+  if (sh.kind === 'poly') return sh.pts;
+  if (sh.kind === 'box') {
+    return [
+      { x: sh.cx - sh.hx, y: sh.cy - sh.hy },
+      { x: sh.cx + sh.hx, y: sh.cy - sh.hy },
+      { x: sh.cx + sh.hx, y: sh.cy + sh.hy },
+      { x: sh.cx - sh.hx, y: sh.cy + sh.hy },
+    ];
+  }
+  return [];
+}
+/** two convex polygons with the same vertex SET, to `eps` */
+function l2SamePoly(a: Vec2[], b: Vec2[], eps = 1e-9): boolean {
+  return a.length === b.length && a.every((p) => b.some((q) => Math.abs(p.x - q.x) < eps && Math.abs(p.y - q.y) < eps));
+}
+/** a standard footprint rectangle as an imported hull */
+function l2RectImport(x0: number, x1: number, y0: number, y1: number): ImportedRobot {
+  return { v: 1, id: 'b2b2b2b2b2b2b2b2', heightIn: 14, hull: [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }] };
+}
+
+/**
+ * REDUCES TO STANDARD: an import whose hull IS a standard robot's footprint rectangle, with the
+ * standard span, gets exactly that robot's mechanisms — the carve, the held slots, the mouth's
+ * face/roller line/axle/width — so the import path is the standard model generalised, not a
+ * second model. DECODE ×3 presets, BIOBUZZ and Chain front/back (a side or front-and-back sweeper
+ * puts a standard footprint over the 18-in cube an import is held to).
+ */
+{
+  for (const intake of ['sloped', 'vector', 'triangle'] as const) {
+    const std = coerceSpec({ ...DEFAULT_SPEC, intake, width: 16, length: INTAKE_PRESETS[intake].maxLength }, DEFAULT_SPEC, 'decode');
+    const hl = std.length / 2;
+    const hw = std.width / 2;
+    const tip = hl + INTAKE_PRESETS[intake].reach;
+    const mh = intakeMouth(std).mouthHalf;
+    const sp = coerceSpec({ ...std, imported: { ...l2RectImport(-hl, tip, -hw, hw), mech: { intakes: [{ edge: 'front', from: -mh, to: mh }] } } }, DEFAULT_SPEC, 'decode');
+    const mk = (s: RobotSpec) => createWorld('free', 1, [{ id: 0, alliance: 'blue', spec: s, assists: L2_ASSISTS, startIndex: 0 }]).robots[0];
+    const a = robotSolids(mk(std), []);
+    const b = robotSolids(mk(sp), []);
+    check(
+      `imported mechanisms: DECODE ${intake} — an import shaped like the standard footprint carves EXACTLY the standard chassis and ${INTAKE_PRESETS[intake].mouth.wedge ? 'funnel wedges' : 'rails'}`,
+      l2SamePoly(l2Pts(a.chassis), l2Pts(b.chassis)) && a.structure.length === b.structure.length && a.structure.every((s, i) => l2SamePoly(l2Pts(s), l2Pts(b.structure[i]))),
+      JSON.stringify(b.structure.map(l2Pts)).slice(0, 240),
+    );
+    check(
+      `imported mechanisms: DECODE ${intake} — ...stores its artifacts in the standard slots`,
+      [0, 1, 2].every((k) => [1, -1].every((side) => {
+        const p = heldSlotPos(std, k, side);
+        const q = heldSlotPos(sp, k, side);
+        return Math.abs(p.x - q.x) < 1e-9 && Math.abs(p.y - q.y) < 1e-9;
+      })),
+    );
+    const d = decodeImportMouth(sp);
+    check(
+      `imported mechanisms: DECODE ${intake} — ...with the standard face, roller line, axle, width and a centred mouth`,
+      d.face === hl && d.tip === tip && Math.abs(d.axle - intakeAxleX(std)) < 1e-12 && d.mouth.mouthHalf === mh && d.yc === 0,
+      JSON.stringify({ face: d.face, tip: d.tip, axle: d.axle, mh: d.mouth.mouthHalf, yc: d.yc }),
+    );
+  }
+  for (const mount of ['front', 'back'] as const) {
+    const std = coerceSpec({ ...BB_DEFAULT_SPEC, intakeMount: mount }, BB_DEFAULT_SPEC, 'biobuzz');
+    const hl = std.length / 2;
+    const hw = std.width / 2;
+    const reach = INTAKE_PRESETS[std.intake].reach;
+    const imp = mount === 'front' ? l2RectImport(-hl, hl + reach, -hw, hw) : l2RectImport(-hl - reach, hl, -hw, hw);
+    const sp = coerceSpec({ ...std, imported: imp }, BB_DEFAULT_SPEC, 'biobuzz');
+    const a = bbMouths(std);
+    const b = bbMouths(sp);
+    check(
+      `imported mechanisms: BIOBUZZ ${mount} — an import shaped like the standard footprint has the standard mouth rect`,
+      a.length === b.length && a.every((m, i) => m.edge === b[i].edge && m.x0 === b[i].x0 && m.x1 === b[i].x1 && m.y0 === b[i].y0 && m.y1 === b[i].y1),
+      JSON.stringify({ a, b }),
+    );
+    const ax = mouthAxes(a[0], hl, hw);
+    const bx = mouthAxes(b[0], sp.length / 2, sp.width / 2);
+    check(`imported mechanisms: BIOBUZZ ${mount} — ...the standard face and roller line, centred`, ax.dist === bx.dist && ax.uOut === bx.uOut && bx.vc === 0 && ax.half === bx.half);
+    const sa = bbRobotSolids({ spec: std, id: 0 } as RobotState, []);
+    const sb = bbRobotSolids({ spec: sp, id: 0 } as RobotState, []);
+    check(
+      `imported mechanisms: BIOBUZZ ${mount} — ...and the standard chassis and side plates`,
+      l2SamePoly(l2Pts(sa.chassis), l2Pts(sb.chassis)) && sa.structure.length === sb.structure.length && sa.structure.every((s) => sb.structure.some((t) => l2SamePoly(l2Pts(s), l2Pts(t)))),
+    );
+  }
+  for (const mount of ['front', 'back'] as const) {
+    const std = coerceSpec({ ...DEFAULT_SPEC, intakeMount: mount, length: 15, width: 15 }, DEFAULT_SPEC, 'chain');
+    const hl = std.length / 2;
+    const hw = std.width / 2;
+    const reach = INTAKE_PRESETS[std.intake].reach;
+    const imp = mount === 'front' ? l2RectImport(-hl, hl + reach, -hw, hw) : l2RectImport(-hl - reach, hl, -hw, hw);
+    const sp = coerceSpec({ ...std, imported: imp }, DEFAULT_SPEC, 'chain');
+    const a = chainIntakeMouths(std);
+    const b = chainIntakeMouths(sp);
+    check(
+      `imported mechanisms: Chain ${mount} — an import shaped like the standard footprint has the standard mouth rect`,
+      a.length === b.length && a.every((m, i) => m.x0 === b[i].x0 && m.x1 === b[i].x1 && m.y0 === b[i].y0 && m.y1 === b[i].y1),
+      JSON.stringify({ a, b }),
+    );
+  }
+}
+
+/** a DECODE scene: one robot at (−10, −30) facing +x, one artifact at `local` in its frame */
+function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact } {
+  const w = createWorld('free', 3, [{ id: 0, alliance: 'blue', spec, assists: L2_ASSISTS, startIndex: 0 }]);
+  const r = w.robots[0];
+  r.hopper = [];
+  r.pos = { x: -10, y: -30 };
+  r.heading = 0;
+  r.vel = { x: 0, y: 0 };
+  r.fieldCentric = false;
+  const ball = w.balls[0];
+  w.balls.length = 0;
+  w.balls.push(ball);
+  ball.state = { kind: 'ground' };
+  ball.pos = { x: r.pos.x + local.x, y: r.pos.y + local.y };
+  ball.vel = { x: 0, y: 0 };
+  ball.z = 0;
+  ball.vz = 0;
+  return { w, ball };
+}
+
+/** DECODE: the intake takes artifacts through the PLACED mouth and nowhere else */
+{
+  for (const intake of ['sloped', 'vector', 'triangle'] as const) {
+    const sp = coerceSpec({ ...DEFAULT_SPEC, intake, imported: { ...L2_OCT, mech: { intakes: [{ edge: 'front', from: -7, to: 1 }] } } }, DEFAULT_SPEC, 'decode');
+    const d = decodeImportMouth(sp);
+    const inMouth = l2DecodeScene(sp, { x: d.tip + 4, y: d.yc });
+    run(inMouth.w, cmd({ driveY: 0.4, intake: true }), 2);
+    const beside = l2DecodeScene(sp, { x: 13, y: 5 });
+    run(beside.w, cmd({ driveY: 0.4, intake: true }), 2);
+    const r = beside.w.robots[0];
+    const loc = rot({ x: beside.ball.pos.x - r.pos.x, y: beside.ball.pos.y - r.pos.y }, -r.heading);
+    const depth = polyFeature(sp.imported!.hull, loc).depth;
+    // a funnel deflects it out past the flank (as a standard funnel does an artifact outboard of
+    // its mouth); the vector's flat face pushes it ahead. Either way: not taken, never inside.
+    check(
+      `imported mechanisms: DECODE ${intake} — an artifact on the placed (off-centre) mouth is captured; one in front of the hull beside it is never taken and never inside the hull`,
+      inMouth.w.robots[0].hopper.length === 1 && r.hopper.length === 0 && depth < -(BALL_RADIUS - 0.3),
+      `mouth y ${d.yc} ± ${d.mouth.mouthHalf}; in ${inMouth.w.robots[0].hopper.length}, beside ${r.hopper.length} (ball at ${loc.x.toFixed(2)}, ${loc.y.toFixed(2)}; depth ${depth.toFixed(2)})`,
+    );
+    const held = [0, 1, 2].map((k) => heldSlotPos(sp, k, 1));
+    check(`imported mechanisms: DECODE ${intake} — every held slot is inside the hull, behind the mouth`, held.every((p) => polyFeature(sp.imported!.hull, p).depth > 0 && p.x < d.tip), JSON.stringify(held));
+  }
+}
+
+/** DECODE: the shot leaves from the placed turret at the placed height (and the floor holds) */
+{
+  const sp = coerceSpec({ ...DEFAULT_SPEC, intake: 'sloped', imported: { ...L2_OCT, mech: { shooter: { x: -4, y: 3, z: 13.5 } } } }, DEFAULT_SPEC, 'decode');
+  const w = createWorld('free', 3, [{ id: 0, alliance: 'blue', spec: sp, assists: L2_ASSISTS, startIndex: 0 }]);
+  const r = w.robots[0];
+  r.pos = { x: 20, y: 20 };
+  r.heading = 0.7;
+  const tp = turretWorldPos(r);
+  const want = rot({ x: -4, y: 3 }, 0.7);
+  check('imported mechanisms: DECODE — the turret is where it was placed', hyp(tp.x - r.pos.x - want.x, tp.y - r.pos.y - want.y) < 1e-9);
+  let shot: Artifact | undefined;
+  let from = { x: 0, y: 0 };
+  const before = new Set(w.balls.filter((b) => b.state.kind === 'flight').map((b) => b.id));
+  for (let i = 0; i < 120 && !shot; i++) {
+    from = turretWorldPos(r);
+    step(w, SIM_DT, new Map([[0, cmd({ fire: true })]]));
+    shot = w.balls.find((b) => b.state.kind === 'flight' && !before.has(b.id));
+  }
+  // undo the one flight step the release tick also took (`stepFlightBall`)
+  const vz0 = shot ? shot.vz + IMPC.GRAVITY * SIM_DT : 0;
+  const z0 = shot ? shot.z - vz0 * SIM_DT : 0;
+  const p0 = shot ? { x: shot.pos.x - shot.vel.x * SIM_DT, y: shot.pos.y - shot.vel.y * SIM_DT } : { x: 0, y: 0 };
+  check('imported mechanisms: DECODE — the shot leaves from the placed turret at the placed height', !!shot && Math.abs(z0 - 13.5) < 1e-9 && hyp(p0.x - from.x, p0.y - from.y) < 1e-9, `z0 ${z0}`);
+  const low = coerceSpec({ ...sp, imported: { ...sp.imported!, mech: { shooter: { x: -4, y: 3, z: 6 } } } }, DEFAULT_SPEC, 'decode');
+  check('imported mechanisms: DECODE — a launch height under 4 artifact radii is raised to the floor (a lower shot would be pushed out of its own hull)', decodeImportLaunchZ(low) === DECODE_IMPORT_LAUNCH_MIN && DECODE_IMPORT_LAUNCH_MIN > 4 * BALL_RADIUS);
+}
+
+/* BIOBUZZ's own import checks — the placed mouth in 2D and 3D, the CAD bands, the placed turret,
+   lip and Box Tube, and the PERF budgets for heavy imports — are the IMPORT lane of
+   scripts/smoke-biobuzz (imported.ts). */
+
+/** Chain Reaction: mouths, turret, catalyst and storage come off the hull and the placements */
+{
+  const imp: ImportedRobot = { ...L2_OCT, mech: { intakes: [{ edge: 'front', from: -7, to: 1 }], shooter: { x: -2, y: 4, z: 13 }, place: { x: 2, y: -3, z: 6 } } };
+  const sp = coerceSpec({ ...DEFAULT_SPEC, scoreMode: 'turret', intakeMount: 'front', catalystType: 'arm', catalystMount: 'front', imported: imp }, DEFAULT_SPEC, 'chain');
+  const m = chainIntakeMouths(sp)[0];
+  check('imported mechanisms: Chain — the mouth sits on the placed span, off-centre, its lip on the hull', m.y0 === -7 && m.y1 === 1 && m.x1 === 10, JSON.stringify(m));
+  check('imported mechanisms: Chain — the turret is where it was placed', turretLocal(sp).x === -2 && turretLocal(sp).y === 4);
+  const w = createChainWorld('free', 5, [{ id: 0, alliance: 'blue', spec: sp, assists: L2_ASSISTS, startIndex: 0 }]);
+  const r = w.robots[0];
+  r.pos = { x: 0, y: 0 };
+  r.heading = 0;
+  const mouth = catalystMouth(r);
+  check('imported mechanisms: Chain — the catalyst works from where the hull ends ahead of its placed base', Math.abs(mouth.x - 10) < 1e-9 && Math.abs(mouth.y + 3) < 1e-9, JSON.stringify(mouth));
+  const cut = coerceSpec({ ...sp, imported: { ...L2_OCT, hull: [{ x: -8, y: -4 }, { x: -4, y: -8 }, { x: 6, y: -8 }, { x: 10, y: -4 }, { x: 10, y: 4 }, { x: 6, y: 8 }, { x: -4, y: 8 }, { x: -8, y: 4 }], mech: imp.mech } }, DEFAULT_SPEC, 'chain');
+  const rect = coerceSpec({ ...sp, imported: { ...l2RectImport(-8, 10, -8, 8), mech: imp.mech } }, DEFAULT_SPEC, 'chain');
+  check('imported mechanisms: Chain — storage reads the hull area (a robot with its corners cut holds less than its bounding box)', chainStorageMax(cut) < chainStorageMax(rect), `${chainStorageMax(cut)} vs ${chainStorageMax(rect)}`);
+  // a particle in an AABB corner the chamfered hull does not cover is neither plowed nor taken
+  const w2 = createChainWorld('free', 5, [{ id: 0, alliance: 'blue', spec: sp, assists: L2_ASSISTS, startIndex: 0 }]);
+  const r2 = w2.robots[0];
+  r2.pos = { x: 0, y: -20 };
+  r2.heading = 0;
+  r2.vel = { x: 0, y: 0 };
+  const g = w2.balls[0];
+  for (const b of w2.balls) if (b !== g && b.state.kind === 'ground' && hyp(b.pos.x - r2.pos.x, b.pos.y - r2.pos.y) < 30) b.pos = { x: 60, y: 60 };
+  g.state = { kind: 'ground' };
+  g.pos = { x: 10.5, y: -20 + 8.5 };
+  g.vel = { x: 0, y: 0 };
+  g.z = 0;
+  g.vz = 0;
+  const before = { ...g.pos };
+  chainStep(w2, SIM_DT, new Map([[0, cmd({ intake: true })]]));
+  check('imported mechanisms: Chain — a particle in a bounding-box corner the hull does not cover is left alone (not plowed, not taken)', g.state.kind === 'ground' && hyp(g.pos.x - before.x, g.pos.y - before.y) < 0.5, JSON.stringify(g.pos));
+}
+
+/** the placement editor's API: handles, pre-fills and plain-language checks, every game */
+{
+  const tall: ImportedRobot = { ...L2_OCT, bands: [{ z0: 0, z1: 6, hull: L2_OCT.hull }, { z0: 6, z1: 14, hull: [{ x: -4, y: -4 }, { x: 4, y: -4 }, { x: 4, y: 4 }, { x: -4, y: 4 }] }] };
+  for (const g of ['decode', 'biobuzz', 'chain'] as GameId[]) {
+    const base = g === 'biobuzz' ? BB_DEFAULT_SPEC : DEFAULT_SPEC;
+    const sp = coerceSpec({ ...base, imported: tall }, base, g);
+    const handles = mechHandles(g, sp);
+    const d = defaultImportedMech(g, sp);
+    const filled = coerceSpec({ ...sp, imported: { ...sp.imported!, mech: d } }, base, g);
+    check(`imported mechanisms: ${g} — the editor gets an intake span per mounted edge and a launcher point with its height range`, handles.some((h) => h.kind === 'span') && handles.some((h) => h.key === 'shooter' && h.z !== undefined && h.zMin !== undefined), JSON.stringify(handles));
+    check(`imported mechanisms: ${g} — the pre-filled placements are already coerced (saving them changes nothing)`, isDeepStrictEqual(filled.imported!.mech, d), JSON.stringify(d));
+    check(`imported mechanisms: ${g} — the pre-filled placements pass every check`, validateImportedMech(filled, g).length === 0, JSON.stringify(validateImportedMech(filled, g)));
+    check(`imported mechanisms: ${g} — an unplaced launcher is a warning, not a block`, validateImportedMech(sp, g).some((i) => i.code === 'shooter-default' && i.level === 'warn') && !validateImportedMech(sp, g).some((i) => i.level === 'block'));
+    // a nose too narrow at the face line for any mouth: BLOCK, on the intake handle
+    const nose: ImportedRobot = { ...tall, hull: [{ x: -8, y: -8 }, { x: -2, y: -8 }, { x: 10, y: -0.5 }, { x: 10, y: 0.5 }, { x: -2, y: 8 }, { x: -8, y: 8 }] };
+    const sn = coerceSpec({ ...base, imported: nose }, base, g);
+    const blocks = validateImportedMech(sn, g).filter((i) => i.level === 'block');
+    check(`imported mechanisms: ${g} — a front edge with no room for an intake blocks Save, in plain language`, blocks.some((i) => i.code === 'mouth-no-room' && i.handle === 'intake:front' && /needs/.test(i.text)), JSON.stringify(blocks));
+    check(`imported mechanisms: ${g} — no check text uses an ASCII apostrophe (docs/area/ui.md)`, [...validateImportedMech(sp, g), ...validateImportedMech(sn, g)].every((i) => !i.text.includes("'")));
+  }
+  // DECODE reads the front only; BIOBUZZ's double turret needs its heads apart
+  const sd = coerceSpec({ ...DEFAULT_SPEC, imported: { ...tall, mech: { intakes: [{ edge: 'left', from: -4, to: 4 }] } } }, DEFAULT_SPEC, 'decode');
+  check('imported mechanisms: DECODE — a span on any edge but the front is reported as unused', validateImportedMech(sd, 'decode').some((i) => i.code === 'mouth-ignored' && i.handle === 'intake:left'));
+  const twin = coerceSpec({ ...BB_DEFAULT_SPEC, bbMech: { launcher: { kind: 'twinturret', mount: 'frontleft', mount2: 'backright', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } }, imported: { ...tall, mech: { shooter: { x: 0, y: 0, z: 10 }, shooter2: { x: 2, y: 2, z: 10 } } } }, BB_DEFAULT_SPEC, 'biobuzz');
+  check('imported mechanisms: BIOBUZZ — two turret heads closer than 6 in block Save', validateImportedMech(twin, 'biobuzz').some((i) => i.code === 'twin-too-close' && i.level === 'block'));
+  check('imported mechanisms: BIOBUZZ — a double turret offers both heads', mechHandles('biobuzz', twin).filter((h) => h.key === 'shooter' || h.key === 'shooter2').length === 2);
+  check('imported mechanisms: a STANDARD spec has nothing to place and nothing to check', mechHandles('decode', DEFAULT_SPEC).length === 0 && validateImportedMech(DEFAULT_SPEC, 'decode').length === 0 && isDeepStrictEqual(defaultImportedMech('decode', DEFAULT_SPEC), {}));
+}
+
+/** two runs of an import scene, every game, end on one hash (determinism) */
+{
+  await initPhysics3d();
+  const imp: ImportedRobot = { ...L2_OCT, bands: [{ z0: 0, z1: 6, hull: L2_OCT.hull }, { z0: 6, z1: 14, hull: [{ x: -4, y: -4 }, { x: 4, y: -4 }, { x: 4, y: 4 }, { x: -4, y: 4 }] }], mech: { intakes: [{ edge: 'front', from: -6, to: 3 }], shooter: { x: -3, y: 1, z: 12 } } };
+  for (const g of ['decode', 'chain', 'biobuzz', 'bb3d'] as const) {
+    const key = g === 'bb3d' ? 'biobuzz' : g;
+    const patches = L2_MECH_SPECS[key].map((s) => ({ ...s, imported: imp }) as Partial<RobotSpec>);
+    const once = () => {
+      const mod = simModuleFor(key);
+      const w = mod.createWorld('match', 99, patches.map((s, i) => ({ id: i, alliance: i % 2 === 0 ? 'blue' : 'red', spec: { ...DEFAULT_SPEC, ...s } as RobotSpec, assists: L2_ASSISTS, startIndex: Math.floor(i / 2) })), undefined, g === 'biobuzz' ? '2d' : g === 'bb3d' ? '3d' : undefined);
+      w.match.phase = 'teleop';
+      w.match.phaseTimeLeft = 90;
+      let held = 0;
+      for (let t = 0; t < 300; t++) {
+        const cmds = new Map<number, RobotCommand>();
+        for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, l2MechCmd(w, i, t));
+        mod.step(w, SIM_DT, cmds);
+        for (const r of w.robots) held += r.hopper.length;
+      }
+      const finite = w.robots.every((r) => Number.isFinite(r.pos.x) && Number.isFinite(r.pos.y)) && w.balls.every((b) => Number.isFinite(b.pos.x) && Number.isFinite(b.z));
+      return { h: `${worldHash(w)}:${impFnv(JSON.stringify(w))}`, held, finite };
+    };
+    const a = once();
+    const b = once();
+    check(`imported mechanisms: four imports with placed mechanisms play deterministically — ${g} (two runs, one hash; nothing non-finite; something was intaken)`, a.h === b.h && a.finite && a.held > 0, `${a.h} / ${b.h}, held ${a.held}`);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// IMPORTED ROBOT VISUALS RELAY (docs/area/netcode.md, VISUALS RELAY) — the wire rules, pure
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const { glbBytes, glbFrom, pngBytes, pngChunk, concat } = VF;
+  const png = pngBytes(8, 8);
+  const glb = glbBytes({ tris: 3 });
+
+  check('visuals/caps: the capability is on both lists, and a client without it is not a participant',
+    PROTO.CLIENT_CAPS.includes(IV.IMPORT_VISUALS_CAP) && PROTO.SERVER_CAPS.includes(IV.IMPORT_VISUALS_CAP) && IV.IMPORT_VISUALS_CAP === 'importVisuals'
+      && IV.hasVisualsCap(PROTO.CLIENT_CAPS) && !IV.hasVisualsCap([]) && !IV.hasVisualsCap(undefined) && !IV.hasVisualsCap(['robotImport']));
+  check('visuals/caps: coerceCaps still keeps every cap this build advertises (16 is the ceiling)', PROTO.coerceCaps(PROTO.CLIENT_CAPS).length === PROTO.CLIENT_CAPS.length && PROTO.CLIENT_CAPS.length <= 16);
+
+  // ---- a frame fits every transport it crosses ------------------------------------------------
+  {
+    check('visuals/frame: a chunk is 24 KiB of payload and exactly 32,768 base64 characters', IV.VISUAL_CHUNK_BYTES === 24 * 1024 && IV.VISUAL_CHUNK_CHARS === 32768);
+    const put = JSON.stringify({ t: 'visualPut', kind: 'mesh', id: '0123456789abcdef', total: 1048576, seq: 42, data: 'A'.repeat(IV.VISUAL_CHUNK_CHARS) });
+    const chunk = JSON.stringify({ t: 'visualChunk', owner: 'c'.repeat(36), id: '0123456789abcdef', kind: 'mesh', total: 1048576, seq: 42, data: 'A'.repeat(IV.VISUAL_CHUNK_CHARS) });
+    check('visuals/frame: the fullest upload frame is well under the server’s 64 KiB inbound cap', put.length < 34000 && put.length < 64 * 1024, String(put.length));
+    check('visuals/frame: ...and the fullest download frame is under the 64 KiB default of a WebRTC DataChannel message', chunk.length < 34000 && chunk.length < 64 * 1024, String(chunk.length));
+    check('visuals/frame: a mesh is 43 frames and a top picture 11 (the 1 MiB and 256 KiB caps)', IV.visualFrames(IV.VISUAL_MAX_BYTES.mesh) === 43 && IV.visualFrames(IV.VISUAL_MAX_BYTES.top) === 11);
+    // the spans tile an asset exactly, whatever its length
+    let tiled = true;
+    for (const total of [1, 2, 24575, 24576, 24577, 65752, 1048576]) {
+      let at = 0;
+      for (let seq = 0; seq < IV.visualFrames(total); seq++) {
+        const s = IV.visualSpan(total, seq);
+        if (s.start !== at || s.end <= s.start || s.end - s.start > IV.VISUAL_CHUNK_BYTES) tiled = false;
+        at = s.end;
+      }
+      if (at !== total) tiled = false;
+    }
+    check('visuals/frame: the frame spans tile every length exactly, none over a chunk', tiled);
+  }
+
+  // ---- pacing ---------------------------------------------------------------------------------
+  {
+    check('visuals/pace: the owner’s upload is under a quarter of the 240 msg/s bucket, beside the 60 Hz input stream',
+      1000 / IV.VISUAL_UPLOAD_GAP_MS <= 240 / 4 && 1000 / IV.VISUAL_UPLOAD_GAP_MS + 60 < 240, String(1000 / IV.VISUAL_UPLOAD_GAP_MS));
+    check('visuals/pace: a full 1 MiB mesh uploads in about a second and a half', IV.visualFrames(IV.VISUAL_MAX_BYTES.mesh) * IV.VISUAL_UPLOAD_GAP_MS < 2000);
+    const m = IV.streamMayWrite;
+    check('visuals/pace: an idle socket is written to', m({ backlog: 0, now: 1000, lastAt: 0, live: false }));
+    check('visuals/pace: a socket with a backlog at the limit is not, and one just under it is',
+      !m({ backlog: IV.VISUAL_STREAM_BACKLOG_BYTES, now: 1000, lastAt: 0, live: false }) && m({ backlog: IV.VISUAL_STREAM_BACKLOG_BYTES - 1, now: 1000, lastAt: 0, live: false }));
+    check('visuals/pace: a socket the room cannot read (LAN, a test) is paced by time alone', m({ backlog: undefined, now: 1000, lastAt: 999, live: false }));
+    check('visuals/pace: during a live match a viewer is held to one chunk per gap, and released after it',
+      !m({ backlog: 0, now: 1050, lastAt: 1000, live: true }) && m({ backlog: 0, now: 1000 + IV.VISUAL_STREAM_LIVE_GAP_MS, lastAt: 1000, live: true }));
+    check('visuals/pace: the live cap is about 240 KB/s, so a snapshot stream beside it is not crowded out',
+      (IV.VISUAL_CHUNK_BYTES * 1000) / IV.VISUAL_STREAM_LIVE_GAP_MS <= 250_000);
+    check('visuals/pace: the backlog limit sits far under the snapshot-skip threshold (256 KB), so a download can never cause a keyframe',
+      IV.VISUAL_STREAM_BACKLOG_BYTES + IV.VISUAL_CHUNK_BYTES * 2 < 256 * 1024);
+  }
+
+  // ---- budgets, as numbers -------------------------------------------------------------------------
+  check('visuals/budget: a room holds four seats of (a 1 MiB mesh + a 256 KiB picture), the process 64 MiB',
+    IV.VISUAL_ROOM_BYTES === 4 * (1024 * 1024 + 256 * 1024) && IV.VISUAL_PROCESS_BYTES === 64 * 1024 * 1024 && IV.VISUAL_ROOM_BYTES < IV.VISUAL_PROCESS_BYTES);
+  check('visuals/budget: one viewer may be sent a full room twice over and not 100 times (egress is the bill)',
+    IV.VISUAL_SERVE_CLIENT_BYTES >= IV.VISUAL_ROOM_BYTES && IV.VISUAL_SERVE_CLIENT_BYTES <= 2 * IV.VISUAL_ROOM_BYTES && IV.VISUAL_SERVE_ROOM_BYTES <= 10 * IV.VISUAL_ROOM_BYTES);
+
+  // ---- base64 ----------------------------------------------------------------------------------------
+  {
+    let rt = true;
+    const rnd = VF.prng(3);
+    for (const n of [0, 1, 2, 3, 4, 5, 1000, IV.VISUAL_CHUNK_BYTES, IV.VISUAL_CHUNK_BYTES + 1]) {
+      const b = Uint8Array.from({ length: n }, () => Math.floor(rnd() * 256));
+      const back = IV.base64ToBytes(IV.bytesToBase64(b));
+      if (!back || back.length !== n || !back.every((x, i) => x === b[i])) rt = false;
+    }
+    check('visuals/base64: round-trips every length around a chunk', rt);
+    const b = Uint8Array.from({ length: 100 }, (_, i) => i);
+    check('visuals/base64: a sub-range encodes just that range', IV.base64ToBytes(IV.bytesToBase64(b, 10, 20))?.join(',') === b.subarray(10, 20).join(','));
+    check('visuals/base64: a stray character is refused (Node’s own decoder would skip it)', IV.base64ToBytes('AAA*') === null && IV.base64ToBytes('AA A') === null && IV.base64ToBytes('AAA=A') === null);
+    check('visuals/base64: a length that is not a multiple of 4, a non-string, and misplaced padding are refused',
+      IV.base64ToBytes('AAA') === null && IV.base64ToBytes(5) === null && IV.base64ToBytes(null) === null && IV.base64ToBytes('A=AA') === null);
+  }
+
+  // ---- a PNG --------------------------------------------------------------------------------------
+  {
+    const v = IV.validateTopPng;
+    check('visuals/png: a real PNG passes', v(png) === null && v(pngBytes(512, 512)) === null);
+    const sig = (b: Uint8Array, at: number, val: number): Uint8Array => {
+      const c = Uint8Array.from(b);
+      c[at] = val;
+      return c;
+    };
+    check('visuals/png: a wrong signature is refused', v(sig(png, 1, 0x51)) === 'not a PNG');
+    check('visuals/png: a truncated file is refused (no IEND)', v(png.subarray(0, png.length - 12)) !== null && v(png.subarray(0, png.length - 5)) !== null);
+    check('visuals/png: bytes after IEND are refused (a polyglot)', v(concat([png, Uint8Array.of(1, 2, 3)])) !== null);
+    const ihdr = (w: number, h: number, depth = 8, colour = 6): Uint8Array => {
+      const be = (n: number): number[] => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+      return pngChunk('IHDR', Uint8Array.from([...be(w), ...be(h), depth, colour, 0, 0, 0]));
+    };
+    const withIhdr = (chunk: Uint8Array): Uint8Array => concat([png.subarray(0, 8), chunk, png.subarray(8 + 25)]);
+    check('visuals/png: a 65,535 × 65,535 picture is refused whatever its size on the wire (a decompression bomb)', v(withIhdr(ihdr(65535, 65535))) === 'picture size');
+    check('visuals/png: ...as are a side of 0 and one just over 1024', v(withIhdr(ihdr(0, 8))) === 'picture size' && v(withIhdr(ihdr(1025, 8))) === 'picture size' && v(withIhdr(ihdr(1024, 1024))) === null);
+    check('visuals/png: an impossible bit depth or colour type is refused', v(withIhdr(ihdr(8, 8, 7, 6))) === 'IHDR' && v(withIhdr(ihdr(8, 8, 8, 5))) === 'IHDR');
+    check('visuals/png: no IHDR first, or a second IHDR, is refused',
+      v(concat([png.subarray(0, 8), pngChunk('IDAT', Uint8Array.of(1)), png.subarray(8 + 25)])) === 'no IHDR' && v(concat([png.subarray(0, 8 + 25), ihdr(8, 8), png.subarray(8 + 25)])) === 'second IHDR');
+    check('visuals/png: a chunk type that is not letters, and a chunk longer than the file, are refused',
+      v(concat([png.subarray(0, 8 + 25), pngChunk('ID4T', Uint8Array.of(1)), png.subarray(8 + 25)])) === 'chunk type'
+      && v(concat([png.subarray(0, 8 + 25), Uint8Array.of(0, 0, 0xff, 0xff, 0x49, 0x44, 0x41, 0x54, 1, 2, 3)])) !== null);
+    check('visuals/png: a file with no IDAT is refused', v(concat([png.subarray(0, 8 + 25), pngChunk('IEND')])) !== null);
+    check('visuals/png: over 256 KiB is refused, at 256 KiB or under is not', v(pngBytes(260, 260, { noise: true })) !== null && v(pngBytes(250, 250, { noise: true })) === null,
+      `${pngBytes(260, 260, { noise: true }).length} / ${pngBytes(250, 250, { noise: true }).length}`);
+  }
+
+  // ---- a GLB ---------------------------------------------------------------------------------------
+  {
+    const v = IV.validateMeshGlb;
+    check('visuals/glb: a real binary glTF with its buffer in the BIN chunk passes', v(glb) === null && v(glbBytes({ tris: 20000 })) === null);
+    const bad = (edit: (j: Record<string, any>) => void): string | null => v(glbBytes({ edit }));
+    check('visuals/glb: ⚠️ an EXTERNAL buffer (a uri) is refused outright — the viewer’s loader would fetch it', bad((j) => { j.buffers[0].uri = 'https://example.invalid/robot.bin'; }) === 'external reference');
+    check('visuals/glb: ...a data: URI buffer too (everything must be in the BIN chunk)', bad((j) => { j.buffers[0].uri = 'data:application/octet-stream;base64,AAAA'; }) === 'external reference');
+    check('visuals/glb: ...a uri hidden in `extras`, deep, or in an array is found', bad((j) => { j.extras = { a: [{ b: { uri: 'x' } }] }; }) === 'external reference'
+      && bad((j) => { j.materials[0].extensions = { X: { uri: 'x' } }; }) === 'external reference');
+    check('visuals/glb: an IMAGE inside a mesh is refused (even one with no uri, from a buffer view)', bad((j) => { j.images = [{ bufferView: 0, mimeType: 'image/png' }]; }) === 'images');
+    check('visuals/glb: textures are refused', bad((j) => { j.textures = [{ source: 0 }]; }) === 'textures');
+    check('visuals/glb: a REQUIRED extension (a decoder this client may not have) is refused', bad((j) => { j.extensionsRequired = ['KHR_draco_mesh_compression']; }) === 'required extension');
+    check('visuals/glb: an accessor that reads past its buffer view is refused', bad((j) => { j.accessors[0].count += 1000; }) === 'accessor range');
+    check('visuals/glb: a buffer view past the buffer is refused', bad((j) => { j.bufferViews[0].byteLength += 64; }) === 'bufferView');
+    check('visuals/glb: a sparse accessor and an accessor with no buffer view are refused', bad((j) => { j.accessors[0].sparse = { count: 1 }; }) === 'accessor'
+      && bad((j) => { delete j.accessors[0].bufferView; }) === 'accessor has no buffer view');
+    check('visuals/glb: a primitive that is not triangles, or has no positions, is refused', bad((j) => { j.meshes[0].primitives[0].mode = 1; }) === 'primitive mode'
+      && bad((j) => { delete j.meshes[0].primitives[0].attributes.POSITION; }) === 'primitive has no positions');
+    check('visuals/glb: a file with no geometry is refused', bad((j) => { j.meshes = []; }) === 'no geometry');
+    check('visuals/glb: more triangles than the importer’s own 150,000 cap are refused', v(glbBytes({ tris: 150_001 }), 64 * 1024 * 1024) === 'too many triangles');
+    check('visuals/glb: a second buffer is refused', bad((j) => { j.buffers.push({ byteLength: 4 }); }) === 'buffers');
+    const g = glbBytes({ tris: 3 });
+    const poke = (at: number, val: number, little = true): Uint8Array => {
+      const c = Uint8Array.from(g);
+      new DataView(c.buffer).setUint32(at, val, little);
+      return c;
+    };
+    check('visuals/glb: a wrong magic, a wrong version and a lying total length are refused', v(poke(0, 0)) === 'not a GLB' && v(poke(4, 1)) === 'not glTF 2' && v(poke(8, g.length + 4)) === 'GLB length');
+    check('visuals/glb: a JSON chunk longer than the file is refused', v(poke(12, 0xfffffff0)) === 'chunk length');
+    check('visuals/glb: a file whose first chunk is not JSON, and one that is not 4-byte aligned, are refused', v(poke(16, 0x004e4942)) === 'first chunk is not JSON' && v(g.subarray(0, g.length - 1)) !== null);
+    check('visuals/glb: a third chunk is refused', v(glbFrom({ asset: { version: '2.0' } }, null)) !== null && v(concat([g, Uint8Array.of(0, 0, 0, 0)])) !== null);
+    check('visuals/glb: invalid UTF-8 and JSON that does not parse are refused', (() => {
+      const c = Uint8Array.from(g);
+      c[21] = 0xff;
+      c[22] = 0xfe;
+      return v(c) === 'JSON';
+    })());
+    check('visuals/glb: over 1 MiB is refused, just under it is not', v(glbBytes({ tris: 30_000 })) === 'too large' && v(glbBytes({ tris: 29_000 })) === null,
+      `${glbBytes({ tris: 30_000 }).length} / ${glbBytes({ tris: 29_000 }).length}`);
+    check('visuals/glb: validateVisual picks the validator by kind', IV.validateVisual('top', png) === null && IV.validateVisual('mesh', glb) === null && IV.validateVisual('top', glb) !== null && IV.validateVisual('mesh', png) !== null);
+  }
+  check('visuals/copy: every refusal is a plain sentence — Couldn’t or a clear statement, the next thing the viewer sees, a typographic apostrophe, no ASCII one',
+    Object.values(IV.VISUAL_REFUSAL_COPY).every((s) => /\.$/.test(s) && !/'/.test(s) && s.length < 140) && IV.isVisualKind('top') && IV.isVisualKind('mesh') && !IV.isVisualKind('thumb'));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE RELAY, with a stand-in room: uploads, refusals, budgets, freeing, the pump
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const { glbBytes, pngBytes } = VF;
+  const ID_A = '00000000000000a1';
+  const ID_B = '00000000000000b2';
+  const ID_C = '00000000000000c3';
+  type Msg = PROTO.ServerMsg;
+  interface FC {
+    id: string;
+    caps: string[] | undefined;
+    got: Msg[];
+    backlogBytes: number | undefined;
+    robot: string | undefined;
+    c: Client;
+  }
+  const fakes = new Map<string, FC>();
+  let allows = true;
+  let liveMatch = false;
+  const mkFake = (id: string, caps: string[] | undefined, robot?: string): FC => {
+    const f: FC = { id, caps, got: [], backlogBytes: 0, robot, c: null as unknown as Client };
+    f.c = {
+      id,
+      send: (m: Msg) => f.got.push(m),
+      backlog: () => f.backlogBytes as number,
+      player: { clientId: id, name: id, teamName: 'T', teamNumber: 1, alliance: 'red', startIndex: 0, ready: true, spec: { ...DEFAULT_SPEC }, assists: { ...DEFAULT_ASSISTS } },
+      connected: true,
+      disconnectAt: 0,
+      caps,
+    } as Client;
+    fakes.set(id, f);
+    return f;
+  };
+  const host: SV.RelayHost = {
+    allows: () => allows,
+    find: (id) => fakes.get(id)?.c,
+    importId: (id) => fakes.get(id)?.robot,
+    recipients: () => [...fakes.values()].map((f) => f.c),
+    live: () => liveMatch,
+  };
+  const reset = (limit = IV.VISUAL_PROCESS_BYTES) => {
+    fakes.clear();
+    allows = true;
+    liveMatch = false;
+    const budget = SV.localVisualBudget(limit);
+    return { relay: new SV.VisualRelay(host, budget), budget };
+  };
+  const msgs = (f: FC, t: string): Msg[] => f.got.filter((m) => m.t === t);
+  const refusals = (f: FC): string[] => (msgs(f, 'visualRefused') as Extract<Msg, { t: 'visualRefused' }>[]).map((m) => `${m.op}:${m.reason}`);
+  /** send `bytes` as the owner would, one frame per chunk */
+  const put = (relay: SV.VisualRelay, f: FC, kind: IV.VisualKind, bytes: Uint8Array, id = f.robot ?? '', skip = -1): void => {
+    const from = f.got.length;
+    for (let seq = 0; seq < IV.visualFrames(bytes.length); seq++) {
+      if (seq === skip) continue;
+      const s = IV.visualSpan(bytes.length, seq);
+      relay.onMessage(f.id, { t: 'visualPut', kind, id, total: bytes.length, seq, data: IV.bytesToBase64(bytes, s.start, s.end) });
+      // an owner stops at a refusal; the frames after it would only be refused for their own seq
+      if (f.got.slice(from).some((m) => m.t === 'visualRefused')) return;
+    }
+  };
+  const get = (relay: SV.VisualRelay, f: FC, owner: string, id: string, kind: IV.VisualKind): void => relay.onMessage(f.id, { t: 'visualGet', owner, id, kind });
+  const pump = (relay: SV.VisualRelay): void => (relay as unknown as { pump(): void }).pump();
+  const drain = (relay: SV.VisualRelay, rounds = 400): void => {
+    for (let i = 0; i < rounds; i++) pump(relay);
+  };
+  /** the bytes a viewer was streamed for one asset, in the order they arrived */
+  const received = (f: FC, owner: string, kind: IV.VisualKind): { bytes: Uint8Array; seqs: number[] } => {
+    const cs = (msgs(f, 'visualChunk') as Extract<Msg, { t: 'visualChunk' }>[]).filter((m) => m.owner === owner && m.kind === kind);
+    const total = cs[0]?.total ?? 0;
+    const bytes = new Uint8Array(total);
+    for (const c of cs) bytes.set(IV.base64ToBytes(c.data) ?? new Uint8Array(0), IV.visualSpan(total, c.seq).start);
+    return { bytes, seqs: cs.map((c) => c.seq) };
+  };
+  const same = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
+
+  const png = pngBytes(128, 128, { noise: true }); // 3 chunks
+  const glb = glbBytes({ tris: 2000 }); // 72 KB, 3 chunks
+
+  // ---- upload, announce, stream ----------------------------------------------------------------
+  {
+    const { relay, budget } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    const old = mkFake('old', ['robotImport']);
+    const spec = mkFake('spec', PROTO.CLIENT_CAPS);
+    put(relay, a, 'top', png);
+    const ready = msgs(b, 'visualReady') as Extract<Msg, { t: 'visualReady' }>[];
+    check('visuals/relay: a completed upload is announced to every participant, the owner included, with the size',
+      ready.length === 1 && ready[0].owner === 'a' && ready[0].id === ID_A && ready[0].kind === 'top' && ready[0].bytes === png.length && msgs(a, 'visualReady').length === 1 && msgs(spec, 'visualReady').length === 1);
+    check('visuals/relay: ...and to NOBODY who did not advertise the capability (a cap-less client is sent nothing)', old.got.length === 0);
+    check('visuals/relay: the room has reserved exactly the asset’s bytes from the budget', relay.stats().reserved === png.length && budget.used() === png.length && relay.stats().ready === 1);
+
+    get(relay, b, 'a', ID_A, 'top');
+    check('visuals/relay: ⚠️ nothing is streamed until the pump runs (nothing is sent that was not asked for, and not in the same tick)', msgs(b, 'visualChunk').length === 0 && relay.stats().streams === 1);
+    drain(relay);
+    const r = received(b, 'a', 'top');
+    check('visuals/relay: a viewer that asked receives the asset IDENTICAL, chunks in order from 0', same(r.bytes, png) && r.seqs.join() === '0,1,2', r.seqs.join());
+    check('visuals/relay: the stream is finished and removed (no timer left running for nothing)', relay.stats().streams === 0 && !(relay as unknown as { timer: unknown }).timer);
+    check('visuals/relay: the spectator, who did not ask, was sent no chunk at all', msgs(spec, 'visualChunk').length === 0);
+    check('visuals/relay: a second upload of the other kind is held beside the first', (() => {
+      put(relay, a, 'mesh', glb);
+      return relay.stats().ready === 2 && relay.stats().reserved === png.length + glb.length;
+    })());
+    get(relay, spec, 'a', ID_A, 'mesh');
+    drain(relay);
+    check('visuals/relay: a watcher (not a seat) can ask too, and gets the mesh identical', same(received(spec, 'a', 'mesh').bytes, glb));
+    check('visuals/relay: a client attaching later is told what is ready (`greet`), one message per asset', (() => {
+      const late = mkFake('late', PROTO.CLIENT_CAPS);
+      relay.greet(late.c);
+      const ms = msgs(late, 'visualReady') as Extract<Msg, { t: 'visualReady' }>[];
+      const none = mkFake('none', ['robotImport']);
+      relay.greet(none.c);
+      return ms.length === 2 && ms.map((m) => m.kind).sort().join() === 'mesh,top' && none.got.length === 0;
+    })());
+    relay.dispose();
+    check('visuals/relay: dispose gives every byte back', budget.used() === 0 && relay.stats().reserved === 0 && relay.stats().owners === 0);
+  }
+
+  // ---- half sent ----------------------------------------------------------------------------------
+  {
+    const { relay } = reset();
+    const o = mkFake('o', PROTO.CLIENT_CAPS, ID_A);
+    const v = mkFake('v', PROTO.CLIENT_CAPS);
+    put(relay, o, 'top', png, ID_A, 2);
+    check('visuals/relay: nothing is announced, to anybody, while an upload is half sent', v.got.length === 0 && o.got.length === 0 && relay.stats().ready === 0);
+    get(relay, v, 'o', ID_A, 'top');
+    check('visuals/relay: ...and nothing can be asked for until it completes', refusals(v).join() === 'get:none');
+    relay.dispose();
+    const { relay: r2 } = reset();
+    const o2 = mkFake('o', PROTO.CLIENT_CAPS, ID_A);
+    put(r2, o2, 'top', png, ID_A, 1);
+    check('visuals/relay: a frame that never came refuses the upload as soon as the next one does', refusals(o2).join() === 'put:seq' && r2.stats().reserved === 0);
+    r2.dispose();
+  }
+
+  // ---- refusals ----------------------------------------------------------------------------------
+  {
+    const { relay, budget } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const rawPut = (f: FC, o: Record<string, unknown>): void => relay.onMessage(f.id, { t: 'visualPut', ...o } as unknown as PROTO.ClientMsg);
+    const base = { kind: 'top', id: ID_A, total: png.length, seq: 0, data: IV.bytesToBase64(png, 0, IV.VISUAL_CHUNK_BYTES) };
+    rawPut(a, { ...base, id: ID_B });
+    check('visuals/refuse: an id that is not the id of the robot this seat holds is refused', refusals(a).join() === 'put:id' && relay.stats().reserved === 0);
+    a.got.length = 0;
+    rawPut(a, { ...base, id: 'not-hex' });
+    check('visuals/refuse: ...and one that is not a robot id at all', refusals(a).join() === 'put:id');
+    a.got.length = 0;
+    const standard = mkFake('s', PROTO.CLIENT_CAPS, undefined);
+    rawPut(standard, base);
+    check('visuals/refuse: a seat that holds a STANDARD robot cannot upload (there is nothing to be the look of)', refusals(standard).join() === 'put:id');
+    rawPut(a, { ...base, total: IV.VISUAL_MAX_BYTES.top + 1 });
+    rawPut(a, { ...base, total: 0 });
+    rawPut(a, { ...base, total: 1.5 });
+    rawPut(a, { ...base, total: 'big' });
+    check('visuals/refuse: a total over the cap, zero, fractional or not a number is refused, and reserves nothing', refusals(a).join() === 'put:size,put:size,put:size,put:size' && relay.stats().reserved === 0, refusals(a).join());
+    a.got.length = 0;
+    rawPut(a, { ...base, kind: 'mesh', total: IV.VISUAL_MAX_BYTES.mesh + 1 });
+    check('visuals/refuse: a mesh over 1 MiB is refused', refusals(a).join() === 'put:size');
+    a.got.length = 0;
+    rawPut(a, { ...base, kind: 'thumb' });
+    rawPut(a, { ...base, kind: undefined });
+    check('visuals/refuse: a kind that is not top or mesh is ignored, with no reply and no state', a.got.length === 0 && relay.stats().reserved === 0);
+    rawPut(a, { ...base, seq: 3 });
+    check('visuals/refuse: a first frame that is not seq 0 is refused', refusals(a).join() === 'put:seq' && relay.stats().reserved === 0);
+    a.got.length = 0;
+    rawPut(a, { ...base, seq: -1 });
+    rawPut(a, { ...base, seq: 1.5 });
+    check('visuals/refuse: a negative or fractional seq is refused', refusals(a).join() === 'put:seq,put:seq');
+    a.got.length = 0;
+    rawPut(a, base);
+    rawPut(a, { ...base, seq: 2, data: IV.bytesToBase64(png, 2 * IV.VISUAL_CHUNK_BYTES, png.length) });
+    check('visuals/refuse: a skipped frame refuses the upload AND frees what it reserved', refusals(a).join() === 'put:seq' && relay.stats().reserved === 0 && budget.used() === 0, refusals(a).join());
+    a.got.length = 0;
+    rawPut(a, base);
+    rawPut(a, { ...base, seq: 1, data: '!!!!' });
+    check('visuals/refuse: a chunk that is not base64 refuses the upload and frees it', refusals(a).join() === 'put:size' && relay.stats().reserved === 0);
+    a.got.length = 0;
+    rawPut(a, base);
+    rawPut(a, { ...base, seq: 1, data: IV.bytesToBase64(png, IV.VISUAL_CHUNK_BYTES, IV.VISUAL_CHUNK_BYTES + 100) });
+    check('visuals/refuse: a chunk of the wrong length refuses the upload and frees it', refusals(a).join() === 'put:size' && relay.stats().reserved === 0);
+    a.got.length = 0;
+    rawPut(a, { ...base, data: 'A'.repeat(IV.VISUAL_CHUNK_CHARS + 4) });
+    check('visuals/refuse: a chunk over the frame limit is refused', refusals(a).join() === 'put:size' && relay.stats().reserved === 0);
+    a.got.length = 0;
+    // content: the right size, the wrong bytes
+    const junk = new Uint8Array(png.length).fill(7);
+    put(relay, a, 'top', junk);
+    check('visuals/refuse: ⚠️ bytes that are not a PNG are refused at the LAST frame, announced to nobody, and freed', refusals(a).join() === 'put:format' && msgs(a, 'visualReady').length === 0 && relay.stats().reserved === 0);
+    a.got.length = 0;
+    const ext = glbBytes({ tris: 2000, edit: (j) => { j.buffers[0].uri = 'https://example.invalid/x.bin'; } });
+    put(relay, a, 'mesh', ext);
+    check('visuals/refuse: ⚠️ a mesh GLB that names an external buffer is refused by the room', refusals(a).join() === 'put:format' && relay.stats().ready === 0 && budget.used() === 0, refusals(a).join());
+    a.got.length = 0;
+    const img = glbBytes({ tris: 2000, edit: (j) => { j.images = [{ bufferView: 0, mimeType: 'image/png' }]; } });
+    put(relay, a, 'mesh', img);
+    check('visuals/refuse: ⚠️ a mesh GLB with an image inside is refused by the room', refusals(a).join() === 'put:format' && relay.stats().ready === 0);
+    a.got.length = 0;
+    // a good one lands, and a stray late frame does not cost it
+    put(relay, a, 'top', png);
+    const keep = relay.stats().ready;
+    rawPut(a, { ...base, seq: 2, data: IV.bytesToBase64(png, 2 * IV.VISUAL_CHUNK_BYTES, png.length) });
+    check('visuals/refuse: a duplicate frame after the asset completed is ignored, and the asset stays', keep === 1 && relay.stats().ready === 1 && !refusals(a).includes('put:seq'));
+    allows = false;
+    a.got.length = 0;
+    rawPut(a, base);
+    check('visuals/refuse: in a room that does not allow imported robots (ranked, record) an upload is refused with the room reason', refusals(a).join() === 'put:room');
+    allows = true;
+    relay.dispose();
+  }
+
+  // ---- ignoring the cap-less ------------------------------------------------------------------------
+  {
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const old = mkFake('old', ['robotImport'], ID_B);
+    put(relay, old, 'top', png, ID_B);
+    check('visuals/cap: an upload from a client without the capability is ignored (no state, no reply)', old.got.length === 0 && relay.stats().reserved === 0);
+    put(relay, a, 'top', png);
+    get(relay, old, 'a', ID_A, 'top');
+    drain(relay);
+    check('visuals/cap: a download request from one is ignored too, and it is sent nothing', old.got.length === 0 && relay.stats().streams === 0);
+    const nocaps = mkFake('nocaps', undefined);
+    get(relay, nocaps, 'a', ID_A, 'top');
+    check('visuals/cap: ...and one that advertised nothing at all', nocaps.got.length === 0);
+    relay.dispose();
+  }
+
+  // ---- downloads: what may be asked for ------------------------------------------------------------------
+  {
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    put(relay, a, 'top', png);
+    get(relay, b, 'a', ID_A, 'mesh');
+    check('visuals/get: an asset nobody uploaded is refused `none` (the viewer keeps the footprint)', refusals(b).join() === 'get:none');
+    b.got.length = 0;
+    get(relay, b, 'a', ID_B, 'top');
+    check('visuals/get: ...and so is one under a robot id that is not the owner’s', refusals(b).join() === 'get:none');
+    b.got.length = 0;
+    get(relay, b, 'nobody', ID_A, 'top');
+    get(relay, b, 'x'.repeat(200), ID_A, 'top');
+    get(relay, b, 'a', 'bad', 'top');
+    check('visuals/get: an unknown owner, an over-long owner and a bad id are all `none`', refusals(b).join() === 'get:none,get:none,get:none');
+    b.got.length = 0;
+    get(relay, a, 'a', ID_A, 'top');
+    check('visuals/get: an owner asking for its own asset is refused (it has it)', refusals(a).includes('get:none'));
+    get(relay, b, 'a', ID_A, 'top');
+    get(relay, b, 'a', ID_A, 'top');
+    check('visuals/get: asking again while a stream is on its way does not start a second one', relay.stats().streams === 1);
+    drain(relay);
+    check('visuals/get: ...and the viewer got the asset once, not twice', received(b, 'a', 'top').seqs.join() === '0,1,2');
+    allows = false;
+    b.got.length = 0;
+    get(relay, b, 'a', ID_A, 'top');
+    check('visuals/get: in a room that does not allow imported robots a request is refused with the room reason', refusals(b).join() === 'get:room');
+    allows = true;
+    relay.dispose();
+  }
+
+  // ---- egress: a viewer cannot ask forever -------------------------------------------------------------
+  {
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    const big = pngBytes(250, 250, { noise: true });
+    put(relay, a, 'top', big);
+    let asks = 0;
+    let busy = false;
+    for (let i = 0; i < 100 && !busy; i++) {
+      b.got.length = 0;
+      get(relay, b, 'a', ID_A, 'top');
+      if (refusals(b).includes('get:busy')) busy = true;
+      else asks++;
+      drain(relay, 40);
+    }
+    check('visuals/egress: ⚠️ one viewer is stopped after about 8 MiB however many times it asks', busy && asks * big.length <= IV.VISUAL_SERVE_CLIENT_BYTES && asks >= 25, `${asks} asks of ${big.length} B`);
+    check('visuals/egress: the room’s own running total reflects it', relay.stats().servedRoom === asks * big.length);
+    // a second viewer is still served (the per-client cap is per client)
+    const c = mkFake('c', PROTO.CLIENT_CAPS);
+    get(relay, c, 'a', ID_A, 'top');
+    drain(relay);
+    check('visuals/egress: ...while another viewer is still served', same(received(c, 'a', 'top').bytes, big));
+    // the room cap: many fresh viewers, each within its own quota
+    const { relay: r2 } = reset();
+    const o = mkFake('o', PROTO.CLIENT_CAPS, ID_A);
+    put(r2, o, 'top', big);
+    let served = 0;
+    let stopped = false;
+    for (let i = 0; i < 400 && !stopped; i++) {
+      const v = mkFake(`v${i}`, PROTO.CLIENT_CAPS);
+      get(r2, v, 'o', ID_A, 'top');
+      if (refusals(v).includes('get:busy')) stopped = true;
+      else served++;
+      drain(r2, 20);
+    }
+    check('visuals/egress: ⚠️ the ROOM stops serving after its own total too (48 MiB), however many viewers come', stopped && served * big.length <= IV.VISUAL_SERVE_ROOM_BYTES, `${served} viewers`);
+    r2.dispose();
+    relay.dispose();
+  }
+
+  // ---- pacing in the pump ------------------------------------------------------------------------------------
+  {
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    put(relay, a, 'mesh', glbBytes({ tris: 5000 })); // 180 KB, 8 chunks
+    get(relay, b, 'a', ID_A, 'mesh');
+    b.backlogBytes = IV.VISUAL_STREAM_BACKLOG_BYTES;
+    pump(relay);
+    pump(relay);
+    check('visuals/pump: a socket whose backlog is at the limit is handed nothing, however often the pump runs', msgs(b, 'visualChunk').length === 0 && relay.stats().streams === 1);
+    b.backlogBytes = 0;
+    pump(relay);
+    check('visuals/pump: ...and one chunk the moment it drains', msgs(b, 'visualChunk').length === 1);
+    pump(relay);
+    pump(relay);
+    check('visuals/pump: one chunk per viewer per pump (never a burst)', msgs(b, 'visualChunk').length === 3);
+    b.backlogBytes = undefined;
+    drain(relay);
+    check('visuals/pump: a socket the room cannot read is paced by the pump alone, and finishes', received(b, 'a', 'mesh').seqs.join() === '0,1,2,3,4,5,6,7');
+    liveMatch = true;
+    get(relay, b, 'a', ID_A, 'mesh');
+    b.got.length = 0;
+    pump(relay);
+    pump(relay);
+    pump(relay);
+    check('visuals/pump: ⚠️ during a live match a viewer is held to one chunk per gap, so its snapshots are not crowded out', msgs(b, 'visualChunk').length === 1, String(msgs(b, 'visualChunk').length));
+    liveMatch = false;
+    relay.dispose();
+  }
+  {
+    // round-robin across one viewer's streams, and a held seat (socket dropped) waits
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    put(relay, a, 'top', png);
+    put(relay, a, 'mesh', glb);
+    get(relay, b, 'a', ID_A, 'top');
+    get(relay, b, 'a', ID_A, 'mesh');
+    pump(relay);
+    pump(relay);
+    const kinds = (msgs(b, 'visualChunk') as Extract<Msg, { t: 'visualChunk' }>[]).map((m) => m.kind).join();
+    check('visuals/pump: a viewer’s streams take turns', kinds === 'top,mesh', kinds);
+    b.c.connected = false;
+    const before = msgs(b, 'visualChunk').length;
+    pump(relay);
+    check('visuals/pump: a seat whose socket dropped (held for its reconnect) is not written to', msgs(b, 'visualChunk').length === before);
+    b.c.connected = true;
+    drain(relay);
+    check('visuals/pump: ...and finishes what it was sent when it is back', same(received(b, 'a', 'top').bytes, png) && same(received(b, 'a', 'mesh').bytes, glb));
+    relay.dispose();
+  }
+
+  // ---- budgets and freeing -------------------------------------------------------------------------------------
+  {
+    const { relay, budget } = reset();
+    const owners = ['o1', 'o2', 'o3', 'o4', 'o5'].map((id, i) => mkFake(id, PROTO.CLIENT_CAPS, `00000000000000${i}${i}`));
+    const mesh = glbBytes({ tris: 29_000 }); // 1.04 MB
+    const top = pngBytes(250, 250, { noise: true, seed: 5 }); // 250 KB
+    for (const o of owners.slice(0, 4)) {
+      put(relay, o, 'mesh', mesh, o.robot);
+      put(relay, o, 'top', top, o.robot);
+    }
+    check('visuals/budget: four seats’ full sets fit a room exactly (4 × (1 MiB + 256 KiB) is the cap)', relay.stats().ready === 8 && relay.stats().reserved === 4 * (mesh.length + top.length) && relay.stats().reserved <= IV.VISUAL_ROOM_BYTES,
+      `${relay.stats().reserved} of ${IV.VISUAL_ROOM_BYTES}`);
+    const o5 = owners[4];
+    put(relay, o5, 'mesh', mesh, o5.robot);
+    check('visuals/budget: ⚠️ the ROOM’s budget refuses more, politely (`budget`), and reserves nothing', refusals(o5).join() === 'put:budget' && relay.stats().ready === 8, refusals(o5).join());
+    check('visuals/budget: the process budget agrees with the room’s books to the byte', budget.used() === relay.stats().reserved);
+    relay.freeOwner('o1');
+    check('visuals/budget: a seat leaving frees its assets and the budget with them', relay.stats().ready === 6 && budget.used() === relay.stats().reserved && relay.stats().owners === 3);
+    o5.got.length = 0;
+    put(relay, o5, 'mesh', mesh, o5.robot);
+    check('visuals/budget: ...and the next seat then fits', relay.stats().ready === 7 && refusals(o5).length === 0);
+    // robot change frees
+    owners[1].robot = undefined;
+    relay.specChanged('o2');
+    check('visuals/budget: a seat that picks a standard robot loses its assets', relay.stats().ready === 5 && budget.used() === relay.stats().reserved);
+    owners[2].robot = ID_C;
+    relay.specChanged('o3');
+    check('visuals/budget: ...and one that picks ANOTHER imported robot loses them too (they were for the old one)', relay.stats().ready === 3 && budget.used() === relay.stats().reserved);
+    owners[3].robot = undefined;
+    owners[4].robot = undefined;
+    relay.reconcile();
+    check('visuals/budget: `reconcile` (after a start that stripped imports) frees every seat that no longer holds one', relay.stats().ready === 0 && budget.used() === 0 && relay.stats().owners === 0);
+    relay.dispose();
+  }
+  {
+    const { relay, budget } = reset(2.5 * 1024 * 1024); // a process with 2.5 MiB left
+    const o1 = mkFake('o1', PROTO.CLIENT_CAPS, ID_A);
+    const o2 = mkFake('o2', PROTO.CLIENT_CAPS, ID_B);
+    const mesh = glbBytes({ tris: 20_000 }); // 720 KB
+    put(relay, o1, 'mesh', mesh, ID_A);
+    put(relay, o1, 'top', pngBytes(250, 250, { noise: true }), ID_A);
+    put(relay, o2, 'mesh', mesh, ID_B);
+    put(relay, o2, 'top', pngBytes(250, 250, { noise: true, seed: 2 }), ID_B);
+    const third = mkFake('o3', PROTO.CLIENT_CAPS, ID_C);
+    put(relay, third, 'mesh', glbBytes({ tris: 29_000 }), ID_C);
+    check('visuals/budget: ⚠️ the PROCESS budget refuses when the machine is full, even with room left in the room', refusals(third).join() === 'put:budget' && budget.used() <= 2.5 * 1024 * 1024, `${budget.used()}`);
+    relay.dispose();
+    check('visuals/budget: ...and every byte is back when the room goes', budget.used() === 0);
+  }
+  {
+    // an upload that went quiet is not worth what it reserved
+    const { relay, budget } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS, ID_B);
+    put(relay, a, 'top', png, ID_A, 2); // never finishes (the last frame is never sent)
+    check('visuals/budget: a half-sent upload holds its reservation', budget.used() === png.length && relay.stats().ready === 0);
+    const realNow = Date.now;
+    Date.now = () => realNow() + IV.VISUAL_PUT_STALE_MS + 1000;
+    try {
+      put(relay, b, 'top', png, ID_B);
+    } finally {
+      Date.now = realNow;
+    }
+    check('visuals/budget: ⚠️ ...until a minute passes and the next upload sweeps it (a stalled client cannot pin the budget)', budget.used() === png.length && relay.stats().ready === 1 && relay.stats().owners === 1);
+    relay.dispose();
+  }
+  {
+    // a new upload replaces the old, and a stream of the old one is dropped
+    const { relay, budget } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    put(relay, a, 'top', png);
+    get(relay, b, 'a', ID_A, 'top');
+    pump(relay);
+    const png2 = pngBytes(64, 64, { noise: true, seed: 9 });
+    put(relay, a, 'top', png2);
+    check('visuals/replace: a new upload of a kind replaces the old one, and the books follow', relay.stats().ready === 1 && budget.used() === png2.length);
+    pump(relay);
+    pump(relay);
+    check('visuals/replace: ...and a stream of the OLD asset stops (a viewer is never handed half of each)', relay.stats().streams === 0 && msgs(b, 'visualChunk').length === 1);
+    relay.dispose();
+  }
+  {
+    // two seats cannot hold one robot id: the second is refused, the first keeps its look
+    const { relay } = reset();
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS, ID_A);
+    put(relay, a, 'top', png);
+    put(relay, b, 'top', pngBytes(64, 64, { noise: true, seed: 4 }), ID_A);
+    check('visuals/dup: ⚠️ a second seat claiming the same robot id is refused (`dup`), so a viewer keying a picture by id cannot be handed the wrong one', refusals(b).join() === 'put:dup' && relay.stats().owners === 1);
+    relay.dispose();
+  }
+  check('visuals/budget: the process budget is one counter per thread in one shared buffer — the sum is the process’s, a dead thread’s slot can be zeroed', (() => {
+    const sab = SV.makeSharedVisualBudget();
+    if (!sab) return false;
+    SV.configureVisualBudget(sab, 2);
+    const budget = SV.processVisualBudget(1000);
+    const ok1 = budget.reserve(600);
+    // "another thread" writes its own slot of the same buffer
+    new Int32Array(sab)[5] += 300;
+    const full = SV.visualBytesInUse() === 900 && !budget.reserve(200) && budget.reserve(100);
+    budget.release(700);
+    const seen = SV.visualBytesInUse() === 300;
+    SV.resetVisualSlot(sab, 5);
+    const zero = SV.visualBytesInUse() === 0;
+    SV.configureVisualBudget(new ArrayBuffer(4 * SV.VISUAL_BUDGET_SLOTS), 0); // back to a private counter
+    return ok1 && full && seen && zero;
+  })());
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE RELAY IN A REAL `Room`: owner uploads, a viewer asks, a cap-less client is left alone
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const { glbBytes, pngBytes } = VF;
+  const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const ID = '0123456789abcdef';
+  const ID2 = 'fedcba9876543210';
+  const impOf = (id: string) => ({ v: 1, id, heightIn: 12, hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }] });
+  const impSpec = (id: string) => ({ ...DEFAULT_SPEC, imported: impOf(id) }) as typeof DEFAULT_SPEC;
+  type Sink = Record<string, PROTO.ServerMsg[]>;
+  const noVisuals = PROTO.CLIENT_CAPS.filter((c) => c !== IV.IMPORT_VISUALS_CAP);
+  const mk = (sink: Sink, id: string, caps: string[] | undefined, spec: typeof DEFAULT_SPEC, alliance: Alliance = 'red'): Client => {
+    sink[id] ??= [];
+    return {
+      id,
+      send: (m) => sink[id].push(m),
+      player: { clientId: id, name: id, teamName: 'T', teamNumber: 1, alliance, startIndex: 0, ready: true, spec: { ...spec }, assists: { ...DEFAULT_ASSISTS } },
+      connected: true,
+      disconnectAt: 0,
+      caps,
+      userId: `u-${id}`,
+    };
+  };
+  const vis = (s: Sink, id: string): PROTO.ServerMsg[] => s[id].filter((m) => m.t.startsWith('visual'));
+  const putAll = (room: Room, id: string, kind: IV.VisualKind, bytes: Uint8Array, rid: string): void => {
+    for (let seq = 0; seq < IV.visualFrames(bytes.length); seq++) {
+      const sp = IV.visualSpan(bytes.length, seq);
+      room.onMessage(id, { t: 'visualPut', kind, id: rid, total: bytes.length, seq, data: IV.bytesToBase64(bytes, sp.start, sp.end) });
+    }
+  };
+  const assemble = (s: Sink, id: string, owner: string, kind: IV.VisualKind): Uint8Array => {
+    const cs = s[id].filter((m) => m.t === 'visualChunk' && m.owner === owner && m.kind === kind) as Extract<PROTO.ServerMsg, { t: 'visualChunk' }>[];
+    const out = new Uint8Array(cs[0]?.total ?? 0);
+    for (const c of cs) out.set(IV.base64ToBytes(c.data) ?? new Uint8Array(0), IV.visualSpan(c.total, c.seq).start);
+    return out;
+  };
+  const same = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.length > 0 && a.every((x, i) => x === b[i]);
+  const png = pngBytes(128, 128, { noise: true, seed: 11 });
+  const glb = glbBytes({ tris: 6000 });
+  const baseline = SV.visualBytesInUse();
+
+  // ---- a custom room ------------------------------------------------------------------------------
+  {
+    const s: Sink = {};
+    let emptied = 0;
+    const room = new Room('smoke-vis-custom', () => emptied++, { kind: 'versus' });
+    room.add(mk(s, 'a', PROTO.CLIENT_CAPS, impSpec(ID), 'red'));
+    room.add(mk(s, 'b', PROTO.CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    room.add(mk(s, 'x', noVisuals, DEFAULT_SPEC, 'blue')); // an imports build without the relay
+    room.addSpectator(mk(s, 'w', PROTO.CLIENT_CAPS, DEFAULT_SPEC));
+    check('visuals/room: the seats are in (the cap-less one has the imports capability, so it is seated beside an imported robot)', ['a', 'b', 'x', 'w'].every((id) => s[id].some((m) => m.t === 'welcome')));
+    putAll(room, 'a', 'top', png, ID);
+    check('visuals/room: the owner’s upload is announced to the other seat, the watcher and the owner', ['a', 'b', 'w'].every((id) => vis(s, id).length === 1 && vis(s, id)[0].t === 'visualReady'));
+    check('visuals/room: ⚠️ a client without `importVisuals` is sent NOTHING and the room carries on (its roster and welcome are untouched)', vis(s, 'x').length === 0 && s.x.some((m) => m.t === 'roster'));
+    room.onMessage('x', { t: 'visualGet', owner: 'a', id: ID, kind: 'top' });
+    putAll(room, 'x', 'top', png, ID);
+    check('visuals/room: ...and what it sends the relay is ignored without a reply', vis(s, 'x').length === 0);
+    room.onMessage('b', { t: 'visualGet', owner: 'a', id: ID, kind: 'top' });
+    check('visuals/room: a request is answered by the room’s own timer, not in the call (nothing is sent per tick, nothing unasked)', s.b.filter((m) => m.t === 'visualChunk').length === 0);
+    await sleepMs(250);
+    check('visuals/room: ⚠️ the viewer receives the owner’s picture byte for byte', same(assemble(s, 'b', 'a', 'top'), png));
+    check('visuals/room: ...and the watcher, who did not ask, received no chunk', s.w.filter((m) => m.t === 'visualChunk').length === 0);
+    room.onMessage('w', { t: 'visualGet', owner: 'a', id: ID, kind: 'top' });
+    await sleepMs(250);
+    check('visuals/room: a watcher can ask, and gets it identical', same(assemble(s, 'w', 'a', 'top'), png));
+    // a client attaching later is greeted
+    room.addSpectator(mk(s, 'w2', PROTO.CLIENT_CAPS, DEFAULT_SPEC));
+    room.add(mk(s, 'c', PROTO.CLIENT_CAPS, DEFAULT_SPEC, 'red'));
+    check('visuals/room: a watcher and a seat that arrive later are told what is ready', vis(s, 'w2').length === 1 && vis(s, 'c').length === 1);
+    const resend: PROTO.ServerMsg[] = [];
+    room.reattach('b', (m) => { resend.push(m); s.b.push(m); }, undefined, undefined, undefined, true);
+    check('visuals/room: a reclaimed seat (a new socket) is told again, because the new socket was told nothing', resend.filter((m) => m.t === 'visualReady').length === 1);
+    check('visuals/room: the room reserved the picture’s bytes from the process budget', SV.visualBytesInUse() - baseline === png.length, String(SV.visualBytesInUse() - baseline));
+    // the robot changes: the assets go
+    room.onMessage('a', { t: 'update', patch: { spec: { ...DEFAULT_SPEC } } });
+    check('visuals/room: an owner who picks a STANDARD robot loses its assets, and the bytes go back', SV.visualBytesInUse() === baseline);
+    s.b.length = 0;
+    room.onMessage('b', { t: 'visualGet', owner: 'a', id: ID, kind: 'top' });
+    check('visuals/room: ...so a request for them is `none` (the viewer keeps the footprint)', (s.b.find((m) => m.t === 'visualRefused') as Extract<PROTO.ServerMsg, { t: 'visualRefused' }> | undefined)?.reason === 'none');
+    room.onMessage('a', { t: 'update', patch: { spec: impSpec(ID) } });
+    putAll(room, 'a', 'top', png, ID);
+    room.onMessage('a', { t: 'update', patch: { spec: impSpec(ID2) } });
+    check('visuals/room: ...and one that picks ANOTHER imported robot loses them too', SV.visualBytesInUse() === baseline);
+    s.a.length = 0;
+    putAll(room, 'a', 'top', png, ID);
+    check('visuals/room: an upload for the OLD robot’s id is refused now (`id`)', (s.a.find((m) => m.t === 'visualRefused') as Extract<PROTO.ServerMsg, { t: 'visualRefused' }> | undefined)?.reason === 'id');
+    putAll(room, 'a', 'top', png, ID2);
+    check('visuals/room: ...and one for the robot it holds is taken', SV.visualBytesInUse() - baseline === png.length);
+    // the owner leaves: a lobby departure frees at once
+    room.detach('a');
+    check('visuals/room: an owner leaving the lobby frees its assets', SV.visualBytesInUse() === baseline);
+    // everyone leaves: the room is gone and nothing is held
+    putAll(room, 'c', 'top', png, ID2); // c holds a standard robot: refused, holds nothing
+    for (const id of ['b', 'x', 'c']) room.detach(id);
+    check('visuals/room: the last seat out empties the room', emptied === 1);
+    check('visuals/room: ⚠️ ...and the process budget is exactly where it started (nothing leaked)', SV.visualBytesInUse() === baseline);
+    room.stop();
+  }
+
+  // ---- the room empties with assets in it ------------------------------------------------------------
+  {
+    const s: Sink = {};
+    let emptied = 0;
+    const room = new Room('smoke-vis-empty', () => emptied++, { kind: 'versus' });
+    room.add(mk(s, 'a', PROTO.CLIENT_CAPS, impSpec(ID), 'red'));
+    putAll(room, 'a', 'mesh', glb, ID);
+    putAll(room, 'a', 'top', png, ID);
+    check('visuals/room: a mesh and a picture are held for one owner', SV.visualBytesInUse() - baseline === glb.length + png.length);
+    room.detach('a');
+    check('visuals/room: ⚠️ the owner leaving a room with nobody else in it frees both, and the room is gone', emptied === 1 && SV.visualBytesInUse() === baseline);
+    room.stop();
+  }
+
+  // ---- a seat that drops mid-match keeps its assets for its reconnect, and loses them at the reap -----------
+  {
+    const s: Sink = {};
+    const room = new Room('smoke-vis-match', () => {}, { kind: 'versus' });
+    room.add(mk(s, 'a', PROTO.CLIENT_CAPS, impSpec(ID), 'red'));
+    room.add(mk(s, 'b', PROTO.CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    putAll(room, 'a', 'top', png, ID);
+    room.onMessage('a', { t: 'start' });
+    check('visuals/room: the match starts with the imported robot and the relay holding its picture', !!room.worldForTest() && SV.visualBytesInUse() - baseline === png.length);
+    room.addSpectator(mk(s, 'late', PROTO.CLIENT_CAPS, DEFAULT_SPEC));
+    check('visuals/room: a spectator who arrives mid-match is told the picture is ready', vis(s, 'late').some((m) => m.t === 'visualReady'));
+    room.onMessage('late', { t: 'visualGet', owner: 'a', id: ID, kind: 'top' });
+    await sleepMs(500); // a live match holds a viewer to one chunk per 100 ms: three chunks
+    check('visuals/room: ...asks, and is streamed it DURING the match, identical', same(assemble(s, 'late', 'a', 'top'), png));
+    room.detach('a'); // a drop inside the reconnect grace holds the seat
+    check('visuals/room: a seat that drops mid-match keeps its assets (it is coming back)', SV.visualBytesInUse() - baseline === png.length);
+    // ...and its grace lapsing is the reap that frees them
+    (room as unknown as { clients: Map<string, Client> }).clients.get('a')!.disconnectAt = 1;
+    (room as unknown as { checkGrace(): void }).checkGrace();
+    check('visuals/room: ...and the reconnect grace lapsing frees them', SV.visualBytesInUse() === baseline);
+    room.stop();
+  }
+
+  // ---- record and ranked rooms ------------------------------------------------------------------------------
+  {
+    const s: Sink = {};
+    const room = new Room('smoke-vis-record', () => {}, { kind: 'record', record: 'solo' });
+    room.add(mk(s, 'r', PROTO.CLIENT_CAPS, DEFAULT_SPEC, 'blue'));
+    putAll(room, 'r', 'top', png, ID);
+    const first = s.r.find((m) => m.t === 'visualRefused') as Extract<PROTO.ServerMsg, { t: 'visualRefused' }> | undefined;
+    check('visuals/room: ⚠️ a record room refuses an upload, with the room reason, and holds nothing', first?.reason === 'room' && SV.visualBytesInUse() === baseline, String(first?.reason));
+    s.r.length = 0;
+    room.onMessage('r', { t: 'visualGet', owner: 'r', id: ID, kind: 'top' });
+    check('visuals/room: ...and refuses a request', (s.r.find((m) => m.t === 'visualRefused') as Extract<PROTO.ServerMsg, { t: 'visualRefused' }> | undefined)?.reason === 'room');
+    room.stop();
+    const staged = new Room('smoke-vis-ranked', () => {}, { kind: 'versus' });
+    staged.applyPending({
+      code: 'iad-vis', hostRegion: 'iad', mode: '1v1', seed: 9, ranked: true,
+      roster: [{ userId: 'u-a', name: 'a', teamName: 'T', teamNumber: 1, spec: { ...DEFAULT_SPEC }, assists: { ...DEFAULT_ASSISTS }, startIndex: 0, alliance: 'red', introElo: 1200 }],
+    });
+    const s2: Sink = {};
+    const c = mk(s2, 'a', PROTO.CLIENT_CAPS, DEFAULT_SPEC, 'red');
+    c.userId = 'u-a';
+    staged.add(c);
+    putAll(staged, 'a', 'top', png, ID);
+    check('visuals/room: ⚠️ a staged ranked room refuses it too, and holds nothing', (s2.a.find((m) => m.t === 'visualRefused') as Extract<PROTO.ServerMsg, { t: 'visualRefused' }> | undefined)?.reason === 'room' && SV.visualBytesInUse() === baseline);
+    staged.stop();
+  }
+  check('visuals/room: after every scenario the process budget is where it started', SV.visualBytesInUse() === baseline, String(SV.visualBytesInUse() - baseline));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE CLIENT: an owner and a viewer, each an `ImportVisualsClient`, through a real `Room`
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const { glbBytes, pngBytes } = VF;
+  const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const until = async (pred: () => boolean, ms = 4000): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (pred()) return true;
+      await sleepMs(10);
+    }
+    return pred();
+  };
+  const ID = '0123456789abcdef';
+  const ID2 = 'fedcba9876543210';
+  const impSpec = (id: string) => ({ ...DEFAULT_SPEC, imported: { v: 1, id, heightIn: 12, hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }] } }) as typeof DEFAULT_SPEC;
+  const png = pngBytes(100, 100, { noise: true, seed: 21 });
+  const glb = glbBytes({ tris: 29_000 });
+
+  class FakeTx implements Transport {
+    sent: PROTO.ClientMsg[] = [];
+    isOpen = true;
+    toRoom: ((m: PROTO.ClientMsg) => void) | null = null;
+    send(d: string): void {
+      const m = PROTO.decodeClientMsg(d);
+      this.sent.push(m);
+      this.toRoom?.(m);
+    }
+    onMessage(): void {}
+    onOpen(): void {}
+    onReopen(): void {}
+    onDown(): void {}
+    onFail(): void {}
+    close(): void {}
+    count(t: string): number {
+      return this.sent.filter((m) => m.t === t).length;
+    }
+  }
+  const delivered: { id: string; assets: { top?: Blob | null; mesh?: Blob | null } }[] = [];
+  const unregistered: string[] = [];
+  BR.setRelayedAssetSink({ register: (id, assets) => delivered.push({ id, assets }), unregister: (id) => unregistered.push(id) });
+  const reset = (): void => {
+    delivered.length = 0;
+    unregistered.length = 0;
+    BR.unregisterRelayedAssets(BR.relayedAssetIds());
+    unregistered.length = 0;
+  };
+  const bytesOf = async (b: Blob | null | undefined): Promise<Uint8Array> => (b ? new Uint8Array(await b.arrayBuffer()) : new Uint8Array(0));
+  const same = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.length > 0 && a.every((x, i) => x === b[i]);
+  const own = (top: Uint8Array | null, mesh: Uint8Array | null): IVC.OwnAssets => ({ top: async () => top, mesh: async () => mesh });
+
+  /** a client wired to a room the way `LobbyClient` wires it: its transport reaches the room, the room's frames reach it */
+  function join(room: Room, id: string, spec: typeof DEFAULT_SPEC, cli: IVC.ImportVisualsClient, alliance: Alliance = 'red'): FakeTx {
+    const tx = new FakeTx();
+    tx.toRoom = (m) => room.onMessage(id, m);
+    cli.bind(tx);
+    room.add({
+      id,
+      send: (m) => {
+        if (m.t === 'roster') cli.noteRoster(id, m.players);
+        else if (m.t === 'welcome') cli.onWelcome(m.clientId);
+        else cli.handle(m);
+      },
+      player: { clientId: id, name: id, teamName: 'T', teamNumber: 1, alliance, startIndex: 0, ready: true, spec: { ...spec }, assists: { ...DEFAULT_ASSISTS } },
+      connected: true,
+      disconnectAt: 0,
+      caps: PROTO.CLIENT_CAPS,
+      userId: `u-${id}`,
+    });
+    return tx;
+  }
+  const mkClient = (o: IVC.ImportVisualsOptions): IVC.ImportVisualsClient => new IVC.ImportVisualsClient({ settleMs: 5, showOthers: () => true, meshWanted: () => false, ...o });
+
+  // ---- the round trip -------------------------------------------------------------------------------
+  {
+    reset();
+    const room = new Room('smoke-visc-1', () => {}, { kind: 'versus' });
+    const ownerCli = mkClient({ own: own(png, glb) });
+    const viewCli = mkClient({});
+    const ownerTx = join(room, 'a', impSpec(ID), ownerCli);
+    ownerCli.setOffered(false);
+    await sleepMs(80);
+    check('visuals/client: ⚠️ an owner sends NOTHING to a server that did not say it holds the relay (an older one would drop 1.3 MB without a word)', ownerTx.count('visualPut') === 0);
+    ownerCli.setOffered(true);
+    const viewTx = join(room, 'b', DEFAULT_SPEC, viewCli, 'blue');
+    check('visuals/client: ...and uploads once it is told it may', await until(() => ownerCli.stateForTest().mine.includes(`${ID}|top`)), JSON.stringify(ownerCli.stateForTest()));
+    check('visuals/client: a DECODE owner uploads the picture and no mesh (it has no 3D view)', ownerTx.sent.filter((m) => m.t === 'visualPut' && m.kind === 'mesh').length === 0 && ownerTx.sent.filter((m) => m.t === 'visualPut' && m.kind === 'top').length === IV.visualFrames(png.length));
+    check('visuals/client: the upload is paced (frames are not sent in one burst)', ownerTx.count('visualPut') === IV.visualFrames(png.length));
+    check('visuals/client: ⚠️ the viewer asked for the picture only once it was told it was ready, and for nothing else', await until(() => delivered.length === 1), `${viewTx.count('visualGet')} gets`);
+    check('visuals/client: ...it asked exactly once', viewTx.count('visualGet') === 1);
+    check('visuals/client: ⚠️ the renderers were handed the owner’s picture, byte for byte, under the owner’s robot id',
+      delivered[0]?.id === ID && same(await bytesOf(delivered[0]?.assets.top), png) && delivered[0].assets.top?.type === 'image/png');
+    check('visuals/client: the owner asked for nothing (it has its own picture)', ownerTx.count('visualGet') === 0);
+    // leaving the room takes the blobs back
+    viewCli.reset();
+    check('visuals/client: leaving the room hands the picture back (`unregister`) and clears the state', unregistered.join() === ID && viewCli.stateForTest().delivered.length === 0);
+    ownerCli.reset();
+    room.stop();
+  }
+
+  // ---- the viewer's opt-out ----------------------------------------------------------------------------------
+  {
+    reset();
+    const room = new Room('smoke-visc-2', () => {}, { kind: 'versus' });
+    let show = false;
+    const ownerCli = mkClient({ own: own(png, null) });
+    const viewCli = mkClient({ showOthers: () => show });
+    join(room, 'a', impSpec(ID), ownerCli);
+    ownerCli.setOffered(true);
+    const viewTx = join(room, 'b', DEFAULT_SPEC, viewCli, 'blue');
+    await until(() => ownerCli.stateForTest().mine.length === 1);
+    await sleepMs(150);
+    check('visuals/client: ⚠️ with "Show other players’ imported robots" OFF the viewer sends no request and takes no bytes', viewTx.count('visualGet') === 0 && delivered.length === 0);
+    show = true;
+    viewCli.refresh();
+    check('visuals/client: ...turning it on asks for what is ready', await until(() => delivered.length === 1));
+    show = false;
+    viewCli.refresh();
+    check('visuals/client: ...and turning it off again takes the picture back (an outline once more)', unregistered.includes(ID) && viewCli.stateForTest().delivered.length === 0);
+    ownerCli.reset();
+    viewCli.reset();
+    room.stop();
+  }
+
+  // ---- BIOBUZZ: the mesh, only for a viewer who wants it --------------------------------------------------------
+  {
+    reset();
+    const room = new Room('smoke-visc-3', () => {}, { kind: 'versus' });
+    let mesh = false;
+    const ownerCli = mkClient({ own: own(png, glb) });
+    const viewCli = mkClient({ meshWanted: () => mesh });
+    ownerCli.setGame('biobuzz');
+    viewCli.setGame('biobuzz');
+    join(room, 'a', impSpec(ID), ownerCli);
+    ownerCli.setOffered(true);
+    const viewTx = join(room, 'b', DEFAULT_SPEC, viewCli, 'blue');
+    check('visuals/client: a BIOBUZZ owner uploads the picture and then the mesh', await until(() => ownerCli.stateForTest().mine.length === 2, 6000), JSON.stringify(ownerCli.stateForTest().mine));
+    await until(() => delivered.length === 1);
+    await sleepMs(100);
+    check('visuals/client: ⚠️ a viewer who is not in the 3D view asks for the picture and NOT the mesh (the mesh is only sent to a viewer who asks)',
+      viewTx.sent.filter((m) => m.t === 'visualGet').every((m) => m.kind === 'top') && delivered.every((d) => !d.assets.mesh));
+    mesh = true;
+    viewCli.refresh();
+    check('visuals/client: ...switching to the 3D view asks for it, and gets it identical', await until(() => delivered.some((d) => d.assets.mesh), 6000) && same(await bytesOf(delivered.find((d) => d.assets.mesh)?.assets.mesh), glb));
+    ownerCli.reset();
+    viewCli.reset();
+    room.stop();
+  }
+
+  // ---- an owner that has nothing to send, or whose robot changed ----------------------------------------------------
+  {
+    reset();
+    const room = new Room('smoke-visc-4', () => {}, { kind: 'versus' });
+    const gone = mkClient({ own: own(null, null) });
+    const goneTx = join(room, 'a', impSpec(ID), gone);
+    gone.setOffered(true);
+    await sleepMs(150);
+    check('visuals/client: a robot whose files are not on this device (opened on another) uploads nothing, and does not retry', goneTx.count('visualPut') === 0 && !gone.stateForTest().uploading);
+    gone.reset();
+    room.stop();
+
+    const room2 = new Room('smoke-visc-5', () => {}, { kind: 'versus' });
+    const junk = mkClient({ own: own(new Uint8Array(500).fill(9), null) });
+    const junkTx = join(room2, 'a', impSpec(ID), junk);
+    junk.setOffered(true);
+    await sleepMs(150);
+    check('visuals/client: bytes that are not a PNG are caught on the owner’s side and never sent', junkTx.count('visualPut') === 0);
+    junk.reset();
+    room2.stop();
+
+    // the robot changes mid-upload: the frames stop
+    const room3 = new Room('smoke-visc-6', () => {}, { kind: 'versus' });
+    const big = mkClient({ own: own(null, glb) });
+    big.setGame('biobuzz');
+    const bigTx = join(room3, 'a', impSpec(ID), big);
+    big.setOffered(true);
+    await until(() => bigTx.count('visualPut') >= 3);
+    big.noteRoster('a', [{ clientId: 'a', name: 'a', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(ID2), assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer]);
+    const n = bigTx.count('visualPut');
+    await sleepMs(150);
+    check('visuals/client: an owner who picks another robot mid-upload stops sending the old one’s frames', bigTx.count('visualPut') <= n + 1 && bigTx.count('visualPut') < IV.visualFrames(glb.length), `${n} → ${bigTx.count('visualPut')} of ${IV.visualFrames(glb.length)}`);
+    big.reset();
+    room3.stop();
+  }
+
+  // ---- a refused upload is not retried; a lost frame is, twice at most; a new seat uploads again ------------------------
+  {
+    const tx = new FakeTx();
+    const cli = mkClient({ own: own(png, null) });
+    cli.bind(tx);
+    cli.setOffered(true);
+    cli.onWelcome('me');
+    cli.noteRoster('me', [{ clientId: 'me', name: 'me', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(ID), assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer]);
+    await until(() => tx.count('visualPut') === IV.visualFrames(png.length));
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'budget', message: IV.VISUAL_REFUSAL_COPY.budget });
+    const n = tx.count('visualPut');
+    cli.poke();
+    await sleepMs(120);
+    check('visuals/client: ⚠️ an upload the room refused for budget is not sent again (viewers keep the footprint)', tx.count('visualPut') === n && !cli.stateForTest().uploading);
+    cli.onWelcome('me'); // a new seat on the room's side: it holds none of this
+    check('visuals/client: ...until the seat is a new one (a reconnect), which starts over', await until(() => tx.count('visualPut') === 2 * n));
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'seq', message: '' });
+    check('visuals/client: an interrupted upload (`seq`) is tried again', await until(() => tx.count('visualPut') === 3 * n));
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'seq', message: '' });
+    await until(() => tx.count('visualPut') === 4 * n);
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'seq', message: '' });
+    await sleepMs(120);
+    check('visuals/client: ...but only twice', tx.count('visualPut') === 4 * n);
+    cli.reset();
+  }
+
+  // ---- a viewer does not believe what it is sent ----------------------------------------------------------------------------
+  {
+    reset();
+    const asks = async (cli: IVC.ImportVisualsClient, tx: FakeTx, kind: IV.VisualKind, id = ID): Promise<void> => {
+      cli.noteRoster('me', [{ clientId: 'o', name: 'o', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(id), assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer]);
+      cli.handle({ t: 'visualReady', owner: 'o', id, kind, bytes: 1 });
+      await until(() => tx.sent.some((m) => m.t === 'visualGet' && m.kind === kind));
+    };
+    const feed = (cli: IVC.ImportVisualsClient, kind: IV.VisualKind, bytes: Uint8Array, id = ID, skip = -1): void => {
+      for (let seq = 0; seq < IV.visualFrames(bytes.length); seq++) {
+        if (seq === skip) continue;
+        const sp = IV.visualSpan(bytes.length, seq);
+        cli.handle({ t: 'visualChunk', owner: 'o', id, kind, total: bytes.length, seq, data: IV.bytesToBase64(bytes, sp.start, sp.end) });
+      }
+    };
+    // unsolicited: nothing was asked for
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      cli.noteRoster('me', [{ clientId: 'o', name: 'o', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(ID), assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer]);
+      feed(cli, 'top', png);
+      check('visuals/client: ⚠️ a chunk stream nobody asked for is ignored (a room, or a LAN host, cannot push a picture at a viewer)', delivered.length === 0 && tx.count('visualGet') === 0);
+      cli.reset();
+    }
+    // the roster does not name this robot for that owner
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      await asks(cli, tx, 'top');
+      feed(cli, 'top', png, ID2);
+      check('visuals/client: a stream for a robot id other than the one asked for is ignored', delivered.length === 0);
+      feed(cli, 'top', png);
+      check('visuals/client: ...and the right one is taken', await until(() => delivered.length === 1));
+      cli.reset();
+      reset();
+    }
+    // bytes that are not a picture
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      await asks(cli, tx, 'top');
+      feed(cli, 'top', new Uint8Array(png.length).fill(3));
+      await sleepMs(30);
+      check('visuals/client: ⚠️ bytes that are not a PNG are not handed to the renderers, and are not asked for again', delivered.length === 0 && tx.count('visualGet') === 1 && cli.stateForTest().incoming === 0);
+      cli.reset();
+    }
+    // a mesh with an external reference
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({ meshWanted: () => true });
+      cli.bind(tx);
+      await asks(cli, tx, 'mesh');
+      feed(cli, 'mesh', glbBytes({ tris: 2000, edit: (j) => { j.buffers[0].uri = 'https://example.invalid/x.bin'; } }));
+      await sleepMs(30);
+      check('visuals/client: ⚠️ a mesh that names an external file is not handed to the renderers either', delivered.length === 0 && !BR.hasRelayedAsset(ID, 'mesh'));
+      cli.reset();
+    }
+    // a gap in the stream
+    {
+      const png3 = pngBytes(128, 128, { noise: true, seed: 3 }); // three chunks
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      await asks(cli, tx, 'top');
+      feed(cli, 'top', png3, ID, 1);
+      check('visuals/client: a gap in the sequence drops the download and asks once more', await until(() => tx.count('visualGet') === 2) && delivered.length === 0);
+      feed(cli, 'top', png3, ID, 1);
+      await sleepMs(60);
+      check('visuals/client: ...and not a third time', tx.count('visualGet') === 2 && delivered.length === 0);
+      cli.reset();
+    }
+    // a refusal
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      await asks(cli, tx, 'top');
+      cli.handle({ t: 'visualRefused', op: 'get', owner: 'o', id: ID, kind: 'top', reason: 'busy', message: IV.VISUAL_REFUSAL_COPY.busy });
+      cli.poke();
+      await sleepMs(60);
+      check('visuals/client: a refused request is not repeated (the footprint stays)', tx.count('visualGet') === 1 && cli.stateForTest().incoming === 0);
+      cli.reset();
+    }
+    // the same robot id from a second owner is not requested twice
+    {
+      const tx = new FakeTx();
+      const cli = mkClient({});
+      cli.bind(tx);
+      cli.noteRoster('me', [
+        { clientId: 'o', name: 'o', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(ID), assists: { ...DEFAULT_ASSISTS } },
+        { clientId: 'p', name: 'p', alliance: 'blue', startIndex: 0, ready: true, spec: impSpec(ID), assists: { ...DEFAULT_ASSISTS } },
+      ] as PROTO.LobbyPlayer[]);
+      cli.handle({ t: 'visualReady', owner: 'o', id: ID, kind: 'top', bytes: 1 });
+      cli.handle({ t: 'visualReady', owner: 'p', id: ID, kind: 'top', bytes: 1 });
+      await until(() => tx.count('visualGet') >= 1);
+      feed(cli, 'top', png);
+      await until(() => delivered.length === 1);
+      cli.poke();
+      await sleepMs(60);
+      check('visuals/client: two seats holding one robot id share the picture that arrived first (the second is not fetched to overwrite it)', delivered.length === 1 && tx.sent.filter((m) => m.t === 'visualGet' && m.owner === 'p').length <= 1);
+      cli.reset();
+    }
+  }
+
+  // ---- the connection ------------------------------------------------------------------------------------------------
+  {
+    reset();
+    const a = new FakeTx();
+    const b = new FakeTx();
+    const cli = mkClient({});
+    cli.bind(a);
+    cli.noteRoster('me', [{ clientId: 'o', name: 'o', alliance: 'red', startIndex: 0, ready: true, spec: impSpec(ID), assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer]);
+    cli.handle({ t: 'visualReady', owner: 'o', id: ID, kind: 'top', bytes: 1 });
+    await until(() => a.count('visualGet') === 1);
+    cli.bind(a); // the lobby hands its transport to the match: the same room
+    check('visuals/client: binding the SAME transport (a lobby → match hand-off) keeps what the session knows', cli.stateForTest().incoming === 1);
+    cli.bind(b); // another connection is another room
+    check('visuals/client: ...and a different transport starts clean', cli.stateForTest().incoming === 0);
+    cli.release(a);
+    check('visuals/client: releasing a transport that is not the bound one does nothing', true);
+    cli.reset();
+    // by default the adapter lends to the renderers' own registry (`src/render/importedAssets.ts`)
+    reset();
+    const IA = await import('../src/render/importedAssets');
+    BR.setRelayedAssetSink(null);
+    IA.resetImportedAssetsForTests();
+    BR.registerRelayedAsset(ID, 'top', png);
+    check('visuals/client: ⚠️ by default a relayed asset is lent to the renderers’ registry (`registerImportedAssets`), where it wins over the device library', IA.importedAssetCacheSizes().registered === 1 && BR.hasRelayedAsset(ID, 'top'));
+    BR.registerRelayedAsset(ID, 'mesh', glb);
+    const lent = await IA.importedMeshBlob(ID);
+    check('visuals/client: ...a relayed mesh is what the 3D scene is handed for that id, byte for byte', !!lent && lent.type === 'model/gltf-binary' && same(new Uint8Array(await lent.arrayBuffer()), glb));
+    BR.unregisterRelayedAssets([ID]);
+    check('visuals/client: ...and `unregisterImportedAssets` takes it back when the room is left', IA.importedAssetCacheSizes().registered === 0 && !BR.hasRelayedAsset(ID, 'top') && BR.relayedAssetIds().length === 0);
+    IA.resetImportedAssetsForTests();
+    BR.setRelayedAssetSink(null);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SOURCE PINS for what a socket or a worker has to do, which no headless Room can show
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const rd = (f: string): string => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  const room = rd(joinPath('server', 'room.ts'));
+  const idx = rd(joinPath('server', 'index.ts'));
+  const rw = rd(joinPath('server', 'roomWorker.ts'));
+  const rh = rd(joinPath('server', 'roomHost.ts'));
+  check('visuals/pins: the room answers the relay’s two messages BEFORE it looks the sender up, so a watcher (who is not a seat) can ask',
+    /onMessage\(id: string, msg: ClientMsg\): void \{[\s\S]{0,400}msg\.t === 'visualPut' \|\| msg\.t === 'visualGet'[\s\S]{0,200}const c = this\.clients\.get\(id\);/.test(room));
+  check('visuals/pins: every place the room drops a seat frees its assets, and the room closing disposes the relay',
+    (room.match(/this\.visuals\.freeOwner\(/g) ?? []).length === 4 && /this\.visuals\.dispose\(\);\s*this\.onEmpty\(\);/.test(room) && !/[^.]this\.onEmpty\(\)/.test(room.replace(/this\.visuals\.dispose\(\);\s*this\.onEmpty\(\);/, '')));
+  check('visuals/pins: a joiner, a watcher and a reclaimed seat are greeted; a seat’s robot change re-checks its assets',
+    (room.match(/this\.visuals\.greet\(/g) ?? []).length === 3 && /this\.visuals\.specChanged\(c\.id\)/.test(room) && /this\.visuals\.reconcile\(\)/.test(room));
+  check('visuals/pins: ⚠️ the socket thread does not compress a `visualChunk` (base64 of a PNG or GLB: no gain, a zlib pass, and it would foul the snapshots’ shared deflate window)',
+    /compress: s\.length >= COMPRESS_THRESHOLD && !s\.startsWith\('\{"t":"visualChunk"'\)/.test(idx));
+  check('visuals/pins: a worker room does not hash or mirror a `visualChunk` (unique per viewer, no state change)', /s\.startsWith\('\{"t":"snapshot"'\) \|\| s\.startsWith\('\{"t":"visualChunk"'\)/.test(rw));
+  check('visuals/pins: the process budget is shared across threads — the pool makes the buffer, hands each worker a slot, zeroes a dead one’s',
+    /makeSharedVisualBudget\(\)/.test(rh) && /workerData: \{ visualBudget: this\.visualBudget, visualSlot: slot\.index \+ 1 \}/.test(rh) && /resetVisualSlot\(this\.visualBudget, slot\.index \+ 1\)/.test(rh) && /configureVisualBudget\(wd\?\.visualBudget/.test(rw));
+  const hw = rd(joinPath('src', 'lan', 'hostWorker.ts'));
+  check('visuals/pins: ⚠️ on a LAN tab host a `visualChunk` takes the RELIABLE lane (only snapshot and pong are the lossy hot path), so a chunk is never silently dropped by `maxRetransmits: 0`',
+    /const HOT = \/\^\\\{"t":"\(snapshot\|pong\)"\//.test(hw) && !/visual/.test(hw.slice(hw.indexOf('const HOT'), hw.indexOf('const isHot'))));
+  const bundled = [rd(joinPath('server', 'importVisuals.ts')), rd(joinPath('src', 'net', 'importVisuals.ts'))];
+  check('visuals/pins: the relay and its shared rules import nothing from `node:` (the LAN tab host bundles them for a browser)', bundled.every((s) => !/from 'node:/.test(s) && !/require\(/.test(s)));
+  const cl = rd(joinPath('src', 'net', 'importVisualsClient.ts'));
+  check('visuals/pins: the client reaches the importer engine only through its loader, and imports no three.js', /loadImporterEngine/.test(cl) && !/from 'three/.test(cl) && !/import\(['"]\.\.\/robotImport\/engine/.test(cl));
+  const lc = rd(joinPath('src', 'net', 'lobbyClient.ts'));
+  const ss = rd(joinPath('src', 'net', 'serverSession.ts'));
+  check('visuals/pins: the lobby and the match session both bind the transport and forward the relay’s three server frames',
+    /importVisuals\.bind\(transport\)/.test(lc) && /importVisuals\.bind\(transport\)/.test(ss)
+    && /m\.t === 'visualReady' \|\| m\.t === 'visualChunk' \|\| m\.t === 'visualRefused'/.test(lc) && /m\.t === 'visualReady' \|\| m\.t === 'visualChunk' \|\| m\.t === 'visualRefused'/.test(ss)
+    && /importVisuals\.noteRoster\(/.test(lc) && /importVisuals\.noteRoster\(/.test(ss) && /importVisuals\.release\(this\.transport\)/.test(lc) && /importVisuals\.release\(this\.transport\)/.test(ss));
+  check('visuals/pins: the lobby offers an upload only once the server says it relays (`roomTakesImportVisuals`), after the client exists',
+    /roomTakesImportVisuals\(\)\.then\(\(ok\) => importVisuals\.setOffered\(ok\)\)/.test(rd(joinPath('src', 'ui', 'Lobby.tsx'))));
+  const api = rd(joinPath('src', 'net', 'api.ts'));
+  check('visuals/pins: the capability check follows the server THIS room is on (a tab host: yes; a LAN address: its own presence; else the cloud)',
+    /export function roomTakesImportVisuals\(\)[\s\S]{0,200}tabHosting\(\)[\s\S]{0,200}IMPORT_VISUALS_CAP/.test(api));
+  const netSec = rd(joinPath('src', 'ui', 'NetworkSection.tsx'));
+  check('visuals/pins: the viewer opt-out is a row in Network (per device, and shown for EVERY game: Graphics is hidden for a game with no 3D view) with the agreed label',
+    /label="Show other players’ imported robots"/.test(netSec) && /setShowOthersImported/.test(netSec) && !/ShowOthersImported/.test(rd(joinPath('src', 'ui', 'GraphicsSection.tsx'))));
+  const keys = rd(joinPath('src', 'storageKeys.ts'));
+  check('visuals/pins: the preference’s storage key is registered with the privacy table, and the library entry says what a room receives',
+    /export const IMPORT_VISUALS_KEY = 'decodesim\.importVisuals'/.test(keys) && /key: IMPORT_VISUALS_KEY,/.test(keys) && /sent to the other people in that room, kept in memory only/.test(keys));
+  const lib = rd(joinPath('src', 'robotImport', 'library.ts'));
+  check('visuals/pins: the lighter mesh is cached on the library record, dropped when the robot is re-saved, and removed with it',
+    /files\.delete\(fileKey\(robot\.id, LITE\)\)/.test(lib) && /for \(const k of \[\.\.\.KINDS, LITE\]\) files\.delete/.test(lib) && /export function meshLiteFor/.test(lib) && /export function putMeshLite/.test(lib));
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE LIGHTER MESH (`liteMesh`, `src/robotImport/engine/lite.ts`) against REAL exporter output
+// ════════════════════════════════════════════════════════════════════════════
+{
+  // three.js and the engine are imported HERE, inside the block, so only this block's shard pays
+  // for them. three's exporter reads a Blob back through FileReader, which Node does not have.
+  const THREE = await import('three');
+  const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+  const { exportGlbStored } = await import('../src/robotImport/engine/bake');
+  const { liteMesh } = await import('../src/robotImport/engine/lite');
+  const { creaseParts } = await import('../src/robotImport/engine/meshGroup');
+  const { triangleCount } = await import('../src/robotImport/geometry');
+  const g = globalThis as unknown as { FileReader?: unknown };
+  const hadReader = !!g.FileReader;
+  if (!hadReader) {
+    g.FileReader = class {
+      result: unknown = null;
+      onloadend: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      readAsArrayBuffer(blob: Blob): void {
+        void blob.arrayBuffer().then((b) => {
+          this.result = b;
+          this.onloadend?.();
+          this.onload?.();
+        });
+      }
+      readAsDataURL(blob: Blob): void {
+        void blob.arrayBuffer().then((b) => {
+          this.result = `data:application/octet-stream;base64,${Buffer.from(b).toString('base64')}`;
+          this.onloadend?.();
+          this.onload?.();
+        });
+      }
+    };
+  }
+  try {
+    const partOf = (geo: import('three').BufferGeometry, color: [number, number, number], name: string) => {
+      const pos = geo.getAttribute('position');
+      return {
+        positions: new Float32Array(pos.array as Float32Array),
+        indices: geo.index ? Uint32Array.from(geo.index.array as ArrayLike<number>) : Uint32Array.from({ length: pos.count }, (_, i) => i),
+        color,
+        name,
+      };
+    };
+    const body = new THREE.SphereGeometry(0.19, 260, 200);
+    const box = new THREE.BoxGeometry(0.2, 0.1, 0.3, 55, 55, 55);
+    box.translate(0.05, 0.1, 0);
+    const parts = [partOf(body, [0.8, 0.1, 0.1], 'body'), partOf(box, [0.1, 0.2, 0.7], 'box')];
+    const glb = await exportGlbStored(creaseParts(parts));
+    check('visuals/lite: the stored mesh of a dense robot (140k triangles) is over the relay’s 1 MiB', triangleCount(parts) > 100_000 && glb.byteLength > IV.VISUAL_MAX_BYTES.mesh, `${glb.byteLength} B`);
+    check('visuals/lite: ⚠️ REAL GLTFExporter output passes the structural validator (size lifted), so the relay accepts what the importer writes', IV.validateMeshGlb(new Uint8Array(glb), 64 * 1024 * 1024) === null);
+    check('visuals/lite: ...and at the real cap the full mesh is refused, which is why a lighter one is made', IV.validateMeshGlb(new Uint8Array(glb)) === 'too large');
+    const lite = await liteMesh(glb, IV.VISUAL_MAX_BYTES.mesh);
+    check('visuals/lite: the lighter mesh fits the cap and passes the validator', !!lite && lite.byteLength <= IV.VISUAL_MAX_BYTES.mesh && IV.validateMeshGlb(new Uint8Array(lite)) === null, String(lite?.byteLength));
+    if (lite) {
+      const l = await new GLTFLoader().parseAsync(lite, '');
+      const o = await new GLTFLoader().parseAsync(glb, '');
+      const bl = new THREE.Box3().setFromObject(l.scene);
+      const bo = new THREE.Box3().setFromObject(o.scene);
+      check('visuals/lite: ⚠️ it stays in the stored mesh frame — the bounding box is the original’s to a tenth of a millimetre', bl.min.distanceTo(bo.min) < 1e-4 && bl.max.distanceTo(bo.max) < 1e-4, `${bl.min.distanceTo(bo.min)}`);
+      const colours = new Set<string>();
+      l.scene.traverse((n) => {
+        const m = (n as import('three').Mesh).material as import('three').MeshStandardMaterial | undefined;
+        if (m?.color) colours.add(m.color.getHexString());
+      });
+      check('visuals/lite: the colours are kept (one material per source colour)', colours.size === 2);
+      let tris = 0;
+      l.scene.traverse((n) => {
+        const m = n as import('three').Mesh;
+        if (m.isMesh) tris += (m.geometry.index?.count ?? m.geometry.getAttribute('position').count) / 3;
+      });
+      check('visuals/lite: it is a simplification, not a truncation (fewer triangles, still a shape)', tris > 2000 && tris < triangleCount(parts), String(tris));
+    }
+    check('visuals/lite: a target no mesh can meet answers null, and the relay then sends the picture alone', (await liteMesh(glb, 2000)) === null);
+  } finally {
+    if (!hadReader) delete g.FileReader;
   }
 }
 

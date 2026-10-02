@@ -79,6 +79,9 @@
  *   step       — STEP support: `stepWorker-*.js` (the worker, with occt-import-js's 97 KB glue
  *                inlined) and `occt-import-js-*.wasm` (OpenCascade, ~7.6 MB raw). Fetched only when
  *                a STEP file is dropped. Matched by FILENAME.
+ *   library    — the device ROBOT LIBRARY (`library-*.js`, `src/robotImport/library.ts`), reached
+ *                by a dynamic import from the renderers' asset seam the first time an imported
+ *                robot is drawn. Matched by FILENAME.
  *   other      — everything else. In practice this is empty: `@dimforge/rapier2d-compat` is a
  *                STATIC import (`src/sim/physicsEngine.ts`), so the 2D physics engine lives
  *                inside `main` already and always has (that is existing, unchanged behavior,
@@ -184,10 +187,14 @@ function routeFor(file, buf) {
   // measurement build, where the loader is an entry of its own; in the app it is inlined.
   if (/^(importerEngine|engineLoader)-[^/]*\.js$/.test(base)) return 'importer';
   if (/^(stepWorker|stepReader)-[^/]*\.js$/.test(base) || /^occt-import-js[^/]*\.wasm$/.test(base)) return 'step';
-  // THE IMPORTER'S UI (lane 4): the editor route and the two modules the robot page reaches by
-  // `import()` (the IndexedDB library, the share-file reader and writer). By FILENAME, before the
+  // THE ROBOT LIBRARY (`src/robotImport/library.ts`, IndexedDB), by FILENAME: the renderers' asset
+  // seam (`src/render/importedAssets.ts`) reaches it with a dynamic `import()` the first time an
+  // imported robot is drawn, so it is its own small chunk rather than a cost in `main`.
+  if (/^library-[^/]*\.js$/.test(base)) return 'library';
+  // THE IMPORTER'S UI (lane 4): the editor route and the share-file reader and writer the robot page
+  // reaches by `import()`. By FILENAME, before the
   // content scans: none of them carries three.js, so they would otherwise land in `other`.
-  if (/^(ImportEditor|library|shareFile|draftStore)-[^/]*\.js$/.test(base)) return 'importerui';
+  if (/^(ImportEditor|shareFile|draftStore)-[^/]*\.js$/.test(base)) return 'importerui';
   // Vite's preload helper is split out only when a SECOND entry shares it (the measurement
   // build); in the app it is part of the entry chunk, so it is billed there
   if (/^preload-helper-[^/]*\.js$/.test(base)) return 'main';
@@ -544,6 +551,11 @@ const BASELINE = {
   // 21.95 (the worker with occt's glue) and `stepReader-*.js` 0.42. Fetched only when a STEP file is
   // dropped; every other import, and every player who never imports a robot, pays nothing.
   step: { gzip: 3133.28 * 1000 },
+  // 2026-10-01: NEW (robot import, rendering lane). `library-*.js` 1.85: the device library behind
+  // `importedAssets`' dynamic import; the rest of that lane is +5.60 in `main` (the 2D sprites'
+  // import branches, the asset seam, FootprintSvg) and +2.86 in `scene` (`renderImported.ts`),
+  // both inside tolerance against the robot-import branch measured the same minute.
+  library: { gzip: 1.85 * 1000 },
   // 2026-10-01: NEW, the importer's UI (lane 4). `ImportEditor-*.js` 26.23 (the editor: the steps,
   // the top-down editor, the preview host, drafts, the review checks, and the measurement code it
   // shares with the engine), `library-*.js` 2.14 and `shareFile-*.js` 1.38, both `import()`ed by the

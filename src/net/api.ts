@@ -8,6 +8,7 @@ import type { AssistConfig, GameId, RobotSpec } from '../types';
 import { gameServerHttpUrl, lanActive, lanServerHttpUrl, setLanFromServer } from './env';
 import { tabHosting } from '../lan/hosting';
 import { ROBOT_IMPORT_CAP, replayHasImported } from './imported';
+import { IMPORT_VISUALS_CAP } from './importVisuals';
 import { getAuthToken } from '../lib/authClient';
 import { readAccountSettings, sendWithTokenRetry } from './authFetch';
 import { DISCORD_REGION } from './discordActivity';
@@ -459,23 +460,37 @@ export function serverCaps(): Promise<string[]> {
  *  · otherwise the cloud's `serverCaps()`.
  * Any failure reads as "no": the caller then plays the standard robot, which is the safe direction.
  */
-const lanCapsCache = new Map<string, Promise<boolean>>();
+const lanCapsCache = new Map<string, Promise<string[]>>();
+/** the capabilities of the server THIS room is on: a LAN address's own presence, else the cloud's. */
+function roomServerCaps(): Promise<string[]> {
+  if (!lanActive()) return serverCaps();
+  const base = lanServerHttpUrl();
+  if (!base) return Promise.resolve([]);
+  let hit = lanCapsCache.get(base);
+  if (!hit) {
+    hit = fetch(`${base}/api/presence`, { cache: 'no-store' })
+      .then((r) => (r.ok ? (r.json() as Promise<Presence>) : null))
+      .then((p) => (Array.isArray(p?.caps) ? p.caps : []))
+      .catch(() => []);
+    lanCapsCache.set(base, hit);
+  }
+  return hit;
+}
 export function roomTakesImportedRobots(): Promise<boolean> {
   if (tabHosting()) return Promise.resolve(true);
-  if (lanActive()) {
-    const base = lanServerHttpUrl();
-    if (!base) return Promise.resolve(false);
-    let hit = lanCapsCache.get(base);
-    if (!hit) {
-      hit = fetch(`${base}/api/presence`, { cache: 'no-store' })
-        .then((r) => (r.ok ? (r.json() as Promise<Presence>) : null))
-        .then((p) => Array.isArray(p?.caps) && p.caps.includes(ROBOT_IMPORT_CAP))
-        .catch(() => false);
-      lanCapsCache.set(base, hit);
-    }
-    return hit;
-  }
-  return serverCaps().then((c) => c.includes(ROBOT_IMPORT_CAP));
+  return roomServerCaps().then((c) => c.includes(ROBOT_IMPORT_CAP));
+}
+
+/**
+ * DOES THE SERVER THIS ROOM IS ON RELAY AN IMPORTED ROBOT'S LOOK? (`'importVisuals'`,
+ * docs/area/netcode.md, VISUALS RELAY.) The same three answers as `roomTakesImportedRobots` — a
+ * tab-hosted room runs this build's own `Room`, a LAN address answers for itself, the cloud's
+ * `serverCaps()` otherwise — and the same safe direction: any failure reads as no, and an owner
+ * then uploads nothing, because an older server would drop 1.3 MB of frames without a word.
+ */
+export function roomTakesImportVisuals(): Promise<boolean> {
+  if (tabHosting()) return Promise.resolve(true);
+  return roomServerCaps().then((c) => c.includes(IMPORT_VISUALS_CAP));
 }
 
 /**

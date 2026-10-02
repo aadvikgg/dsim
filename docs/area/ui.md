@@ -314,7 +314,10 @@ rename one. Order is task order — Robot, Controls, Match, Audio and Visual, Gr
 build it, learn to drive it, set up the session, the two output sections, then the connection.
 **Network** (`NetworkSection.tsx`) holds client prediction, which sat in a Controls fold until
 2026-09-22 (owner: "Network prediction should NOT be part of controls") — it is how this machine
-draws its own robot in a 3D-physics room, not a control, and not Graphics either. **A sub-nav hint
+draws its own robot in a 3D-physics room, not a control, and not Graphics either.
+It also holds "Show other players’ imported robots" (`importVisualsPref.ts`, the room relay's download): per
+device, and every game has it — Graphics is hidden for a game with no 3D view, and the 2D picture is a
+download too. **A sub-nav hint
 is optional**: Audio and Visual's "Follows your account" and Graphics' "This device only" said
 where the settings are stored, which nobody picks a section by, and went as clutter.
 
@@ -407,6 +410,27 @@ four `PERF_DISPLAY_BLURB` lines, an option's download size, and the R102 stow no
   are under 4.5:1 as 12-px type on the field; the dark stroke stays, and it is what carries the
   glyphs onto the light backdrop and onto a 3D background. Category 3 (their ground is the
   canvas), so they do not theme.
+- **AN IMPORTED ROBOT IS DRAWN FROM ITS HULL, IN ALL THREE GAMES** (`src/render/drawImported.ts`,
+  robot import 2026-10-01). Each game's sprite branches on `spec.imported`: the clip is the HULL (the
+  collider), not the box; the body is the import's top-down PNG when this device has it, else the
+  hull in the chassis fill with wheels at `importedWheels`; the outline stays the neutral trim and
+  the alliance stays a FILL (DECODE/Chain chevron, BIOBUZZ's NECTAR rim). Over a PICTURE only STATE
+  is drawn — the mouths' grab areas with a live/idle lip, the turret's aim (`drawAimMark`), held
+  elements, the hopper bar, the place marker — never a second set of hardware; over a silhouette
+  the game's own mechanisms are drawn where its accessors put them. The deck arrow moves ahead of
+  a turret ring rather than under it (`frontArrowSpot`, shared with 3D and `FootprintSvg`).
+  - ⚠️ **ONE FRAME FOR THE PICTURE, AND IT IS THE IMPORTER'S** (`topImageFrame`,
+    `docs/area/robot-import.md` "Frames"), re-exported by `src/render/importedAssets.ts`. Its map has
+    determinant −1 in the robot frame on purpose: the camera's y-flip cancels it, and smoke checks
+    the picture is not mirrored nose-up. Never re-derive it in a renderer.
+  - **The pictures come from `importedAssets`**, a capped LRU over a source (the device library by a
+    dynamic import, so main never carries IndexedDB code) plus blobs the editor or the relay lend.
+    It owns its object URLs and revokes them on eviction — the one exception to "only `saveBlob`
+    revokes". A canvas that draws once (the builder previews) subscribes with
+    `useImportedAssetVersion`; the match redraws every frame and needs nothing.
+  - **`FootprintSvg`** (`src/ui/`) is the import's SVG: cards and the hero when there is no
+    thumbnail, and the Chain/BIOBUZZ builder previews (with the picture and the accessors' marks).
+    Nose up through `ROBOT_FRAME`, on the field mat, category-3 tokens only.
 - ⚠️ **NOTHING IN `.game-root` MAY KEY A COLOUR OR AN ASSET ON `:root[data-theme]`.** The 3D
   view's scrim (`.game-root.view-3d …`, styles.css) makes every HUD plate dark in BOTH themes by
   REDEFINING tokens, so anything themed by the attribute instead misses it. The sponsor logo swap

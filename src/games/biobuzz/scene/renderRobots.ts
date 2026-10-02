@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { Alliance, RobotSpec, RobotState, World } from '../../../types';
+import type { Alliance, ImportedRobot, RobotSpec, RobotState, World } from '../../../types';
 import { chassisFill, COLORS, INTAKE_RAIL_T } from '../../../config';
 import { accentFill, clampCosmetics } from '../../../cosmetics';
 import { starPoints } from '../../../render/drawRobot';
 import { robotsEnabled } from '../../../sim/match';
+import { importedWheels } from '../../../sim/imported';
 // TYPES ONLY, and the direction matters: `graphics/` may not import `scene/` or `three` (the
 // RENDER lane asserts it), but the scene reading the settings MODEL is how every other quality
 // dial already works — see `renderPreview.ts`, which imports the store itself.
@@ -110,6 +111,17 @@ import {
 } from '../parts';
 import { bbFlowerInReach, bbMouths, bbMuzzleLocal, bbPlacePointLocal } from '../robot';
 import { bbSpecKey } from '../specKey';
+import {
+  buildAimSight,
+  cloneImportedMesh,
+  importedBodyGeometries,
+  importedDeckZ,
+  importedFrontMarkGeometries,
+  importedMeshKey,
+  importedSightZ,
+  isImportShared,
+  releaseImportedMesh,
+} from './renderImported';
 import {
   bbMouthFrame,
   bbShooterEdgeOf,
@@ -3193,6 +3205,9 @@ export function buildRobotGroup(
    *  (`bbWheelDetail`), and the match's `sync` rebuilds a group when it changes. */
   detail: BbWheelDetail = 'high',
 ): THREE.Group {
+  // AN IMPORTED ROBOT is built by the same generator, from its own parts (`buildImportedRobot`
+  // below), so the match and the builder preview still share one function and one key
+  if (spec.imported) return buildImportedRobot(spec, spec.imported, id, alliance, detail);
   const group = new THREE.Group();
   group.name = `robot:${id}`;
   const launcher = bbLauncherOf(spec, 0);
@@ -3311,6 +3326,178 @@ export function buildRobotGroup(
 
   if (heads.length) restTurretHeads(group, heads, [...intake.nodes, ...group.children.filter((c) => c.name === 'bb-turret' || c.name.endsWith(':tube'))]);
   return group;
+}
+
+/**
+ * AN IMPORTED ROBOT, built by the ONE generator (`docs/robot-import-plan.md` §1; the parts specific
+ * to an import are in `renderImported.ts`, which this file imports and which imports nothing back).
+ *
+ * WITH ITS MESH on this device (the owner's own robot, or one whose GLB was lent to
+ * `importedAssets`): the mesh, in the robot frame, plus only what the mesh cannot show — the two
+ * ROBOT SIGNS (the alliance, R401) on its flanks, and for a turreted launcher an AIM SIGHT on the
+ * nodes `sync` already poses. Nothing of the generator's own hardware: that would be a second robot
+ * drawn through the first.
+ *
+ * WITHOUT IT (another player's robot, or the parse still running): a PLACEHOLDER — the hull (or
+ * each `bands` prism) extruded solid to the deck in the chassis fill, the envelope above the deck
+ * as an open tower, the wheels at `importedWheels`, the front marks, the signs, and this file's
+ * own intake / launcher / Box Tube where the accessors put them, so the build reads the way a
+ * standard one does and a remote player still sees where it intakes and aims from. The `userData`
+ * handles are the standard ones, so `sync` animates the placeholder's rollers, pods and turrets
+ * with no import branch of its own.
+ */
+function buildImportedRobot(spec: RobotSpec, imp: ImportedRobot, id: number, alliance: Alliance, detail: BbWheelDetail): THREE.Group {
+  const group = new THREE.Group();
+  group.name = `robot:${id}`;
+  const launcher = bbLauncherOf(spec, 0);
+  const lift = bbLiftOf(spec);
+  const cosm = clampCosmetics(spec);
+  const accent = accentFill(cosm.accent, spec.chassisColor);
+  const fill = solidMat(chassisFill(spec.chassisColor), 0.55, 0.15);
+  const dark = solidMat(ALU_DK, 0.5, 0.3);
+  const deckZ = importedDeckZ(imp);
+  group.userData.launcher = launcher;
+  group.userData.importedId = imp.id;
+
+  const mesh = cloneImportedMesh(spec);
+  const heads: THREE.Group[] = [];
+  const pitches: THREE.Group[] = [];
+  if (mesh) {
+    mesh.name = `robot:${id}:mesh`;
+    group.add(mesh);
+    group.userData.importedMesh = true;
+    if (bbIsTurreted(launcher)) {
+      const mounts = launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount, launcher.mount2] : [launcher.mount];
+      mounts.forEach((m, i) => {
+        const at = turretLocal(spec, m);
+        const sight = buildAimSight(dark, at, importedSightZ(imp, BB_LAUNCH_Z0), turretRadius(spec));
+        sight.node.name = `robot:${id}:aim:${i}`;
+        for (const m2 of sight.meshes) cast(m2, 'dark');
+        group.add(sight.node);
+        heads.push(sight.head);
+        pitches.push(sight.pitch);
+      });
+    }
+  } else {
+    // ── the PLACEHOLDER BODY: solid to the deck, an open tower above it (`renderImported.ts`) ──
+    for (const part of importedBodyGeometries(imp)) {
+      const m = part.kind === 'hull' ? cast(new THREE.Mesh(part.geometry, fill), 'fill') : cast(new THREE.Mesh(part.geometry, dark), 'dark');
+      m.name = `robot:${id}:${part.kind}:${part.index}`;
+      group.add(m);
+    }
+
+    // the WHEELS at the import's own contact points (FL, FR, BL, BR — `moduleAngles`' order)
+    const pts = importedWheels(imp);
+    const mx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+    const my = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+    const kind = wheelKindOf(spec.drivetrain);
+    const part = BB_WHEEL_PARTS[kind];
+    const pods: THREE.Group[] = [];
+    const spin: BbSpinWheel[] = [];
+    pts.forEach((p, i) => {
+      if (spec.drivetrain === 'swerve') {
+        const pod = buildSwervePod(accent, detail);
+        pod.name = `robot:pod:${i}`;
+        pod.position.set(p.x, p.y, 0);
+        group.add(pod);
+        pods.push(pod);
+        const w = pod.getObjectByName('bb-pod-wheel');
+        if (w) spin.push({ node: w, r: BB_POD_WHEEL_R });
+        return;
+      }
+      const diag: 1 | -1 = (p.x - mx) * (p.y - my) >= 0 ? 1 : -1;
+      const wheel = buildDriveWheel(kind, detail, accent, diag);
+      wheel.name = `robot:wheel:${i}`;
+      wheel.position.set(p.x, p.y, part.r);
+      if (spec.drivetrain === 'xdrive') wheel.rotation.z = diag > 0 ? -Math.PI / 4 : Math.PI / 4;
+      group.add(wheel);
+      spin.push({ node: wheel, r: part.r });
+    });
+    group.userData.swervePods = pods;
+    group.userData.butterflySets = { traction: [], roller: [] };
+    group.userData.spinWheels = spin;
+
+    // WHICH END IS THE FRONT — `bbFrontMarks`' language, on the hull
+    const rings = bbIsTurreted(launcher)
+      ? [launcher.mount, ...(launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount2] : [])].map((m) => ({ ...turretLocal(spec, m), r: turretRadius(spec) }))
+      : [];
+    const marks = importedFrontMarkGeometries(imp.hull, deckZ, Math.min(BB_END_BAR_H, 0.9), BB_FRONT_ARROW_T, rings);
+    if (marks.bar) {
+      const bar = cast(new THREE.Mesh(marks.bar, frontBarMat()), 'paint');
+      bar.name = `robot:${id}:frontbar`;
+      group.add(bar);
+    }
+    const arrow = cast(new THREE.Mesh(marks.arrow, frontBarMat()), 'paint');
+    arrow.name = `robot:${id}:arrow`;
+    group.add(arrow);
+
+    // THE MECHANISMS, where the accessors put them — the standard builders, unchanged
+    const intake = buildIntake(spec, accent);
+    for (const n of intake.nodes) group.add(n);
+    group.userData.intakeRollers = intake.rollers;
+    group.userData.sideRollers = intake.sideRollers;
+    group.userData.rampPivots = intake.rampPivots;
+    if (bbIsTurreted(launcher)) {
+      const t0 = buildTurret(spec, launcher.mount, 0);
+      group.add(t0);
+      heads.push(t0.userData.head as THREE.Group);
+      pitches.push(t0.userData.pitch as THREE.Group);
+      if (launcher.kind === 'twinturret' && launcher.mount2) {
+        const t1 = buildTurret(spec, launcher.mount2, 1);
+        group.add(t1);
+        heads.push(t1.userData.head as THREE.Group);
+        pitches.push(t1.userData.pitch as THREE.Group);
+      }
+    } else if (launcher.kind === 'dumper') {
+      const d = buildDumper(spec, launcher);
+      group.add(d);
+      group.userData.dumpArm = d.userData.dumpArm;
+    }
+    for (const p of pitches) p.rotation.y = -BB_TURRET_PITCH_REST;
+    if (lift) {
+      const tube = buildBoxTube(spec, lift.mount, id);
+      group.add(tube.node);
+      group.userData.tubeStages = tube.stages;
+      group.userData.tube = tube.rig;
+    }
+  }
+  group.userData.turretHeads = heads;
+  group.userData.turretPitches = pitches;
+
+  // THE TWO ROBOT SIGNS (R401) — the alliance, on the hull's two flank-most edges, facing out
+  const signTex = getSignTexture(bbRobotSignText(spec), alliance);
+  const signGeo = new THREE.PlaneGeometry(BB_SIGN_W, BB_SIGN_H);
+  const signMat = new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.6 });
+  for (const [side, where] of [[1, 'left'], [-1, 'right']] as const) {
+    const e = flankEdge(imp.hull, side);
+    if (!e) continue;
+    const sign = new THREE.Mesh(signGeo, signMat);
+    sign.name = `robot:${id}:sign:${where}`;
+    sign.position.set(e.mx + e.nx * 0.05, e.my + e.ny * 0.05, Math.min(BB_PLATE_H * 0.5, deckZ * 0.5));
+    // the axis-aligned sign, turned with the edge it stands on
+    const turn = Math.atan2(e.ny, e.nx) - (side > 0 ? Math.PI / 2 : -Math.PI / 2);
+    sign.quaternion.copy(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), turn).multiply(bbRobotSignOrientation(side)));
+    group.add(tag(sign, 'vinyl'));
+  }
+  return group;
+}
+
+/** the hull edge whose outward normal points most toward `side` (+1 left, −1 right): its midpoint
+ * and normal — where a robot sign stands */
+function flankEdge(hull: readonly { x: number; y: number }[], side: 1 | -1): { mx: number; my: number; nx: number; ny: number } | null {
+  let best: { mx: number; my: number; nx: number; ny: number; s: number } | null = null;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % hull.length];
+    const el = Math.hypot(b.x - a.x, b.y - a.y);
+    if (el < 1e-6) continue;
+    const nx = (b.y - a.y) / el;
+    const ny = -(b.x - a.x) / el;
+    // a long edge is preferred among the near-equally facing ones: a sign needs room
+    const s = ny * side + Math.min(el, BB_SIGN_W) * 0.01;
+    if (!best || s > best.s) best = { mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, nx, ny, s };
+  }
+  return best;
 }
 
 /** the rest yaws `restTurretHeads` tries, in order of preference: forward, square, back, diagonal */
@@ -3894,7 +4081,10 @@ export function buildBiobuzzRobots(): BbRobots {
       // thumbnail cache (`specKey.ts`'s own header) — folding a per-device graphics setting into
       // it would make two machines disagree about whether two saved robots are the same robot.
       // This is a local rebuild key: the same spec at a different tessellation is the same build.
-      const key = `${bbSpecKey(r.spec)}|${wheelDetail}`;
+      //
+      // An IMPORT adds its mesh state (`importedMeshKey`: placeholder → mesh when the parse lands),
+      // per device for the same reason the tier is, so the group swaps on the first frame after.
+      const key = `${bbSpecKey(r.spec)}|${wheelDetail}|${importedMeshKey(r.spec)}`;
       let entry = entries.get(r.id);
       if (!entry || entry.key !== key) {
         if (entry) {
@@ -4148,13 +4338,16 @@ export function buildBiobuzzRobots(): BbRobots {
  * drivetrain picker back and forth frees the group and re-uses every buffer in it.
  */
 export function disposeRobotGroup(group: THREE.Group): void {
+  // an IMPORTED robot's mesh is a clone of a template its slot owns (`renderImported.ts`): its
+  // geometry, materials and textures are skipped here and its reference handed back instead
   group.traverse((child) => {
     const mesh = child as Partial<THREE.Mesh>;
     const geo = mesh.geometry;
-    if (geo && !SHARED_GEO.has(geo)) geo.dispose();
+    if (geo && !SHARED_GEO.has(geo) && !isImportShared(geo)) geo.dispose();
     const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
-    for (const m of mats) if (!SHARED_MAT.has(m)) m.dispose();
+    for (const m of mats) if (!SHARED_MAT.has(m) && !isImportShared(m)) m.dispose();
   });
+  releaseImportedMesh(group);
 }
 
 export function updateBiobuzzRobots(robots: BbRobots, world: World): void {

@@ -65,6 +65,7 @@ import {
   stripImported,
   type ImportRoomState,
 } from '../src/net/imported';
+import { VisualRelay } from './importVisuals';
 import { stripUnentitledCosmetics } from '../src/cosmetics';
 import type { DodgeKind, DodgeVerdict } from '../src/dodge';
 import { absenceOf, chargedForParticipation, EARLY_ABSENT_TICKS, judgeParticipation } from '../src/standing';
@@ -433,6 +434,25 @@ export class Room {
   // READ-ONLY watchers: receive every broadcast (roster/matchStart/snapshot/result)
   // but hold no robot slot and never count toward capacity/roster/persistence.
   private readonly spectators = new Map<string, Client>();
+  /**
+   * IMPORTED ROBOTS' LOOKS (docs/area/netcode.md, VISUALS RELAY): the pictures and meshes a seat
+   * uploaded, held in THIS room's memory and streamed to the viewers that ask. It hangs off the
+   * room because the room knows who is seated, which robot each seat holds, and when either
+   * changes — and so that on a worker room the bytes and their validation stay on the worker.
+   * Freed with the seat, the robot, or the room (`emptied`).
+   */
+  private readonly visuals = new VisualRelay({
+    allows: () => this.allowsImportedRobots(),
+    find: (id) => this.clients.get(id) ?? this.spectators.get(id),
+    importId: (id) => this.clients.get(id)?.player.spec.imported?.id,
+    recipients: () => [...this.clients.values(), ...this.spectators.values()],
+    live: () => this.world !== null && this.phase === 'match' && !this.finalized,
+  });
+  /** the room has no one left: the registry may drop it, and the relay gives its bytes back */
+  private emptied(): void {
+    this.visuals.dispose();
+    this.onEmpty();
+  }
   private hostId = '';
   /** the seat `reserveHost` named, or '' for every room the cloud runs — see `detach` */
   private reservedHost = '';
@@ -1117,6 +1137,8 @@ export class Room {
       this.broadcast({ t: 'drop', robotId: rid, tick: this.world.tick });
     }
     this.clients.delete(c.id);
+    this.visuals.freeOwner(c.id);
+    this.visuals.dropRecipient(c.id);
     this.snapPrimed.delete(c.id);
     this.snapAck.delete(c.id);
     this.robotOf.delete(c.id);
@@ -1126,7 +1148,7 @@ export class Room {
     this.refreshRematch();
     if (this.clients.size === 0) {
       this.stop();
-      this.onEmpty();
+      this.emptied();
     }
     return true;
   }
@@ -1211,6 +1233,7 @@ export class Room {
     client.send({ t: 'welcome', clientId: client.id, seatToken: client.seatToken });
     this.broadcastRoster();
     this.moderatePlayerNames(client);
+    this.visuals.greet(client);
   }
 
   /**
@@ -1313,6 +1336,7 @@ export class Room {
     }
     this.broadcastRoster();
     this.broadcastSpectators();
+    this.visuals.greet(client);
   }
 
   /**
@@ -1506,6 +1530,7 @@ export class Room {
       this.spectators.delete(id);
       this.snapPrimed.delete(id);
       this.snapAck.delete(id);
+      this.visuals.dropRecipient(id);
       this.broadcastRoster();
       this.broadcastSpectators();
       return;
@@ -1567,6 +1592,8 @@ export class Room {
         return;
       }
       this.clients.delete(id);
+      this.visuals.freeOwner(id);
+      this.visuals.dropRecipient(id);
       this.snapPrimed.delete(id);
       this.snapAck.delete(id);
       this.passCrown(id);
@@ -1575,7 +1602,7 @@ export class Room {
       this.refreshRematch(); // the tally is against CONNECTED drivers
       if (this.clients.size === 0) {
         this.stop();
-        this.onEmpty();
+        this.emptied();
       } else if (this.customStart) {
         // the seat we were holding the start for has left: it cannot report in any more, so
         // re-ask rather than waiting out a deadline for somebody who is gone
@@ -1776,6 +1803,7 @@ export class Room {
     }
     this.broadcastRoster();
     this.refreshRematch(); // they are required again, and get the current tally
+    this.visuals.greet(c); // a new socket has been told nothing about what the room holds
     return c.conn;
   }
 
@@ -1842,6 +1870,8 @@ export class Room {
         this.onUserInactive?.(c.userId);
       }
       this.clients.delete(c.id);
+      this.visuals.freeOwner(c.id);
+      this.visuals.dropRecipient(c.id);
       this.snapPrimed.delete(c.id);
       this.snapAck.delete(c.id);
       this.robotOf.delete(c.id);
@@ -1850,7 +1880,7 @@ export class Room {
     }
     if (this.clients.size === 0) {
       this.stop();
-      this.onEmpty();
+      this.emptied();
     }
   }
 
@@ -1877,6 +1907,12 @@ export class Room {
   }
 
   onMessage(id: string, msg: ClientMsg): void {
+    // THE RELAY'S TWO MESSAGES come from a seat (an upload) or a seat or a watcher (a download),
+    // so they are answered before the lookup below, which a watcher would not pass.
+    if (msg.t === 'visualPut' || msg.t === 'visualGet') {
+      if (!this.cancelled) this.visuals.onMessage(id, msg);
+      return;
+    }
     const c = this.clients.get(id);
     if (!c) return;
     // a late message into a cancelled room (a ready landing after the deadline) must not
@@ -1904,6 +1940,7 @@ export class Room {
         if (this.pendingMatch && this.phase === 'strategy') delete patch.alliance;
         const namesBefore = Room.nameFingerprint(c.player);
         Object.assign(c.player, patch);
+        this.visuals.specChanged(c.id); // a seat's assets stay only while it holds the robot they are for
         /**
          * ⚠️ A RENAME IS MODERATED TOO — ONLY THE JOIN USED TO BE.
          *
@@ -2325,6 +2362,7 @@ export class Room {
     // The same chokepoint as the two lines above, for the same reason.
     if (!this.allowsImportedRobots()) {
       setups = setups.map((s) => (isImportedSpec(s.spec) ? { ...s, spec: stripImported(s.spec) } : s));
+      this.visuals.reconcile();
     }
     this.phase = 'match';
     this.matchGen++; // any input stamped with an older generation is now stale
@@ -2924,7 +2962,7 @@ export class Room {
     }
     this.broadcast({ t: 'error', message });
     this.stop();
-    this.onEmpty();
+    this.emptied();
   }
 
   /** roster members who are NOT currently connected here — the no-show set. */
@@ -3560,6 +3598,8 @@ export class Room {
     for (const c of [...this.clients.values()]) {
       if (c.connected) continue;
       this.clients.delete(c.id);
+      this.visuals.freeOwner(c.id);
+      this.visuals.dropRecipient(c.id);
       this.snapPrimed.delete(c.id);
       this.snapAck.delete(c.id);
       this.ackTick.delete(c.id);
@@ -3628,7 +3668,7 @@ export class Room {
 
     // the last driver may have closed their tab on the results screen; with the world gone
     // there is no loop and no grace reaper left to notice an empty room.
-    if (this.clients.size === 0) this.onEmpty();
+    if (this.clients.size === 0) this.emptied();
   }
 
   /** TEST SEAM: the live world, read-only. Lets a test assert what an input

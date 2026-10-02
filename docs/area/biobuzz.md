@@ -959,6 +959,43 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
   `t`. Looking at a robot close up also found the TURRET and the BOX TUBE built INSIDE the chassis
   box, `specKey` missing `drivetrain`, and a discarded group never disposed — all three were the
   MATCH's bugs and all three are fixed there.
+- **IMPORTED ROBOTS IN 3D** (`docs/robot-import-plan.md` §1, 2026-10-01). Still ONE generator and
+  ONE key: `buildRobotGroup` branches on `spec.imported` into `buildImportedRobot` (same file), which
+  composes `scene/renderImported.ts`'s parts with this file's own sign, intake, turret and Box Tube
+  builders. `renderImported.ts` imports nothing from `renderRobots.ts`, so the dependency runs one
+  way.
+  - **With the mesh on this device** (the owner's robot, or a GLB lent to `render/importedAssets.ts`):
+    the stored GLB is parsed ONCE per id by the scene's own `GLTFLoader` (`renderElementsGlb.ts`'s
+    `loader()`, meshopt attached), kept as a reference-counted TEMPLATE (LRU of
+    `IMPORTED_MESH_TEMPLATE_CAP`) and cloned per robot; `disposeRobotGroup` skips everything a
+    template owns (`isImportShared`) and hands the reference back. The root node carries the
+    importer's `STORED_MESH_TO_ROBOT` (glTF metres, +Y up, +Z front → robot inches, +z up). Every
+    material's emissive is zeroed at parse (a robot part never glows), and the meshes carry NO
+    `bbFamily`, so the physical-materials swap leaves them on their own PBR materials in both
+    modes. On top: the two ROBOT SIGNS on the hull's flank-most edges and, for a turreted launcher,
+    an AIM SIGHT (a hub and a slim rod, NOT a hoop — a floating ring read as a marker) on the same
+    `turretHeads`/`turretPitches` handles `sync` already poses. Nothing else of the generator: a
+    second intake or turret drawn through the CAD would be a second robot.
+  - **Without it** (a remote player's robot, or the parse still running): a PLACEHOLDER — each prism
+    (`bands`, else the hull to `heightIn`) SOLID from 0.5 in to the deck in the chassis fill, the
+    envelope above the deck as an OPEN TOWER, wheels at `importedWheels`, the front bar on the
+    forward-facing hull edge(s) and the deck arrow clear of the turrets, the signs, and the
+    standard intake / launcher / Box Tube where the accessors put them (so their `userData`
+    handles animate with no import branch in `sync`).
+  - ⚠️ **THE IMPORT'S HEIGHT IS READ IN `renderImported.ts`, NEVER IN `renderRobots.ts`** — the
+    RENDER lane's "the generator reads no height at all" still holds. For a standard robot
+    `heightIn` is a declared collider; for an import it is the measured top of real hardware, and a
+    placeholder that stopped at the deck would hide half the robot a remote driver is about to hit.
+  - **THE KEY.** `bbSpecKey` appends the descriptor's digest (id + FNV-1a of its JSON) for an import
+    only, so a standard key is byte-identical. The MESH STATE (`importedMeshKey`:
+    `id@meshVersion:hull|mesh`, which also starts the load) is per device, like the wheel tier:
+    `sync` folds it into its local key and the preview into `setSpec`'s, and the preview also
+    re-keys itself on `onImportedMeshChange`, because the parse lands between two React renders.
+    The placeholder swaps for the mesh on the first frame after the parse.
+  - RENDER lane: `importedRobotChecks` (placeholder bounds = hull/bands and inside the hull, the
+    key, the real GLTFLoader path from a byte-built GLB `fixtures/importGlb.ts`, the swap in `sync`,
+    disposal, the template cap). Pictures: `scripts/robot-import/render/` (an offscreen Electron
+    capture of a REAL importer bake through every renderer, both themes).
 - ⚠️ **WHICH END IS THE FRONT IS ONE LANGUAGE, DRAWN IN BOTH RENDERERS** (owner, 2026-09-22:
   "somehow make it clearer fundamentally which side is front and which is back in game. This is
   especially confusing in a symmetric robot in 3D"). `bbFrontMarks` (`parts.ts`) is the geometry
@@ -2029,6 +2066,32 @@ false at every mount, and the coercer silently reset a SIDE or FRONT+BACK sweepe
 pinned the chassis half an inch over the ceiling. The game's own floor is capped to the intake's
 own ceiling now. It only ever reached a spec carried over from another game, because the BIOBUZZ
 builder has no intake-STYLE picker.
+
+**IMPORTED ROBOTS** (`importMech.ts`, `importChecks.ts`, `sim3d/bodies.ts` `import3dShapes`; the
+shared rules are `docs/area/physics.md` "Imported robots: mechanisms", the lane is `IMPORT` in
+`scripts/smoke-biobuzz/imported.ts`). The archetype controls stay the builder's; the CAD gives the
+positions.
+- **Mouths** (`bbMouths` → `bbImportMouthRects`): the rect on each mounted edge carries its own
+  `face`, and `mouthAxes` returns a lateral centre `vc` (0 for every standard mouth). EVERY site
+  that builds a point from mouth axes adds `vc` and every `v` read off them subtracts it —
+  `bbIntakeAct`, the flower gate, the ramp swing corners, the reach shapes, the tutorial, the AI.
+  A `siderollers` roller line sits `BB_SIDE_ROLLER_PROTRUDE` behind where the hull ends: the CAD's
+  front is the wheel's outer face, so the 3D wheels land on the hull's own face.
+- **Launchers**: a turret is the placed `shooter` (`shooter2` for a double turret's NECTAR head);
+  its flywheel axle is the placed height less the head's path radius, so the rest-pitch release is
+  exactly the placed `z` (`bbImportTurretAxleZ`, read clamped to 7.5–18). A dumper's line is
+  centred on the placed lip at the placed height (`bbDumpZ`, 6–18) with no clearance push; the
+  Box Tube reaches `BB_PLACE_REACH` out of the hull from its placed base (`importPlacePoint`, the
+  same call in `bbLiftPlaceLocal`).
+- **Height**: `heightIn` is `imported.heightIn` rounded UP onto the 12–18 dial, with no stow height
+  (the CAD is the starting configuration, already inside R102's cube).
+- **3D is the CAD bands** (`import3dShapes`): per band, below `BB3_MOUTH_SLOT_Z` the 2D carve
+  (chassis + plates) with a `GROUP_POCKET` filler per mouth, above it the whole band; no
+  `bbMechEnvelopes` shape (the bands hold the turret). Prisms are `convexHull`s with the chassis
+  boxes' edge break (eroded by `r`, contact skin `r`). A `ConvexPolyhedron` is NARROW to
+  `groundRoll3d`, so a POLLEN that lands on an import's top rolls off. The FULL predictor gives the
+  LOCAL import the authority's compound and a REMOTE one the uncarved bands; the PERF lane holds a
+  heavy import (16-vertex hull, three bands, side sweepers) to the standard budgets.
 
 **THE CHASSIS GOES TO 18 × 18** (owner, 2026-09-24: "why is max width/length 17 not 18?").
 `BB_MAX_LENGTH`/`BB_MAX_WIDTH` are `ROBOT_MAX_SIZE` (R102's cube); the 17 was a "working inch"

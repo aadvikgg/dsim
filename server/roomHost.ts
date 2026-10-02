@@ -28,6 +28,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { availableParallelism } from 'node:os';
 import { Room, type Client } from './room';
+import { configureVisualBudget, makeSharedVisualBudget, resetVisualSlot } from './importVisuals';
 import { DEFAULT_ROOM_CONFIG, roomCapacity, type ClientMsg, type LiveRoom, type RoomConfig, type ServerMsg } from '../src/net/protocol';
 import { serverPhysics } from '../src/games/types';
 import { simModuleFor } from '../src/games/sim';
@@ -580,10 +581,18 @@ export class RoomPool {
   private readonly watched = new Set<HostSocket>();
   private watchTimer: ReturnType<typeof setInterval> | null = null;
 
+  /**
+   * The process's imported-robot-visuals budget (`server/importVisuals.ts`): one counter per
+   * thread in one shared buffer, so the 64 MiB limit is the PROCESS's and not each worker's. This
+   * thread is slot 0, worker `i` is slot `i + 1`.
+   */
+  private readonly visualBudget = makeSharedVisualBudget();
+
   constructor(
     private readonly entry: URL,
     n: number,
   ) {
+    configureVisualBudget(this.visualBudget, 0);
     for (let i = 0; i < n; i++) {
       const slot: Slot = {
         index: i,
@@ -603,7 +612,7 @@ export class RoomPool {
   }
 
   private spawn(slot: Slot): void {
-    const w = new Worker(this.entry);
+    const w = new Worker(this.entry, { workerData: { visualBudget: this.visualBudget, visualSlot: slot.index + 1 } });
     slot.worker = w;
     slot.ready = false;
     w.on('message', (b: Batch) => this.onBatch(slot, b));
@@ -801,6 +810,8 @@ export class RoomPool {
     slot.queue = [];
     slot.flushScheduled = false;
     slot.stats = null;
+    // its rooms died with it, and so did their pictures: hand the bytes back to the budget
+    resetVisualSlot(this.visualBudget, slot.index + 1);
     console.error(`[workers] worker ${slot.index} exited (code ${code}); ${slot.rooms.size} room(s) lost`);
     for (const id of slot.calls) {
       const c = this.calls.get(id);

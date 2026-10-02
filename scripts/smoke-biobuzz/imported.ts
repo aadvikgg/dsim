@@ -1,0 +1,222 @@
+import type { Check } from './harness';
+import { bbCoerce, cmd, mkWorld3dPair, setup } from './harness';
+import { createBiobuzzWorld } from '../../src/games/biobuzz/spawn';
+import { biobuzzStep } from '../../src/games/biobuzz/step';
+import { step3d } from '../../src/games/biobuzz/sim3d/step3d';
+import { import3dShapes } from '../../src/games/biobuzz/sim3d/bodies';
+import { probeFullReconcileMs } from '../../src/games/biobuzz/sim3d/predict';
+import { bbAimHeading, bbMouths, bbPlacePointLocal, bbTurretRelease, bbTurretSolution, mouthAxes } from '../../src/games/biobuzz/robot';
+import { bbAimTarget, bbCellSideOf, bbDumpShotEnters, bbPretendHive, bbTurretShotEnters } from '../../src/games/biobuzz/play';
+import { hiveCellTarget } from '../../src/games/biobuzz/elements';
+import { BB_PLACE_REACH, BB_POLLEN_R, bbLiftPlaceLocal, PREDICT_FULL_BUDGET_MS } from '../../src/games/biobuzz/config';
+import { polyFeature } from '../../src/sim/imported';
+import { SIM_DT } from '../../src/config';
+import { rot } from '../../src/math';
+import type { ImportedRobot, RobotSpec, RobotState, Vec2, World } from '../../src/types';
+
+/**
+ * IMPORTED ROBOTS IN BIOBUZZ — the mechanisms on a CAD hull (`importMech.ts`, `sim3d/bodies.ts`
+ * `import3dShapes`; `docs/area/biobuzz.md` "Imported robots"). The sweeper takes through the
+ * PLACED mouth and nowhere else, in 2D and 3D; 3D is built from the CAD height bands; the turret,
+ * the dumper's lip and the Box Tube work from where they were placed. The cross-game checks
+ * (reduces-to-standard, the editor API, the standard-robot digests) are in `scripts/smoke.ts`.
+ */
+
+/** an 18 × 16 robot with its front corners chamfered: a hull no box describes */
+const OCT: ImportedRobot = {
+  v: 1,
+  id: 'a1a1a1a1a1a1a1a1',
+  hull: [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 10, y: -6 }, { x: 10, y: 6 }, { x: 8, y: 8 }, { x: -8, y: 8 }],
+  heightIn: 14,
+};
+const SWEEP: Partial<RobotSpec> = { intakeMount: 'front', bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } } };
+const imported = (patch: Partial<RobotSpec>): RobotSpec => bbCoerce({ ...SWEEP, ...patch });
+
+/** one robot facing +x, one POLLEN at `local` in its frame, every other loose element parked far */
+function scene(physics: '2d' | '3d', imp: ImportedRobot, local: Vec2): { w: World; id: number } {
+  const w = createBiobuzzWorld('free', 25, [setup(0, 'blue', { ...SWEEP, imported: imp })], undefined, physics);
+  const r = w.robots[0];
+  for (const b of w.balls) if (b.state.kind === 'held' && b.state.robot === r.id) b.state = { kind: 'ground' };
+  r.hopper = [];
+  const target = w.balls.find((b) => b.state.kind === 'ground')!;
+  for (const b of w.balls) if (b !== target && b.state.kind === 'ground') b.pos = { x: 60, y: -60 };
+  target.pos = { x: 0, y: 0 };
+  target.vel = { x: 0, y: 0 };
+  target.z = 0;
+  target.vz = 0;
+  r.heading = 0;
+  r.pos = { x: -local.x, y: -local.y };
+  r.vel = { x: 0, y: 0 };
+  return { w, id: target.id };
+}
+
+export function importedChecks(check: Check): void {
+  // ---- the sweeper takes through the placed mouth; the hull beside it is a hull ---------------
+  {
+    const imp: ImportedRobot = { ...OCT, mech: { intakes: [{ edge: 'front', from: -7, to: 1 }] } };
+    const sp = imported({ imported: imp });
+    const ax = mouthAxes(bbMouths(sp)[0], 0, 0);
+    for (const physics of ['2d', '3d'] as const) {
+      const go = (local: Vec2) => {
+        const { w, id } = scene(physics, imp, local);
+        const m = new Map([[0, cmd({ intake: true, driveY: 0.15 })]]);
+        for (let t = 0; t < 90; t++) biobuzzStep(w, SIM_DT, m);
+        const b = w.balls.find((x) => x.id === id)!;
+        return { held: b.state.kind === 'held', b, r: w.robots[0] };
+      };
+      const inMouth = go({ x: ax.uOut + 1.6, y: ax.vc });
+      const beside = go({ x: 10 + 1.6, y: 4.5 });
+      const loc = rot({ x: beside.b.pos.x - beside.r.pos.x, y: beside.b.pos.y - beside.r.pos.y }, -beside.r.heading);
+      const depth = polyFeature(sp.imported!.hull, loc).depth;
+      check(
+        `import ${physics}: a POLLEN on the placed (off-centre) mouth is taken; one in front of the hull beside it is pushed, never taken, never inside the hull`,
+        inMouth.held && !beside.held && depth < -(BB_POLLEN_R - 0.3),
+        `mouth v ${ax.vc} ± ${ax.half}; in ${inMouth.held}, beside ${beside.held} (depth ${depth.toFixed(2)})`,
+      );
+    }
+  }
+
+  // ---- 3D: the CAD bands are the height profile, not one prism to the top ---------------------
+  {
+    const low: ImportedRobot = { ...OCT, bands: [{ z0: 0, z1: 5, hull: OCT.hull }, { z0: 5, z1: 14, hull: [{ x: -8, y: -3 }, { x: -2, y: -3 }, { x: -2, y: 3 }, { x: -8, y: 3 }] }] };
+    const drop = (imp: ImportedRobot) => {
+      const { w, id } = scene('3d', imp, { x: -40, y: 0 });
+      const r = w.robots[0];
+      const b = w.balls.find((x) => x.id === id)!;
+      const p = rot({ x: 5, y: 0 }, r.heading);
+      b.pos = { x: r.pos.x + p.x, y: r.pos.y + p.y };
+      b.state = { kind: 'flight', target: 'blue' };
+      b.z = 20;
+      b.vz = 0;
+      const m = new Map([[0, cmd({})]]);
+      let zMin = Infinity;
+      for (let t = 0; t < 30; t++) {
+        biobuzzStep(w, SIM_DT, m);
+        zMin = Math.min(zMin, w.balls.find((x) => x.id === id)!.z);
+      }
+      return zMin;
+    };
+    const withBands = drop(low);
+    const solid = drop({ ...OCT });
+    check('import 3D: an element dropped over the LOW band falls past where a single 14-in prism stops it (non-vacuous)', withBands < 7 && solid > 13, `with bands lowest z ${withBands.toFixed(2)}, one prism ${solid.toFixed(2)}`);
+    const shapes = import3dShapes(imported({ imported: low }), 14);
+    check(
+      'import 3D: the compound is prisms only (no archetype turret shape on top of the CAD), carved below the slot, a pocket filler per mouth, and the bands uncarved for the remote predictor',
+      shapes.chassis.every((s) => s.shape === 'prism') && shapes.pocket.length === 1 && shapes.remote.length === 2 && shapes.chassis.length > shapes.remote.length,
+      `${shapes.chassis.length} chassis, ${shapes.pocket.length} pocket, ${shapes.remote.length} remote`,
+    );
+  }
+
+  // ---- launchers and the Box Tube work from where they were placed ---------------------------
+  {
+    const sp = bbCoerce({
+      intakeMount: 'front',
+      bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 45 }, lift: { kind: 'vslide', mount: 'left' }, intake: { kind: 'sweeper' } },
+      imported: { ...OCT, mech: { shooter: { x: -3, y: -2, z: 12.25 }, place: { x: 0, y: 5, z: 6 } } },
+    });
+    check('import: heightIn is the CAD height rounded up onto the dial, with no stow height', sp.heightIn === 14 && sp.stowHeightIn === undefined);
+    const r = { spec: sp, pos: { x: 0, y: 0 }, heading: 0, vel: { x: 0, y: 0 }, angVel: 0, turretHeading: 0, bbTurretPitch: 0 } as unknown as RobotState;
+    const rel = bbTurretRelease(r, 0, 100);
+    check('import: the turret releases at the placed height at rest pitch', Math.abs(rel.z - 12.25) < 1e-9, `${rel.z}`);
+    const p = bbPlacePointLocal(sp)!;
+    const q = bbLiftPlaceLocal(sp)!;
+    check('import: the Box Tube reaches BB_PLACE_REACH out of the hull from its placed base, the same in both copies', Math.abs(p.x) < 1e-9 && Math.abs(p.y - (8 + BB_PLACE_REACH)) < 1e-9 && p.x === q.x && p.y === q.y, JSON.stringify({ p, q }));
+    const cell = hiveCellTarget('blue', 'north');
+    const made = (patch: Partial<RobotSpec>) => {
+      let n = 0;
+      for (const [px, py] of [[cell.pos.x, cell.pos.y + 40], [cell.pos.x + 30, cell.pos.y + 30], [-40, 0], [40, 0], [0, 50]] as [number, number][]) {
+        const w = createBiobuzzWorld('practice', 11, [setup(0, 'blue', { ...SWEEP, ...patch })]);
+        const rr = w.robots[0];
+        rr.pos = { x: px, y: py };
+        rr.heading = 0.4;
+        const t = bbAimTarget(w, rr);
+        const sol = bbTurretSolution(rr, t, 0);
+        if (!sol) continue;
+        rr.turretHeading = sol.yaw;
+        rr.bbTurretPitch = sol.pitch;
+        if (sol.reachable && bbTurretShotEnters(bbPretendHive(w.biobuzz!.hives.blue, bbCellSideOf(t)), rr, 0, sol.speed, SIM_DT)) n++;
+      }
+      return n;
+    };
+    const std = made({});
+    const imp = made({ imported: { ...OCT, mech: { shooter: { x: -3, y: -2, z: 12.25 } } } });
+    check('import: a turret placed on the CAD solves and scores from the stands a standard turret does', imp === std && std >= 3, `standard ${std}/5, import ${imp}/5`);
+    const dump = (patch: Partial<RobotSpec>, cluster: boolean) => {
+      const w = createBiobuzzWorld('practice', 11, [setup(0, 'blue', { intakeMount: 'back', bbMech: { launcher: { kind: 'dumper', mount: 'front', hoodDeg: 50 }, lift: null, intake: { kind: 'sweeper' } }, ...patch })]);
+      const rr = w.robots[0];
+      rr.pos = { x: cell.pos.x, y: cell.pos.y + 32 };
+      const t = bbAimTarget(w, rr);
+      rr.heading = bbAimHeading(rr, t)!;
+      while (rr.hopper.length < 4) rr.hopper.push('yellow');
+      return bbDumpShotEnters(bbPretendHive(w.biobuzz!.hives.blue, bbCellSideOf(t)), rr, t, 4, cluster, SIM_DT);
+    };
+    for (const cluster of [false, true]) {
+      check(
+        `import: a ${cluster ? '3D catapult' : '2D'} dump from the placed lip goes in where a standard one does`,
+        dump({}, cluster) && dump({ imported: { ...OCT, mech: { shooter: { x: 9.5, y: 0, z: 10 } } } }, cluster),
+      );
+    }
+  }
+}
+
+/** a 16-vertex hull (a rounded 18 × 16), three bands and a side sweeper — the heaviest import */
+function heavyImport(): Partial<RobotSpec> {
+  const ring = (rx: number, ry: number, n: number, cx = 0) =>
+    Array.from({ length: n }, (_, i) => {
+      // a 16-gon from exact eighth-turn fractions, no trig (sin/cos of k·22.5° to 4 places)
+      const T = [1, 0.9239, 0.7071, 0.3827, 0, -0.3827, -0.7071, -0.9239, -1, -0.9239, -0.7071, -0.3827, 0, 0.3827, 0.7071, 0.9239];
+      const S = [0, 0.3827, 0.7071, 0.9239, 1, 0.9239, 0.7071, 0.3827, 0, -0.3827, -0.7071, -0.9239, -1, -0.9239, -0.7071, -0.3827];
+      return { x: cx + rx * T[(i * 16) / n], y: ry * S[(i * 16) / n] };
+    });
+  return {
+    intakeMount: 'side',
+    bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 45 }, lift: null, intake: { kind: 'sweeper' } },
+    imported: {
+      v: 1,
+      id: 'c0ffee00c0ffee00',
+      heightIn: 15,
+      hull: ring(9, 8, 16),
+      bands: [
+        { z0: 0, z1: 5, hull: ring(9, 8, 8) },
+        { z0: 5, z1: 10, hull: ring(6, 6, 8) },
+        { z0: 10, z1: 15, hull: ring(4, 4, 8) },
+      ],
+      mech: { shooter: { x: 0, y: 0, z: 12 } },
+    },
+  };
+}
+
+/** PERF lane (`index.ts`): what four heavy imports cost a 3D room, and a reconcile with one local */
+export function importedPerfChecks(check: Check): void {
+  {
+    const spec = heavyImport();
+    const w = createBiobuzzWorld('free', 31, [setup(0, 'blue', spec, 0), setup(1, 'blue', spec, 1), setup(2, 'red', spec, 0), setup(3, 'red', spec, 1)], undefined, '3d');
+    const cmds = new Map([
+      [0, cmd({ driveY: 1, intake: true })],
+      [1, cmd({ rotate: 1, fire: true })],
+      [2, cmd({ driveY: -1, intake: true })],
+      [3, cmd({ driveX: 1, fire: true })],
+    ]);
+    for (let t = 0; t < 60; t++) step3d(w, SIM_DT, cmds); // warm-up, excluded
+    const times: number[] = [];
+    for (let t = 0; t < 600; t++) {
+      const t0 = Date.now();
+      step3d(w, SIM_DT, cmds);
+      times.push(Date.now() - t0);
+    }
+    times.sort((a, b) => a - b);
+    const median = times[Math.floor(times.length / 2)];
+    check('perf: a 2v2 of four heavy imports (16-vertex hulls, 3 bands, side sweepers) keeps the standard step3d median budget, <= 1.5ms', median <= 1.5, `median=${median}ms p95=${times[Math.floor(times.length * 0.95)]}ms`);
+  }
+  {
+    const w = mkWorld3dPair('free', 9213, heavyImport());
+    w.balls.length = 0;
+    const r = w.robots[0];
+    r.hopper.length = 0;
+    r.pos = { x: 0, y: 20 };
+    r.heading = Math.PI / 2;
+    let ms = Infinity;
+    for (let i = 0; i < 30; i++) ms = Math.min(ms, probeFullReconcileMs(w, 0, () => performance.now()));
+    check(`perf: FULL reconciles inside PREDICT_FULL_BUDGET_MS (${PREDICT_FULL_BUDGET_MS}ms) with a heavy import as the local robot`, ms <= PREDICT_FULL_BUDGET_MS, `${ms.toFixed(1)}ms (best of 30)`);
+  }
+}

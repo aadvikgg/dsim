@@ -23,8 +23,10 @@ const FILES = 'files';
 const DRAFTS = 'drafts';
 const DRAFT_MODELS = 'draftModels';
 const KINDS = ['mesh', 'top', 'thumb'] as const;
+/** the lighter mesh the room relay sends when the stored one is over its cap (`meshLite`); optional, never required */
+const LITE = 'meshLite' as const;
 type FileKind = (typeof KINDS)[number];
-const fileKey = (id: string, kind: FileKind): string => `${id}:${kind}`;
+const fileKey = (id: string, kind: FileKind | typeof LITE): string => `${id}:${kind}`;
 
 export type LibraryError = 'unavailable' | 'quota' | 'not-found' | 'failed';
 export type LibraryResult<T> = { ok: true; value: T } | { ok: false; error: LibraryError; message: string };
@@ -160,9 +162,9 @@ export function getRobot(id: string): Promise<LibraryResult<LibraryRobot>> {
     const entry = (await request(tx.objectStore(ROBOTS).get(id))) as LibraryEntry | undefined;
     if (!entry) return err('not-found');
     const files = tx.objectStore(FILES);
-    const [mesh, top, thumb] = (await Promise.all(KINDS.map((k) => request(files.get(fileKey(id, k)))))) as (Blob | undefined)[];
+    const [mesh, top, thumb, meshLite] = (await Promise.all([...KINDS, LITE].map((k) => request(files.get(fileKey(id, k)))))) as (Blob | undefined)[];
     if (!mesh || !top || !thumb) return err('not-found');
-    return ok({ ...entryOf(entry), mesh, top, thumb });
+    return ok({ ...entryOf(entry), mesh, top, thumb, ...(meshLite ? { meshLite } : {}) });
   });
 }
 
@@ -177,6 +179,9 @@ export function putRobot(robot: LibraryRobot): Promise<LibraryResult<LibraryEntr
     files.put(robot.mesh, fileKey(robot.id, 'mesh'));
     files.put(robot.top, fileKey(robot.id, 'top'));
     files.put(robot.thumb, fileKey(robot.id, 'thumb'));
+    // a replaced mesh makes any cached lighter copy stale: it goes unless this save carries one
+    if (robot.meshLite) files.put(robot.meshLite, fileKey(robot.id, LITE));
+    else files.delete(fileKey(robot.id, LITE));
     const e = await done(tx);
     if (e) return err(e);
     topCache.delete(robot.id);
@@ -219,7 +224,7 @@ export function deleteRobot(id: string): Promise<LibraryResult<void>> {
     const tx = db.transaction([ROBOTS, FILES], 'readwrite');
     tx.objectStore(ROBOTS).delete(id);
     const files = tx.objectStore(FILES);
-    for (const k of KINDS) files.delete(fileKey(id, k));
+    for (const k of [...KINDS, LITE]) files.delete(fileKey(id, k));
     const e = await done(tx);
     if (e) return err(e);
     topCache.delete(id);
@@ -227,7 +232,7 @@ export function deleteRobot(id: string): Promise<LibraryResult<void>> {
   });
 }
 
-async function fileFor(id: string, kind: FileKind): Promise<Blob | null> {
+async function fileFor(id: string, kind: FileKind | typeof LITE): Promise<Blob | null> {
   const db = await openDb();
   if (!db) return null;
   try {
@@ -330,6 +335,23 @@ export function deleteDraft(key: string): Promise<LibraryResult<void>> {
     const tx = db.transaction([DRAFTS, DRAFT_MODELS], 'readwrite');
     tx.objectStore(DRAFTS).delete(key);
     tx.objectStore(DRAFT_MODELS).delete(key);
+    const e = await done(tx);
+    return e ? err(e) : ok(undefined);
+  });
+}
+
+/** the lighter mesh for a room's relay (`liteMesh`), when one has been made for this robot */
+export function meshLiteFor(id: string): Promise<Blob | null> {
+  return fileFor(id, LITE);
+}
+
+/** cache the lighter mesh on the robot's record (a no-op when the robot is gone) */
+export function putMeshLite(id: string, blob: Blob): Promise<LibraryResult<void>> {
+  return withDb(async (db) => {
+    const tx = db.transaction([ROBOTS, FILES], 'readwrite');
+    const entry = (await request(tx.objectStore(ROBOTS).get(id))) as LibraryEntry | undefined;
+    if (!entry) return err('not-found');
+    tx.objectStore(FILES).put(blob, fileKey(id, LITE));
     const e = await done(tx);
     return e ? err(e) : ok(undefined);
   });

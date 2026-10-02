@@ -31,7 +31,8 @@ import { generateRoomCode, normalizeRoomCode, isValidRoomCode, ROOM_CODE_LENGTH 
 import { ConsoleHead } from './ConsoleHead';
 import { useEscape } from './useEscape';
 import { DISCORD_REGION } from '../net/discordActivity';
-import { roomTakesImportedRobots, serverCaps } from '../net/api';
+import { roomTakesImportedRobots, roomTakesImportVisuals, serverCaps } from '../net/api';
+import { importVisuals } from '../net/importVisualsClient';
 import { IMPORT_FELL_BACK, isImportedSpec } from '../net/imported';
 import { standardRobotFor } from '../settings';
 import { activeZenithAuto } from '../auto/library';
@@ -581,6 +582,11 @@ export function Lobby({
   function wire(transport: Transport, roomCode: string): LobbyClient {
     const lobby = new LobbyClient(transport);
     lobbyRef.current = lobby;
+    /* THE VISUALS RELAY (docs/area/netcode.md): an owner uploads its imported robot's look only to a
+       server that holds the relay, and the game says whether there is a mesh to send. Set HERE, after
+       the client exists, because binding a new transport starts the relay's state clean. */
+    importVisuals.setGame(roomGame);
+    void roomTakesImportVisuals().then((ok) => importVisuals.setOffered(ok));
 
     /**
      * SAY THAT IT IS STILL TRYING.

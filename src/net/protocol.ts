@@ -19,6 +19,7 @@ import type { Replay, ReplayResult } from '../sim/replay';
 import { clamp } from '../math';
 import { flywheelSpinTarget } from '../sim/field';
 import { ROBOT_IMPORT_CAP } from './imported';
+import { IMPORT_VISUALS_CAP, type VisualKind, type VisualRefusal } from './importVisuals';
 
 /**
  * Wire protocol for the SERVER-AUTHORITATIVE netcode (Phase 0). All messages are
@@ -424,7 +425,7 @@ export type PlayerPatch = Partial<
  * client is never stranded waiting for a `strategyStart` it can't render. Absent/old
  * clients send nothing ⇒ treated as no caps. Add new capability strings here as the
  * protocol grows. */
-export const CLIENT_CAPS: string[] = ['strategy', 'startpose', 'game', 'standing', 'recycle', 'bb3d', 'ready3d', 'viewready', 'seat', ROBOT_IMPORT_CAP];
+export const CLIENT_CAPS: string[] = ['strategy', 'startpose', 'game', 'standing', 'recycle', 'bb3d', 'ready3d', 'viewready', 'seat', ROBOT_IMPORT_CAP, IMPORT_VISUALS_CAP];
 
 /**
  * THE ONE CAPABILITY THAT IS A HARD GATE RATHER THAN A FEATURE FLAG.
@@ -616,9 +617,18 @@ export const SERVER_CAPS: string[] = [
    * client capability of the same name, which is the one that is a HARD gate.
    */
   ROBOT_IMPORT_CAP,
+  /**
+   * `'importVisuals'` — THIS DEPLOY RELAYS AN IMPORTED ROBOT'S LOOK (its top picture, and its mesh
+   * for BIOBUZZ's 3D view) between the players of a custom or LAN room (`src/net/importVisuals.ts`).
+   *
+   * An older server ignores `visualPut`/`visualGet` without a word, so an owner would upload 1.3 MB
+   * into the void; the client sends them only to a server that says this. Everything it does is
+   * additive: a viewer on a build without the cap is sent none of it and sees the footprint.
+   */
+  IMPORT_VISUALS_CAP,
 ];
 
-/** the formats a "play a friend" challenge can be issued in. Shared so the API's
+/** the formats a "play a friend" challenge can be issued in.Shared so the API's
  * allowlist, the matchmaker's gate, and the picker's tiles can't drift apart. */
 export const CHALLENGE_FORMATS = [
   'casual1v1',
@@ -752,6 +762,18 @@ export type ClientMsg =
    * advertises `'zenithAuto'` (`SERVER_CAPS`).
    */
   | { t: 'zenithAuto'; auto: import('../auto/types').ZenithAutoSetup | null }
+  /**
+   * ONE CHUNK OF THE OWNER'S IMPORTED ROBOT'S LOOK (`IMPORT_VISUALS_CAP`, `src/net/importVisuals.ts`):
+   * a PNG top picture (`kind: 'top'`) or a GLB mesh (`'mesh'`) for the robot whose `spec.imported.id`
+   * is `id`. `total` is the whole asset's byte length and `seq` counts chunks from 0; `data` is
+   * base64 of the next `VISUAL_CHUNK_BYTES` bytes. Held in the room's memory for the room's life,
+   * never persisted, never in a replay. Ignored by an older server, so the client sends it only to
+   * one that advertises `'importVisuals'`.
+   */
+  | { t: 'visualPut'; kind: VisualKind; id: string; total: number; seq: number; data: string }
+  /** ASK FOR another seat's asset: `owner` is its roster `clientId`, `id` the robot id the roster
+   *  names. The room answers with a `visualChunk` stream, or a `visualRefused`. */
+  | { t: 'visualGet'; owner: string; id: string; kind: VisualKind }
   /**
    * THIS SEAT CAN PLAY THE CURRENT MATCH (`VIEWREADY_CAP`): physics and view are both up.
    * `gen` is the match generation it is ready for, so a report for a match that has since been
@@ -958,6 +980,18 @@ export type ServerMsg =
    * not have to agree. A client that is held does not predict.
    */
   | { t: 'loadHold'; gen: number; waitMs: number; loading: number[] }
+  /**
+   * `owner`'s ASSET IS IN THE ROOM and may be asked for (`visualGet`). Sent, to clients that
+   * advertise `IMPORT_VISUALS_CAP` and only to them, when an upload completes, and again for each
+   * stored asset to a client that attaches later (a joiner, a spectator, a reclaimed seat). `owner`
+   * may be the recipient itself: that is the room confirming it holds their upload.
+   */
+  | { t: 'visualReady'; owner: string; id: string; kind: VisualKind; bytes: number }
+  /** ONE CHUNK of an asset a client asked for, in order from `seq` 0. Never sent unasked. */
+  | { t: 'visualChunk'; owner: string; id: string; kind: VisualKind; total: number; seq: number; data: string }
+  /** A `visualPut` or `visualGet` was refused (`reason`), with a plain sentence. The viewer keeps
+   *  the footprint; the owner is told so it stops sending. */
+  | { t: 'visualRefused'; op: 'put' | 'get'; owner: string; id: string; kind: VisualKind; reason: VisualRefusal; message: string }
   | { t: 'roster'; players: LobbyPlayer[]; hostId: string }
   /**
    * THE ROOM IS A LOBBY AGAIN — tear down the match view and show the roster.

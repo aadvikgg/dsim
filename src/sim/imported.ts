@@ -50,15 +50,10 @@ export const IMPORT_MIN_AREA = 24;
 export const IMPORT_ORIGIN_MARGIN = 1;
 export const IMPORT_MIN_HEIGHT = 1;
 /**
- * How far a mechanism point may sit OUTSIDE the hull's bounding box, inches. Mechanisms are part
- * of the robot so they are inside the hull in the starting configuration, but two of the points a
- * game reads are REACH points by design: BIOBUZZ's Box Tube place point sits `BB_PLACE_REACH`
- * (2.4 in) past the footprint edge, and a Chain Reaction catalyst claw reaches past its mount.
- * 6 in covers both with room, and still bounds a hostile value to within 6 in of the robot.
+ * The narrowest intake span kept, inches. A sim-safety floor like the two above: each game widens
+ * a narrow mouth to its own minimum when it reads the span (`src/sim/importedMech.ts`).
  */
-export const IMPORT_MECH_MARGIN = 6;
-/** the highest a mechanism point may sit, inches: the 18-in cube plus the reach margin */
-export const IMPORT_MECH_MAX_Z = IMPORT_MAX_EXTENT + IMPORT_MECH_MARGIN;
+export const IMPORT_MIN_SPAN = 1;
 
 const ID_RE = /^[0-9a-f]{16}$/;
 const EDGES: readonly ImportedEdge[] = ['front', 'back', 'left', 'right'];
@@ -585,10 +580,17 @@ function place(f: Frame, x: number, y: number): Vec2 {
   return { x: q(x * f.s) + f.tx, y: q(y * f.s) + f.ty };
 }
 
+/**
+ * A mechanism point, game-blind: x/y placed in the coerced frame and moved to the NEAREST point
+ * inside the hull (every mechanism is part of the robot in its starting configuration — a REACH
+ * point such as BIOBUZZ's Box Tube target is computed by the game from this base, never stored),
+ * z snapped and clamped to `[0, heightIn]`. On the grid and inside, so a second pass keeps it.
+ */
 function coercePoint3(
   raw: unknown,
   f: Frame,
-  b: Bounds,
+  hull: readonly Vec2[],
+  heightIn: number,
 ): { x: number; y: number; z: number } | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const r = raw as Record<string, unknown>;
@@ -596,21 +598,24 @@ function coercePoint3(
   const y = num(r.y);
   const z = num(r.z);
   if (x === null || y === null || z === null) return undefined;
-  const M = IMPORT_MECH_MARGIN;
-  const p = place(f, clamp(x, -IMPORT_COORD_LIMIT, IMPORT_COORD_LIMIT), clamp(y, -IMPORT_COORD_LIMIT, IMPORT_COORD_LIMIT));
-  return {
-    x: clamp(p.x, b.minX - M, b.maxX + M),
-    y: clamp(p.y, b.minY - M, b.maxY + M),
-    z: clamp(q(clamp(z, -IMPORT_COORD_LIMIT, IMPORT_COORD_LIMIT) * f.s), 0, IMPORT_MECH_MAX_Z),
-  };
+  const L = IMPORT_COORD_LIMIT;
+  let p = place(f, clamp(x, -L, L), clamp(y, -L, L));
+  if (polyPointDepth(hull, p) < 0) {
+    // the nearest boundary point, snapped — which can land a hair outside — then walked in
+    const cp = polyFeature(hull, p).cp;
+    p = pullInside(hull, { x: q(cp.x), y: q(cp.y) }, true);
+  }
+  return { x: p.x, y: p.y, z: clamp(q(clamp(z, -L, L) * f.s), 0, heightIn) };
 }
 
-function coerceMech(raw: unknown, f: Frame, b: Bounds): ImportedMech | undefined {
+function coerceMech(raw: unknown, f: Frame, b: Bounds, hull: readonly Vec2[], heightIn: number): ImportedMech | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const m = raw as Record<string, unknown>;
   const out: ImportedMech = {};
-  const shooter = coercePoint3(m.shooter, f, b);
+  const shooter = coercePoint3(m.shooter, f, hull, heightIn);
   if (shooter) out.shooter = shooter;
+  const shooter2 = coercePoint3(m.shooter2, f, hull, heightIn);
+  if (shooter2) out.shooter2 = shooter2;
   if (Array.isArray(m.intakes)) {
     const list: NonNullable<ImportedMech['intakes']> = [];
     for (const it of m.intakes.slice(0, 16)) {
@@ -619,6 +624,8 @@ function coerceMech(raw: unknown, f: Frame, b: Bounds): ImportedMech | undefined
       const r = it as Record<string, unknown>;
       const edge = r.edge as ImportedEdge;
       if (!EDGES.includes(edge)) continue;
+      // ONE SPAN PER EDGE — the first valid one wins
+      if (list.some((e) => e.edge === edge)) continue;
       const from = num(r.from);
       const to = num(r.to);
       if (from === null || to === null) continue;
@@ -631,14 +638,16 @@ function coerceMech(raw: unknown, f: Frame, b: Bounds): ImportedMech | undefined
       let a = clamp(q(clamp(from, -L, L) * f.s) + off, lo, hi);
       let c = clamp(q(clamp(to, -L, L) * f.s) + off, lo, hi);
       if (a > c) [a, c] = [c, a];
-      if (!(c > a)) continue;
+      if (!(c - a >= IMPORT_MIN_SPAN)) continue;
       list.push({ edge, from: a, to: c });
     }
+    // a function of the SET, so re-sorting a sorted list is a no-op
+    list.sort((p, s) => EDGES.indexOf(p.edge) - EDGES.indexOf(s.edge));
     if (list.length > 0) out.intakes = list;
   }
-  const place3 = coercePoint3(m.place, f, b);
+  const place3 = coercePoint3(m.place, f, hull, heightIn);
   if (place3) out.place = place3;
-  return out.shooter || out.intakes || out.place ? out : undefined;
+  return out.shooter || out.shooter2 || out.intakes || out.place ? out : undefined;
 }
 
 /**
@@ -666,10 +675,11 @@ function coerceMech(raw: unknown, f: Frame, b: Bounds): ImportedMech | undefined
  *   8. BANDS: up to 3 valid ones, in input order, then sorted by (z0, z1). z0/z1 snapped and
  *      clamped to [0, heightIn], z0 < z1 or the band is dropped; its points are walked inside the
  *      hull, hulled and cut to 12 vertices, < 3 ⇒ the band is dropped.
- *   9. MECH: shooter / place points snapped and clamped into the hull's bounding box ±
- *      `IMPORT_MECH_MARGIN` (z into [0, `IMPORT_MECH_MAX_Z`]); up to 4 intakes with a known edge,
- *      the span clamped to that edge's side of the box, reordered so from < to, an empty span
- *      dropped. A mech with nothing left is dropped.
+ *   9. MECH, game-blind: shooter / shooter2 / place snapped and moved to the nearest point INSIDE
+ *      the hull, z into [0, heightIn]; intakes need a known edge, the span clamped to that edge's
+ *      side of the box, reordered so from < to, at least `IMPORT_MIN_SPAN` wide, ONE per edge (the
+ *      first valid wins), sorted front, back, left, right. A mech with nothing left is dropped.
+ *      Each game's own ranges are applied where it READS them (`importedMech.ts`).
  *
  * IDEMPOTENT: `coerceImported(coerceImported(x))` deep-equals `coerceImported(x)`. Every stored
  * number is on the grid and inside its range, the hull of a stored hull is itself, a stored
@@ -758,7 +768,7 @@ export function coerceImported(raw: unknown): ImportedRobot | undefined {
   }
 
   // 9) mechanisms
-  const mech = coerceMech(r.mech, f, bb);
+  const mech = coerceMech(r.mech, f, bb, hull, heightIn);
   if (mech) out.mech = mech;
   return out;
 }

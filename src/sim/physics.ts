@@ -5,6 +5,7 @@ import { dot, rot, clamp, hyp, datan2, dcos, dsin, wrapAngle } from '../math';
 import { robotPenetration, type RobotSolids } from './artifactSolids';
 import { activeDrive, driveParams } from './drivetrain';
 import { importedWheels, polyAtPose, polyAxes, polyFeature, polysOverlap } from './imported';
+import { decodeImportHeldSlot, decodeImportMouth, decodeImportSolids, importChassisPoly } from './importedMech';
 
 const ALLIANCES: Alliance[] = ['red', 'blue'];
 
@@ -46,6 +47,8 @@ function pairAxes(a: Vec2[], b: Vec2[]): Vec2[] {
  * mouth — and with only 2 balls the front one CENTERS in the 2-wide space, then
  * slides aside when the 3rd arrives (positionHeldBalls tweens between these). */
 export function heldSlotPos(spec: RobotState['spec'], slot: number, side: number): Vec2 {
+  // an IMPORT stores them the same way behind ITS mouth's roller line, on its centreline
+  if (spec.imported) return decodeImportHeldSlot(spec, slot, side);
   const hl = spec.length / 2;
   if (spec.intake === 'triangle') {
     /**
@@ -414,10 +417,10 @@ function applyTurn(
  */
 export function pointDepthInChassis(r: RobotState, p: Vec2): number {
   const local = rot({ x: p.x - r.pos.x, y: p.y - r.pos.y }, -r.heading);
-  // an import's "chassis" is its whole hull — the same closed polygon `robotSolids` hands the
-  // artifact solve (the mouth is carved by the mechanism lane, not here); outside, the exact
-  // distance rather than the box's per-face one
-  if (r.spec.imported) return polyFeature(r.spec.imported.hull, local).depth;
+  // an import's chassis is its hull BEHIND THE INTAKE FACE — the same polygon `robotSolids` hands
+  // the artifact solve (`importChassisPoly`); outside, the exact distance rather than the box's
+  // per-face one
+  if (r.spec.imported) return polyFeature(importChassisPoly(r.spec), local).depth;
   const hl = r.spec.length / 2;
   const hw = r.spec.width / 2;
   return Math.min(Math.min(local.x + hl, hl - local.x), Math.min(local.y + hw, hw - local.y));
@@ -426,7 +429,7 @@ export function pointDepthInChassis(r: RobotState, p: Vec2): number {
 /** the four corners of the CHASSIS box (no intake reach) — see `pointDepthInChassis`. For an
  * imported robot, the hull's vertices (CCW): its chassis is the hull. */
 export function chassisCorners(r: RobotState): Vec2[] {
-  if (r.spec.imported) return robotHullWorld(r);
+  if (r.spec.imported) return polyAtPose(importChassisPoly(r.spec), r.pos, dcos(r.heading), dsin(r.heading));
   const hl = r.spec.length / 2;
   const hw = r.spec.width / 2;
   return [
@@ -1569,6 +1572,11 @@ function overIntakeRoof(
   frontPad = pad,
 ): boolean {
   const local = rot({ x: p.x - r.pos.x, y: p.y - r.pos.y }, -r.heading);
+  if (r.spec.imported) {
+    // an IMPORT's roof is over ITS mouth: face to roller line, its own width, off its centreline
+    const d = decodeImportMouth(r.spec);
+    return local.x > d.face - pad && local.x <= d.tip + frontPad && Math.abs(local.y - d.yc) <= d.mouth.mouthHalf + pad;
+  }
   const hl = r.spec.length / 2;
   const tip = hl + C.INTAKE_PRESETS[r.spec.intake].reach;
   const mh = C.intakeMouth(r.spec).mouthHalf;
@@ -1741,16 +1749,24 @@ function ballRobotFrontContact(
 
 export function collideBallRobot(b: Artifact, r: RobotState): void {
   /**
-   * AN IMPORTED ROBOT IS ITS HULL, CLOSED, to an artifact the artifact solve does not own — the
-   * same closed polygon `robotSolids` gives that solve (the mechanism lane carves the mouth).
-   * Ground artifacts are entirely the solve's for an import (its chassis collider IS the whole
-   * hull), so only a FLIGHT artifact is resolved here.
+   * AN IMPORTED ROBOT, to an artifact the artifact solve does not own (a FLIGHT one — ground
+   * artifacts are entirely the solve's): BELOW the mouth's opening, the same carved pieces
+   * `robotSolids` gives that solve (the mouth open, `decodeImportSolids`); ABOVE it, the whole hull
+   * — the standard rule (`ballRobotFrontContact`): the roller and its structure are solid there.
    */
   if (r.spec.imported) {
     if (b.state.kind === 'ground') return;
     const R = b.r ?? C.BALL_RADIUS;
     const local = rot({ x: b.pos.x - r.pos.x, y: b.pos.y - r.pos.y }, -r.heading);
-    const f = polyFeature(r.spec.imported.hull, local);
+    let f = polyFeature(r.spec.imported.hull, local);
+    if (b.z < 2 * C.BALL_RADIUS) {
+      const carve = decodeImportSolids(r.spec);
+      f = polyFeature(carve.chassis, local);
+      for (const piece of carve.structure) {
+        const g = polyFeature(piece, local);
+        if (g.depth > f.depth) f = g;
+      }
+    }
     const pen = R + f.depth;
     if (pen <= 0) return;
     const n = rot({ x: f.nx, y: f.ny }, r.heading);
