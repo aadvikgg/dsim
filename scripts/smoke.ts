@@ -30357,6 +30357,17 @@ function impPlayCheck(g: GameId): void {
       threw = true;
     }
     check('imported assets: with no DOM (the server, a worker) a picture ask is a quiet null', !threw);
+    // THE DEFAULT SOURCE IS THE DEVICE LIBRARY, reached lazily: a player who never meets an import
+    // never downloads it, and with no IndexedDB (Node here) a mesh ask is a quiet null
+    resetImportedAssetsForTests();
+    const seamSrc = readFileSync('src/render/importedAssets.ts', 'utf8');
+    check('imported assets: the library is the default source, behind a dynamic import (never a static one)',
+      /let source: ImportedAssetSource \| null = LIBRARY_ASSET_SOURCE;/.test(seamSrc) &&
+        /import\('\.\.\/robotImport\/library'\)/.test(seamSrc) && !/from '\.\.\/robotImport\/library'/.test(seamSrc));
+    check('imported assets: ...and with no IndexedDB the library answers a mesh ask with a quiet null',
+      (await importedMeshBlob('f000000000000001')) === null);
+    check('imported assets: the frames ARE the importer\'s (one definition, re-exported)',
+      /importedTopFrame = topImageFrame/.test(seamSrc) && /IMPORTED_MESH_TO_ROBOT: readonly number\[\] = STORED_MESH_TO_ROBOT/.test(seamSrc));
   } finally {
     resetImportedAssetsForTests();
     URL.createObjectURL = realCreate;

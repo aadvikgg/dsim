@@ -1,36 +1,33 @@
-import type { Vec2 } from '../types';
+import { STORED_MESH_TO_ROBOT, TOP_IMAGE_PX } from '../robotImport/types';
+import { robotToTopPixel, topImageFrame, topPixelToRobot, type TopImageFrame } from '../robotImport/geometry';
 
 /**
  * IMPORTED ROBOT VISUALS — the one place a renderer asks for an imported robot's pictures
- * (`docs/robot-import-plan.md` §1 "In a match", §3.2). It STORES NOTHING of its own: a pluggable
- * SOURCE answers by `ImportedRobot.id` (the device library, plugged in at integration), and
- * `registerImportedAssets` lends it in-memory blobs (the editor's unsaved draft, a mesh that
+ * (`docs/robot-import-plan.md` §1 "In a match", §3.2). It STORES NOTHING of its own: a SOURCE
+ * answers by `ImportedRobot.id` (the device library, `src/robotImport/library.ts`, by default),
+ * and `registerImportedAssets` lends it in-memory blobs (the editor's unsaved draft, a mesh that
  * arrived over a room's relay). Main chunk, DOM only inside functions, no three.js: the 2D
  * sprites, the builder previews and the BIOBUZZ scene chunk all read it, and the smoke suite
  * imports it under Node.
  *
- * ── TWO FRAMES, DEFINED HERE ONCE ───────────────────────────────────────────────────────────
- * The importer writes both assets (`src/robotImport/engine/bake.ts`); the renderers read them back
- * through these two definitions and nothing else.
+ * ── TWO FRAMES, AND THEY ARE THE IMPORTER'S ─────────────────────────────────────────────────
+ * The importer writes both assets (`src/robotImport/engine/bake.ts`) and owns both definitions
+ * (`docs/area/robot-import.md` "Frames"); the renderers read them back through these re-exports
+ * and nothing else, so a picture and its reader cannot disagree.
  *
- *  - THE TOP-DOWN PNG (`importedTopFrame`): square, `IMPORTED_TOP_PX` (512) a side, transparent,
- *    orthographic from above, in the ROBOT-LOCAL frame: image UP = robot +x (front), image LEFT =
- *    robot +y (left). It is framed on the HULL, so a reader needs nothing but the descriptor: the
- *    square is centred on the hull's bounding-box centre (cx, cy) and is `max(AABB) + 1` in wide.
- *    Pixel (u, v), origin top-left, maps to robot-local inches (`topPixelToRobot`):
- *        x = cx + (px/2 − v)·k,   y = cy + (px/2 − u)·k,   k = sideIn / px  (in per px).
+ *  - THE TOP-DOWN PNG (`importedTopFrame` = `topImageFrame`): `TOP_IMAGE_PX` (512) square,
+ *    transparent, orthographic from above, robot-local: image UP = robot +x (front), image LEFT =
+ *    robot +y (left). Framed on the HULL, so a reader needs nothing but the descriptor: centred on
+ *    the hull's bounding-box centre (cx, cy), `max(box side) + 1` in wide. Pixel (u, v), origin
+ *    top-left, is robot-local x = cx + (px/2 − v)·k, y = cy + (px/2 − u)·k, k = inches per pixel.
  *    That map has determinant −1 in the robot frame, which is right: the 2D camera's y-flip
  *    cancels it, so the picture is never mirrored on screen (the bird's-eye rule in CLAUDE.md).
- *  - THE STORED GLB (`IMPORTED_MESH_TO_ROBOT`): glTF's own frame so any viewer opens it upright —
- *    METRES, +Y up, +Z front, +X left, origin on the floor under the robot-local origin. The
- *    BIOBUZZ scene works in robot-local INCHES, +x front, +y left, +z up, so the loader applies
- *        robot.x = gltf.z / 0.0254,  robot.y = gltf.x / 0.0254,  robot.z = gltf.y / 0.0254
- *    — a cyclic permutation times a positive scale, so winding and normals survive.
- *
- * ⚠️ BOTH MIRROR LANE 3 (`src/robotImport/geometry.ts` `topImageFrame`, `src/robotImport/types.ts`
- * `STORED_MESH_TO_ROBOT`), which was not on this branch when these were written. At integration
- * one of each pair goes: keep one definition, have the other import it, and the smoke check
- * `imported assets: the top frame …` keeps holding either way.
+ *  - THE STORED GLB (`IMPORTED_MESH_TO_ROBOT` = `STORED_MESH_TO_ROBOT`): glTF's own frame, so any
+ *    viewer opens it upright — METRES, +Y up, +Z front, +X left, origin on the floor under the
+ *    robot-local origin. The BIOBUZZ scene's robot groups are robot-local INCHES, +x front, +y
+ *    left, +z up (`scene/renderRobots.ts` poses a group by `rotation.z = heading`), so the scene
+ *    puts this matrix on the mesh's root node: x = gltf.z/0.0254, y = gltf.x/0.0254,
+ *    z = gltf.y/0.0254 — a proper rotation times a scale, so winding and normals survive.
  *
  * ── THE CACHE ───────────────────────────────────────────────────────────────────────────────
  * Small and capped (`IMPORTED_TOP_CAP` pictures, `IMPORTED_MESH_CAP` mesh lookups), least
@@ -39,65 +36,22 @@ import type { Vec2 } from '../types';
  * evicted, invalidated, replaced, or when a load finishes for an entry that is already gone.
  */
 
-/** the top-down PNG's side, px (lane 3's `TOP_IMAGE_PX`) */
-export const IMPORTED_TOP_PX = 512;
+/** the top-down PNG's side, px (the importer's `TOP_IMAGE_PX`) */
+export const IMPORTED_TOP_PX = TOP_IMAGE_PX;
 /** how many decoded top pictures stay cached (a room is 4 robots; the rest is the builder) */
 export const IMPORTED_TOP_CAP = 8;
 /** how many mesh lookups (blob promises) stay cached */
 export const IMPORTED_MESH_CAP = 6;
-/** metres per inch: the stored GLB is in metres, every descriptor number in inches */
-export const IMPORTED_MESH_METRES_PER_INCH = 0.0254;
 
-/**
- * STORED GLB → ROBOT-LOCAL INCHES, column-major 4×4 (`THREE.Matrix4.fromArray` order). Columns
- * are the images of glTF +X, +Y, +Z and the translation — see the header.
- */
-export const IMPORTED_MESH_TO_ROBOT: readonly number[] = (() => {
-  const k = 1 / IMPORTED_MESH_METRES_PER_INCH;
-  return [0, k, 0, 0, /**/ 0, 0, k, 0, /**/ k, 0, 0, 0, /**/ 0, 0, 0, 1];
-})();
+/** STORED GLB → ROBOT-LOCAL INCHES, column-major 4×4 (`THREE.Matrix4.fromArray` order) — the
+ * importer's `STORED_MESH_TO_ROBOT` */
+export const IMPORTED_MESH_TO_ROBOT: readonly number[] = STORED_MESH_TO_ROBOT;
 
-/** where the top-down PNG sits in the robot frame — see the header */
-export interface ImportedTopFrame {
-  /** robot-local centre of the square (the hull's bounding-box centre), in */
-  cx: number;
-  cy: number;
-  /** the square's side, in */
-  sideIn: number;
-  /** inches per pixel */
-  inPerPx: number;
-  /** the image's side, px */
-  px: number;
-}
-
-/** THE top-down PNG frame for a hull: the ONE definition both the importer and the renderers use */
-export function importedTopFrame(hull: readonly Vec2[], px = IMPORTED_TOP_PX): ImportedTopFrame {
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const p of hull) {
-    if (p.x < minX) minX = p.x;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.y > maxY) maxY = p.y;
-  }
-  const ok = Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY);
-  const cx = ok ? (minX + maxX) / 2 : 0;
-  const cy = ok ? (minY + maxY) / 2 : 0;
-  const sideIn = (ok ? Math.max(maxX - minX, maxY - minY) : 18) + 1;
-  return { cx, cy, sideIn, inPerPx: sideIn / px, px };
-}
-
-/** robot-local inches → top-image pixel (continuous, origin top-left) */
-export function robotToTopPixel(p: Vec2, f: ImportedTopFrame): { u: number; v: number } {
-  return { u: f.px / 2 - (p.y - f.cy) / f.inPerPx, v: f.px / 2 - (p.x - f.cx) / f.inPerPx };
-}
-
-/** top-image pixel → robot-local inches */
-export function topPixelToRobot(u: number, v: number, f: ImportedTopFrame): Vec2 {
-  return { x: f.cx + (f.px / 2 - v) * f.inPerPx, y: f.cy + (f.px / 2 - u) * f.inPerPx };
-}
+/** where the top-down PNG sits in the robot frame — the importer's `TopImageFrame` */
+export type ImportedTopFrame = TopImageFrame;
+/** THE top-down PNG frame for a hull — the importer's `topImageFrame`, the one definition */
+export const importedTopFrame = topImageFrame;
+export { robotToTopPixel, topPixelToRobot };
 
 /**
  * The canvas transform that draws the image (in its own pixels) into the ROBOT-LOCAL frame:
@@ -118,14 +72,19 @@ export interface ImportedAssetSource {
 }
 
 /**
- * ⚠️ INTEGRATION POINT — LANE 3'S DEVICE LIBRARY PLUGS IN HERE. At app start (or the first time
- * `src/robotImport/library.ts` is loaded) call
- *     setImportedAssetSource({ top: topFor, mesh: meshFor })
- * with that module's `topFor`/`meshFor`. Until then every lookup that is not a registered
- * in-memory blob resolves `null`, so every import draws as its hull (2D) or its extrusion (3D) —
- * exactly what a remote player without the mesh sees, never an error.
+ * THE DEVICE LIBRARY (`src/robotImport/library.ts`'s `topFor`/`meshFor`) — the default source.
+ * Reached through a dynamic `import()` the first time an import is DRAWN, so a player who never
+ * meets an imported robot never downloads it, and the main chunk does not carry IndexedDB code
+ * for them. A library that cannot open (a private window, no IndexedDB, the server) resolves
+ * `null`, so the robot draws as its hull (2D) or its placeholder (3D) — exactly what a remote
+ * player without the mesh sees, never an error.
  */
-let source: ImportedAssetSource | null = null;
+export const LIBRARY_ASSET_SOURCE: ImportedAssetSource = {
+  top: (id) => import('../robotImport/library').then((lib) => lib.topFor(id)),
+  mesh: (id) => import('../robotImport/library').then((lib) => lib.meshFor(id)),
+};
+
+let source: ImportedAssetSource | null = LIBRARY_ASSET_SOURCE;
 
 export function setImportedAssetSource(next: ImportedAssetSource | null): void {
   if (next === source) return;
@@ -393,7 +352,8 @@ export function importedMeshBlob(id: string): Promise<Blob | null> {
   return p;
 }
 
-/** TEST ONLY: empty every cache, the registry, the versions and the source (revoking URLs) */
+/** TEST ONLY: empty every cache, the registry and the versions (revoking URLs); the source goes
+ * back to the library */
 export function resetImportedAssetsForTests(): void {
   for (const e of tops.values()) revoke(e);
   tops.clear();
@@ -402,7 +362,7 @@ export function resetImportedAssetsForTests(): void {
   versions.clear();
   meshVersions.clear();
   listeners.clear();
-  source = null;
+  source = LIBRARY_ASSET_SOURCE;
   epoch = 0;
 }
 
