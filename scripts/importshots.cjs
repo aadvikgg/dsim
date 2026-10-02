@@ -87,8 +87,11 @@ const HELPERS = `(() => {
     el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
     el.focus(); el.blur(); return true;
   };
-  window.__scroll = (sel) => { const el = document.querySelector(sel); if (!el) return false; const y = el.getBoundingClientRect().top + window.scrollY - 100 - (document.querySelector('.ds-hero')?.getBoundingClientRect().height ?? 0) * (getComputedStyle(document.querySelector('.ds-hero') ?? document.body).position === 'sticky' ? 1 : 0); window.scrollTo(0, Math.max(0, y)); return true; };
-  window.__top = () => { window.scrollTo(0, 0); document.querySelectorAll('.ds-main, main').forEach((m) => (m.scrollTop = 0)); return true; };
+  // the app scrolls in \`.ds-app\` (html and body are overflow: hidden); scroll THAT, and keep the
+  // root at 0 — a root scroll is the bug \`.ds-import\`'s position: relative fixed, not a viewport
+  const scroller = () => document.querySelector('.ds-app') || document.scrollingElement;
+  window.__scroll = (sel) => { const el = document.querySelector(sel); if (!el) return false; const s = scroller(); const hero = document.querySelector('.ds-hero'); const y = el.getBoundingClientRect().top - s.getBoundingClientRect().top + s.scrollTop - 100 - (hero && getComputedStyle(hero).position === 'sticky' ? hero.getBoundingClientRect().height : 0); s.scrollTop = Math.max(0, y); window.scrollTo(0, 0); return true; };
+  window.__top = () => { window.scrollTo(0, 0); const s = scroller(); if (s) s.scrollTop = 0; document.querySelectorAll('.ds-main, main').forEach((m) => (m.scrollTop = 0)); return true; };
   return true;
 })()`;
 

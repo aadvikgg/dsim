@@ -121,6 +121,7 @@ app.whenReady().then(async () => {
   const v0 = await js(`document.activeElement?.value`);
   await js(`__press(${RIGHT})`);
   check('pad: ◄► nudge a focused range (Mechanisms)', (await js(`document.activeElement?.value`)) !== v0, `${v0}`);
+  check('pad: the page root never grows past the window (a hidden line positioned against the page scrolled it blank)', await js(`document.documentElement.scrollHeight <= innerHeight + 1 && scrollY === 0`), await js(`document.documentElement.scrollHeight + ' / ' + innerHeight + ' @ ' + scrollY`));
   await shot('mechanisms');
   // B leaves for the robot page; the draft stays
   await js(`document.querySelector('.ds-import-steps .ds-tab')?.focus()`);

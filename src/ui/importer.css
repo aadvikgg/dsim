@@ -17,6 +17,11 @@
    panel take different amounts of the page at the same window size (the hero's lesson). */
 .ds-import {
   container: ri / inline-size;
+  /* the containing block for every `.ds-sr` inside. Without one, a visually hidden line is
+     positioned against the PAGE at its static spot, so the placement map's keyboard line, 1,500px
+     down `.ds-app`'s scroll, made the overflow-hidden ROOT 660px taller than the window — and any
+     `scrollIntoView` (a pad focus move) scrolled the root there, showing an empty screen. */
+  position: relative;
 }
 /* a container query cannot style its own container, so the grid is one level in */
 .ds-import-in {

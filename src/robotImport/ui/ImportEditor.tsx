@@ -549,7 +549,11 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
 
   const hasModel = !!m;
   const stepCounts = [0, 0, 0, 0];
-  for (const it of items) if (it.level === 'block' || it.level === 'warn') stepCounts[stepOf(it)]++;
+  const stepBlocks = [0, 0, 0, 0];
+  for (const it of items) {
+    if (it.level === 'block' || it.level === 'warn') stepCounts[stepOf(it)]++;
+    if (it.level === 'block') stepBlocks[stepOf(it)]++;
+  }
   const title = doc.editId ? COPY.titleEdit(doc.spec.name || 'robot') : COPY.titleNew;
   const previewState = m && normalised
     ? {
@@ -619,8 +623,10 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
               onClick={() => goStep(i as StepIndex)}
             >
               <span className="n">{i + 1}</span> {label}
-              {hasModel ? (
-                <span className={`ds-badge ${stepCounts[i] ? 'warn' : 'ok'}`}>
+              {/* Review carries no badge: it is the sum of the other three, and a tick on it beside
+                  "1 to fix before saving" read as a contradiction */}
+              {hasModel && i < 3 ? (
+                <span className={`ds-badge ${stepBlocks[i] ? 'danger' : stepCounts[i] ? 'warn' : 'ok'}`}>
                   {stepCounts[i] ? stepCounts[i] : '✓'}
                   <span className="ds-sr"> {stepCounts[i] ? COPY.stepOpen(stepCounts[i]) : COPY.stepOk}</span>
                 </span>

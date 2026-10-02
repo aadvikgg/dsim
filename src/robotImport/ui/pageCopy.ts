@@ -19,7 +19,7 @@ export const PAGE_COPY = {
   panelEdit: 'Edit in the importer',
   factFile: 'File',
   factFootprint: 'Footprint',
-  factFootprintVal: (l: string, w: string, n: number) => `${l} × ${w} in, ${n} sides`,
+  factFootprintVal: (l: string, w: string, n: number) => `${l} in long, ${w} in wide, ${n} sides`,
   factHeight: 'Height',
   factTriangles: 'Triangles',
   rename: 'Rename',

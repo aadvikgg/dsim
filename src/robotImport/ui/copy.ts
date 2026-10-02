@@ -59,7 +59,7 @@ export const COPY = {
   fileVal: (name: string, format: string, size: string) => `${name} · ${format} · ${size}`,
   savedModel: 'saved model',
   replace: 'Replace',
-  size: 'Size',
+  size: 'Size (L × W × H)',
   fits: 'Fits 18 in',
   over: 'Over 18 in',
   triangles: 'Triangles',
