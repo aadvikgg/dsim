@@ -546,11 +546,12 @@ import type { SolidShape } from '../src/sim/artifactSolids';
 import { heldSlotPos } from '../src/sim/physics';
 import { turretWorldPos } from '../src/sim/robot';
 import { decodeImportLaunchZ, decodeImportMouth, DECODE_IMPORT_LAUNCH_MIN } from '../src/sim/importedMech';
-import { defaultImportedMech, mechHandles, validateImportedMech } from '../src/games/sim';
+import { defaultImportedMech, mechHandles, validateImportedMech } from '../src/games/importMechChecks';
 import { BB_DEFAULT_SPEC } from '../src/games/biobuzz/coerce';
 import { bbMouths, bbRobotSolids, mouthAxes } from '../src/games/biobuzz/robot';
 import * as PROTO from '../src/net/protocol';
 import * as IV from '../src/net/importVisuals';
+import * as VC from '../src/net/visualCheck';
 import * as SV from '../server/importVisuals';
 import * as VF from './visualFixtures';
 import * as IVC from '../src/net/importVisualsClient';
@@ -31905,7 +31906,7 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
 
   // ---- a PNG --------------------------------------------------------------------------------------
   {
-    const v = IV.validateTopPng;
+    const v = VC.validateTopPng;
     check('visuals/png: a real PNG passes', v(png) === null && v(pngBytes(512, 512)) === null);
     const sig = (b: Uint8Array, at: number, val: number): Uint8Array => {
       const c = Uint8Array.from(b);
@@ -31935,7 +31936,7 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
 
   // ---- a GLB ---------------------------------------------------------------------------------------
   {
-    const v = IV.validateMeshGlb;
+    const v = VC.validateMeshGlb;
     check('visuals/glb: a real binary glTF with its buffer in the BIN chunk passes', v(glb) === null && v(glbBytes({ tris: 20000 })) === null);
     const bad = (edit: (j: Record<string, any>) => void): string | null => v(glbBytes({ edit }));
     check('visuals/glb: ⚠️ an EXTERNAL buffer (a uri) is refused outright — the viewer’s loader would fetch it', bad((j) => { j.buffers[0].uri = 'https://example.invalid/robot.bin'; }) === 'external reference');
@@ -31972,7 +31973,7 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
     })());
     check('visuals/glb: over 1 MiB is refused, just under it is not', v(glbBytes({ tris: 30_000 })) === 'too large' && v(glbBytes({ tris: 29_000 })) === null,
       `${glbBytes({ tris: 30_000 }).length} / ${glbBytes({ tris: 29_000 }).length}`);
-    check('visuals/glb: validateVisual picks the validator by kind', IV.validateVisual('top', png) === null && IV.validateVisual('mesh', glb) === null && IV.validateVisual('top', glb) !== null && IV.validateVisual('mesh', png) !== null);
+    check('visuals/glb: validateVisual picks the validator by kind', VC.validateVisual('top', png) === null && VC.validateVisual('mesh', glb) === null && VC.validateVisual('top', glb) !== null && VC.validateVisual('mesh', png) !== null);
   }
   check('visuals/copy: every refusal is a plain sentence — Couldn’t or a clear statement, the next thing the viewer sees, a typographic apostrophe, no ASCII one',
     Object.values(IV.VISUAL_REFUSAL_COPY).every((s) => /\.$/.test(s) && !/'/.test(s) && s.length < 140) && IV.isVisualKind('top') && IV.isVisualKind('mesh') && !IV.isVisualKind('thumb'));
@@ -31983,7 +31984,7 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
 // ════════════════════════════════════════════════════════════════════════════
 {
   const { glbBytes, glbFrom } = VF;
-  const v = IV.validateMeshGlb;
+  const v = VC.validateMeshGlb;
   const bad = (edit: (j: Record<string, any>) => void, tris = 3): string | null => v(glbBytes({ tris, edit }));
   const roots = (j: Record<string, any>): void => {
     j.scenes[0].nodes = j.nodes.map((_: unknown, i: number) => i);
@@ -31992,7 +31993,7 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
   check('visuals/glb+: our own GLBs pass — the fixture, a 20k-triangle one, and the synthetic importer robot (real exporter and liteMesh output: visuals/lite)',
     v(glbBytes()) === null && v(glbBytes({ tris: 20_000 })) === null && v(new Uint8Array(buildBoxesGlb(IMPORT_FIXTURE_BOXES))) === null,
     String(v(new Uint8Array(buildBoxesGlb(IMPORT_FIXTURE_BOXES)))));
-  check('visuals/glb+: our exporter writes no extension, so none is allowed', IV.VISUAL_GLB_EXTENSIONS.length === 0);
+  check('visuals/glb+: our exporter writes no extension, so none is allowed', VC.VISUAL_GLB_EXTENSIONS.length === 0);
 
   // ---- the five crafted files of the review ----------------------------------------------------------
   check('visuals/glb+: ⚠️ GPU INSTANCING (512 nodes × 500,000 copies from a 546 KB file) is refused, declared or not',
@@ -33253,7 +33254,7 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
   const hw = rd(joinPath('src', 'lan', 'hostWorker.ts'));
   check('visuals/pins: ⚠️ on a LAN tab host a `visualChunk` takes the RELIABLE lane (only snapshot and pong are the lossy hot path), so a chunk is never silently dropped by `maxRetransmits: 0`',
     /const HOT = \/\^\\\{"t":"\(snapshot\|pong\)"\//.test(hw) && !/visual/.test(hw.slice(hw.indexOf('const HOT'), hw.indexOf('const isHot'))));
-  const bundled = [rd(joinPath('server', 'importVisuals.ts')), rd(joinPath('src', 'net', 'importVisuals.ts'))];
+  const bundled = [rd(joinPath('server', 'importVisuals.ts')), rd(joinPath('src', 'net', 'importVisuals.ts')), rd(joinPath('src', 'net', 'visualCheck.ts'))];
   check('visuals/pins: the relay and its shared rules import nothing from `node:` (the LAN tab host bundles them for a browser)', bundled.every((s) => !/from 'node:/.test(s) && !/require\(/.test(s)));
   const cl = rd(joinPath('src', 'net', 'importVisualsClient.ts'));
   check('visuals/pins: the client reaches the importer engine only through its loader, and imports no three.js', /loadImporterEngine/.test(cl) && !/from 'three/.test(cl) && !/import\(['"]\.\.\/robotImport\/engine/.test(cl));
@@ -33331,10 +33332,10 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
     const parts = [partOf(body, [0.8, 0.1, 0.1], 'body'), partOf(box, [0.1, 0.2, 0.7], 'box')];
     const glb = await exportGlbStored(creaseParts(parts));
     check('visuals/lite: the stored mesh of a dense robot (140k triangles) is over the relay’s 1 MiB', triangleCount(parts) > 100_000 && glb.byteLength > IV.VISUAL_MAX_BYTES.mesh, `${glb.byteLength} B`);
-    check('visuals/lite: ⚠️ REAL GLTFExporter output passes the structural validator (size lifted), so the relay accepts what the importer writes', IV.validateMeshGlb(new Uint8Array(glb), 64 * 1024 * 1024) === null);
-    check('visuals/lite: ...and at the real cap the full mesh is refused, which is why a lighter one is made', IV.validateMeshGlb(new Uint8Array(glb)) === 'too large');
+    check('visuals/lite: ⚠️ REAL GLTFExporter output passes the structural validator (size lifted), so the relay accepts what the importer writes', VC.validateMeshGlb(new Uint8Array(glb), 64 * 1024 * 1024) === null);
+    check('visuals/lite: ...and at the real cap the full mesh is refused, which is why a lighter one is made', VC.validateMeshGlb(new Uint8Array(glb)) === 'too large');
     const lite = await liteMesh(glb, IV.VISUAL_MAX_BYTES.mesh);
-    check('visuals/lite: the lighter mesh fits the cap and passes the validator', !!lite && lite.byteLength <= IV.VISUAL_MAX_BYTES.mesh && IV.validateMeshGlb(new Uint8Array(lite)) === null, String(lite?.byteLength));
+    check('visuals/lite: the lighter mesh fits the cap and passes the validator', !!lite && lite.byteLength <= IV.VISUAL_MAX_BYTES.mesh && VC.validateMeshGlb(new Uint8Array(lite)) === null, String(lite?.byteLength));
     if (lite) {
       const l = await new GLTFLoader().parseAsync(lite, '');
       const o = await new GLTFLoader().parseAsync(glb, '');
@@ -33456,6 +33457,30 @@ function l2DecodeScene(spec: RobotSpec, local: Vec2): { w: World; ball: Artifact
     'import UI bundle: the robot page reaches the library dialogs and the export by import() on a click, never statically',
     !/^import [^;]*from '\.\/(?:LibraryDialogs|exportRobot)'/m.test(row) && /import\('\.\/LibraryDialogs'\)/.test(row) && /import\('\.\/exportRobot'\)/.test(row),
   );
+  // three more things the entry chunk used to carry (`npm run bundleaudit`: its `library` and `relay`
+  // routes, and the editor's share of `importerui`). A static import from a main-side file puts the
+  // whole module in `main`, so this reads the importers instead of the build.
+  {
+    const rdN = (f: string): string => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+    const staticFrom = (f: string, mod: string): boolean => new RegExp(`^import (?!type )[^;]*from '[^']*${mod}';`, 'm').test(rdN(f));
+    const relayClient = rdN('src/net/importVisualsClient.ts');
+    check(
+      'import UI bundle: ⚠️ the device library is reached by import() from the relay client and the asset seam, never statically (a static import folds IndexedDB into main)',
+      !staticFrom('src/net/importVisualsClient.ts', 'robotImport/library') && !staticFrom('src/render/importedAssets.ts', 'robotImport/library') &&
+        /import\('\.\.\/robotImport\/library'\)/.test(relayClient) && /import\('\.\.\/robotImport\/library'\)/.test(rdN('src/render/importedAssets.ts')),
+    );
+    check(
+      'import UI bundle: ⚠️ the relay’s validators are imported by the server and by import() from the client, and by no file the entry chunk holds (api.ts and protocol.ts import importVisuals.ts for a capability string)',
+      /from '\.\.\/src\/net\/visualCheck'/.test(rdN('server/importVisuals.ts')) && /import\('\.\/visualCheck'\)/.test(relayClient) &&
+        !['src/net/importVisualsClient.ts', 'src/net/importVisuals.ts', 'src/net/api.ts', 'src/net/protocol.ts', 'src/net/lobbyClient.ts', 'src/net/serverSession.ts'].some((f) => staticFrom(f, 'visualCheck')),
+    );
+    check(
+      'import UI bundle: ⚠️ the per-game placement checks are on no sim module: only the editor’s placement.ts imports their registry, so they are in the editor’s chunk',
+      ['src/games/sim.ts', 'src/games/decode/sim.ts', 'src/games/chain/sim.ts', 'src/games/biobuzz/sim.ts'].every((f) => !/importChecks|importMechChecks/.test(rdN(f))) &&
+        staticFrom('src/robotImport/ui/placement.ts', 'games/importMechChecks') &&
+        !['src/games/index.ts', 'src/games/module.ts', 'src/ui/Menu.tsx', 'src/robotImport/ui/ImportedRobots.tsx', 'src/net/sanitize.ts'].some((f) => /importMechChecks/.test(rdN(f))),
+    );
+  }
   // a room refuses two seats holding one import id, so a robot added from a share file never keeps
   // the file's id: two teammates who load one file must be able to sit in one room
   const edN = ed.replace(/\r\n/g, '\n');
