@@ -675,12 +675,22 @@ function coercePoint3(
   return { x: p.x, y: p.y, z: clamp(q(clamp(z, -L, L) * f.s), 0, heightIn) };
 }
 
+/** whole degrees wrapped to (−180, 180]; −180 reads as 180, so a value has one spelling */
+function wrapDeg180(d: number): number {
+  const a = ((d % 360) + 360) % 360;
+  return a > 180 ? a - 360 : a;
+}
+
 function coerceMech(raw: unknown, f: Frame, b: Bounds, hull: readonly Vec2[], heightIn: number): ImportedMech | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const m = raw as Record<string, unknown>;
   const out: ImportedMech = {};
   const shooter = coercePoint3(m.shooter, f, hull, heightIn);
   if (shooter) out.shooter = shooter;
+  // a turretless launcher's FACING, kept only beside the point it fires from: whole degrees,
+  // wrapped to (−180, 180] (a uniform scale and a recentring do not turn it)
+  const yaw = num(m.shooterYawDeg);
+  if (shooter && yaw !== null) out.shooterYawDeg = wrapDeg180(Math.round(clamp(yaw, -1e6, 1e6)));
   const shooter2 = coercePoint3(m.shooter2, f, hull, heightIn);
   if (shooter2) out.shooter2 = shooter2;
   if (Array.isArray(m.intakes)) {
@@ -744,7 +754,8 @@ function coerceMech(raw: unknown, f: Frame, b: Bounds, hull: readonly Vec2[], he
  *      hull, hulled and cut to 12 vertices, < 3 ⇒ the band is dropped. Points are read for at most
  *      `IMPORT_MAX_BAND_INPUTS` bands (the work bound; a list that needs more is junk).
  *   9. MECH, game-blind: shooter / shooter2 / place snapped and moved to the nearest point INSIDE
- *      the hull, z into [0, heightIn]; intakes need a known edge, the span clamped to that edge's
+ *      the hull, z into [0, heightIn]; `shooterYawDeg` whole degrees wrapped to (−180, 180], kept
+ *      only beside a shooter; intakes need a known edge, the span clamped to that edge's
  *      side of the box, reordered so from < to, at least `IMPORT_MIN_SPAN` wide, ONE per edge (the
  *      first valid wins), sorted front, back, left, right. A mech with nothing left is dropped.
  *      Each game's own ranges are applied where it READS them (`importedMech.ts`).

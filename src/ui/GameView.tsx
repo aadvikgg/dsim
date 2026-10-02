@@ -1251,7 +1251,7 @@ function Hud({
               a new driver could not learn what two amber rings meant. The word is `aria-hidden`
               because the glyph's own `aria-label` already says it in full. This card is NOT in
               `[data-hud-band]`, so a word here never re-frames the 3D field. */}
-          {(hud.frontFlipped || hud.butterflyMode || hud.card || autoLine) && (
+          {(hud.frontFlipped || hud.butterflyMode || hud.flywheel || hud.card || autoLine) && (
             <div className="sub-hud">
               {/* THE ZENITH AUTO driving this robot, and the step it is on: a standing fact while
                   AUTO runs, so it lives on this card (HUD-RELOCATION.md), in words */}
@@ -1277,6 +1277,21 @@ function Hud({
                   />
                   <span className="sub-hud-lbl" aria-hidden="true">
                     {hud.butterflyMode === 'tank' ? 'TRACTION' : 'MECANUM'}
+                  </span>
+                </span>
+              )}
+              {/* A SETPOINT FLYWHEEL: the speed it is running to (a fixed shooter's whole range) and
+                  whether the feeder may run. A presets wheel also says which preset, since the
+                  driver steps through them blind otherwise. */}
+              {hud.flywheel && (
+                <span
+                  className="sub-hud-item"
+                  role="status"
+                  aria-label={`Flywheel ${hud.flywheel.setpoint} rpm${hud.flywheel.presets > 1 ? `, speed ${hud.flywheel.preset + 1} of ${hud.flywheel.presets}` : ''}, ${hud.flywheel.ready ? 'ready' : 'spinning up'}.`}
+                >
+                  <span className="sub-hud-lbl" aria-hidden="true">
+                    {hud.flywheel.presets > 1 ? `SPEED ${hud.flywheel.preset + 1} · ` : ''}
+                    {hud.flywheel.setpoint} RPM · {hud.flywheel.ready ? 'READY' : 'SPIN UP'}
                   </span>
                 </span>
               )}

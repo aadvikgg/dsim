@@ -46,6 +46,7 @@ import {
 import { lengthLimits, massLimits, widthLimits } from '../sim/drivetrain';
 import { ToggleRow } from './OptRow';
 import { rangeFill } from './rangeFill';
+import { DecodeLauncherRows } from './LauncherRows';
 
 /**
  * DECODE's and Chain Reaction's MECHANISM BLOCKS — Scoring, Intake, Catalyst and Frame — moved
@@ -165,6 +166,8 @@ export function BuiltinMechRows({
             value={spec.canSort}
             onPick={(canSort) => setSpec({ canSort })}
           />
+          {/* the LAUNCHER: turret or fixed, adjustable or fixed hood, solved or setpoint speed */}
+          <DecodeLauncherRows spec={spec} setSpec={setSpec} />
         </>
       ) : (
         <>

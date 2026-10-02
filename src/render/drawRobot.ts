@@ -2,6 +2,7 @@ import type { Artifact, RobotState } from '../types';
 import * as C from '../config';
 import { footprintExtents } from '../sim/field';
 import { turretWorldPos } from '../sim/robot';
+import { decodeFixedLauncher } from '../sim/fixedShot';
 import { rot } from '../math';
 import { accentFill, clampCosmetics } from '../cosmetics';
 import {
@@ -417,6 +418,13 @@ export function drawRobot(
   ctx.save();
   ctx.translate(tp.x, tp.y);
   ctx.rotate(r.turretHeading);
+  // a FIXED launcher (`spec.launcher`) has no slew ring: its housing is bolted square to the
+  // chassis and `turretHeading` is the chassis heading plus its facing
+  if (decodeFixedLauncher(r.spec)) {
+    drawFixedLauncher(ctx, ring, reach, r.hopper.length > 0);
+    ctx.restore();
+    return;
+  }
   ctx.strokeStyle = r.hopper.length > 0 ? '#22c55e' : '#6b7280';
   ctx.lineWidth = 0.9;
   ctx.beginPath();
@@ -430,6 +438,28 @@ export function drawRobot(
   ctx.fillStyle = '#525b6b';
   ctx.fillRect(0, -1.2, reach, 2.4);
   ctx.restore();
+}
+
+/**
+ * A FIXED LAUNCHER, drawn in its own frame (+x = where it fires): a flywheel housing with the
+ * wheel across it and the hood's lip out of the front, outlined in the same loaded/empty colour a
+ * turret's ring uses. No ring, because nothing turns: the robot is what aims. Sized like the
+ * turret (`ring`, `reach`), so it never pokes past the chassis either.
+ */
+function drawFixedLauncher(ctx: CanvasRenderingContext2D, ring: number, reach: number, loaded: boolean): void {
+  const l = Math.max(ring * 1.3, 3);
+  const w = Math.max(ring * 1.5, 3);
+  ctx.fillStyle = '#3a4150';
+  ctx.fillRect(-l / 2, -w / 2, l, w);
+  ctx.strokeStyle = loaded ? '#22c55e' : '#6b7280';
+  ctx.lineWidth = 0.9;
+  ctx.strokeRect(-l / 2, -w / 2, l, w);
+  // the flywheel, edge-on across the housing
+  ctx.fillStyle = '#1f2329';
+  ctx.fillRect(-l * 0.1, -w * 0.38, l * 0.32, w * 0.76);
+  // the hood's lip: where the artifact leaves
+  ctx.fillStyle = '#525b6b';
+  ctx.fillRect(l / 2 - 0.2, -1.2, Math.max(reach - l / 2, 1), 2.4);
 }
 
 /**
@@ -659,6 +689,12 @@ function drawImportedDecodeRobot(
   ctx.save();
   ctx.translate(tp.x, tp.y);
   ctx.rotate(r.turretHeading);
+  if (decodeFixedLauncher(r.spec)) {
+    // the FIXED launcher at the placed lip, facing `mech.shooterYawDeg`
+    drawFixedLauncher(ctx, ring, ring + 0.5, loaded);
+    ctx.restore();
+    return;
+  }
   ctx.strokeStyle = loaded ? '#22c55e' : '#6b7280';
   ctx.lineWidth = 0.9;
   ctx.beginPath();

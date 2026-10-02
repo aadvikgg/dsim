@@ -68,6 +68,7 @@ import { MATCH_SETTLE_MAX_S, newSettleClock, settleStep } from './sim/settle';
 import { practiceSaveDecision } from './replaySavePolicy';
 import { readRenderStats } from './perfStats';
 import { robotInLaunchZone } from './sim/robot';
+import { flyPresetIndex, flyReady, flySetpoint } from './sim/flywheel';
 import { InputManager } from './input/input';
 import { effectiveBindings, type ControlBindings } from './input/bindings';
 import { Renderer } from './render/renderer';
@@ -452,6 +453,10 @@ export interface HudSnapshot {
    * other drivetrain (no chip). Drives the HUD readout — the swap changes how the robot
    * handles AND whether strafe exists, so the driver has to be able to see it. */
   butterflyMode: 'tank' | 'mecanum' | null;
+  /** a SETPOINT FLYWHEEL (`spec.flywheel`, DECODE + BIOBUZZ): the speed it is running to, which
+   * preset that is, and whether the feeder may run (`flyReady`) — or null for every other build.
+   * A fixed shooter's range is its setpoint's, so a driver has to be able to read it. */
+  flywheel: { setpoint: number; preset: number; presets: number; ready: boolean } | null;
   /** park mode active (speed capped to parkSpeedPct); only activatable in
    * endgame / free drive, per canPark() */
   parked: boolean;
@@ -3705,6 +3710,14 @@ export class GameController {
       frontFlipped: this.frontFlipped,
       butterflyMode:
         r.spec.drivetrain === 'butterfly' ? (r.butterflyTank ? 'tank' : 'mecanum') : null,
+      flywheel: r.spec.flywheel
+        ? {
+            setpoint: flySetpoint(r),
+            preset: flyPresetIndex(r),
+            presets: r.spec.flywheel.mode === 'presets' ? r.spec.flywheel.rpm.length : 1,
+            ready: flyReady(r),
+          }
+        : null,
       parked: this.parked,
       canPark: this.canPark(),
       gateOpen: goal.gateOpen,

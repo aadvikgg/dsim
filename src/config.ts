@@ -2997,6 +2997,38 @@ export const ROBOT_PRESETS: readonly RobotSpec[] = [
     length: 14.5, width: 16, intake: 'vector', massLb: 28, drivetrain: 'mecanum',
     driveRpm: 450, flywheelInertia: 0.9, canSort: false, assists: PRESET_ASSISTS,
   },
+  /**
+   * THE KIT ROBOT — the season's official starter bot, as the sim can build it. LAST, because
+   * `ROBOT_PRESETS[0]` is the build `DEFAULT_SPEC` mirrors, and every card above it is a team's.
+   * No vendor is named (the BIOBUZZ card's owner ruling, `games/biobuzz/presets.ts`).
+   *
+   * FROM THE KIT'S DOCUMENTATION AND ITS OWN TELEOP / AUTONOMOUS OPMODES:
+   *  · drive: skid-steer, two 312-rpm gearmotors (19.2:1) on 96-mm wheels, two driven and two
+   *    omni ⇒ `tank`; `driveRpm` = π·(96/25.4)·312/60 = 61.7 in/s ÷ (`SPEED_PER_RPM` 0.20367 ·
+   *    1.06 tank) = 286, the BIOBUZZ kit card's own conversion.
+   *  · launcher: no turret — the robot turns to aim ⇒ `launcher: 'fixed'`. One 1:1 motor
+   *    (6000 rpm, 28 PPR) driving two 96-mm wheels at LAUNCHER_TARGET_VELOCITY 1125 ticks/s =
+   *    2411 rpm, at any range ⇒ flywheel `fixed` [2411], 96 mm. The feeder (two continuous
+   *    servos) runs FEED_TIME 0.20 s a shot, and only above LAUNCHER_MIN_VELOCITY 1075
+   *    (`FLY_FEED_MIN_FRAC`).
+   *  · hood: fixed polycarbonate ramps, angle not published ⇒ `DECODE_KIT_HOOD_DEG` (APPROX,
+   *    calibrated with `FLY_EXIT_EFFICIENCY` so the kit's own autonomous — start against the goal,
+   *    fire three — scores).
+   *  · hopper 3 (`HOPPER_CAPACITY`, the same).
+   * WHERE THE SIM CANNOT FOLLOW IT, each a clamp rather than a choice:
+   *  · MASS: the kit is 13.5 lb with its hub; DECODE's tank floor is 22 (`DRIVETRAIN_LIMITS`), so
+   *    the card sits ON the floor, with `flywheelInertia` 0 to keep it there.
+   *  · INTAKE: the kit has none — the human player loads it by hand in the LOADING ZONE — and DSIM
+   *    has no hand loading yet, so the card carries the `sloped` intake, the one whose length
+   *    ceiling (15) is nearest the kit's frame. Width 16 is APPROX (no published overall width).
+   */
+  {
+    name: 'StarterBot', teamName: 'Kit robot · tank', teamNumber: 0,
+    length: 15, width: 16, intake: 'sloped', massLb: 22, drivetrain: 'tank',
+    driveRpm: 286, flywheelInertia: 0, canSort: false, assists: PRESET_ASSISTS,
+    launcher: 'fixed', hoodDeg: DECODE_KIT_HOOD_DEG,
+    flywheel: { mode: 'fixed', rpm: [2411], wheelMm: 96, feedS: 0.2 },
+  },
 ] as const;
 
 // ------------------------------------------------------------------ sim ----

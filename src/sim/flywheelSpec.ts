@@ -42,3 +42,16 @@ export function coerceFlywheel(raw: unknown): FlywheelSpec | undefined {
     Math.round(clamp(finite(f.feedS) ? f.feedS : C.FLY_DEFAULT_FEED_S, C.FLY_FEED_S_MIN, C.FLY_FEED_S_MAX) * 100) / 100;
   return { mode, rpm, wheelMm, feedS };
 }
+
+/** do two specs carry the same setpoint flywheel (both absent counts)? For the preset cards'
+ * match test, which compares BUILDS. */
+export function flywheelEq(a: FlywheelSpec | undefined, b: FlywheelSpec | undefined): boolean {
+  if (!a || !b) return a === b;
+  return (
+    a.mode === b.mode &&
+    a.wheelMm === b.wheelMm &&
+    a.feedS === b.feedS &&
+    a.rpm.length === b.rpm.length &&
+    a.rpm.every((r, i) => r === b.rpm[i])
+  );
+}

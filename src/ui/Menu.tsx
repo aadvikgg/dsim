@@ -35,6 +35,7 @@ import { polyBounds as importBox } from '../sim/imported';
 import { handOffFiles } from '../robotImport/ui/handoff';
 import { PAGE_COPY as IMPORT_COPY } from '../robotImport/ui/pageCopy';
 import { rangeFill } from './rangeFill';
+import { flywheelEq } from '../sim/flywheelSpec';
 import { starPoints } from '../render/drawRobot';
 
 /** does the current spec exactly match a preset? (value compare) */
@@ -50,7 +51,11 @@ function specMatches(a: RobotSpec, b: RobotSpec): boolean {
     a.driveRpm === b.driveRpm &&
     (a.tankRpm ?? 0) === (b.tankRpm ?? 0) &&
     a.flywheelInertia === b.flywheelInertia &&
-    a.canSort === b.canSort
+    a.canSort === b.canSort &&
+    // the launcher: turret or fixed, its hood and its flywheel (all absent on a turret build)
+    (a.launcher ?? 'turret') === (b.launcher ?? 'turret') &&
+    a.hoodDeg === b.hoodDeg &&
+    flywheelEq(a.flywheel, b.flywheel)
   );
 }
 

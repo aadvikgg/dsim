@@ -3047,6 +3047,7 @@ button {
    utilities every season carries. Dimmer than the scoring buttons beside them, because a
    thumb that is hunting mid-match is hunting for SHOOT, not for PARK. */
 .mobile-btn.fling,
+.mobile-btn.flypreset,
 .mobile-btn.flip,
 .mobile-btn.drivemode,
 .mobile-btn.park {
