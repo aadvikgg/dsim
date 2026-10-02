@@ -17,6 +17,7 @@ import {
 import { type ChainEdge, MOUNT_ANGLE, RAIL_DIR, catalystMountOf, catalystMountPositions, catalystSwingOf, intakeMountEdges, intakeMountOf, isEdgePos, mountOrigin } from './mounts';
 import { CHAIN_CATALYST_NEAR, CHAIN_DEFAULT_CATALYST, CHAIN_TRACK_APPROACH, chainCatalystGeom } from './config';
 import { datan2, dcos, dsin, hyp, rot, wrapAngle } from '../../math';
+import { chainCatalystImportOrigin, chainImportMouths, chainImportRailHalf } from './importMech';
 import { rotatedPolyBounds } from '../../sim/imported';
 
 /**
@@ -69,9 +70,13 @@ export interface ChainIntakeMouth {
   x1: number;
   y0: number;
   y1: number;
+  /** an IMPORTED robot's mouth only: its chassis face along the edge's outward normal */
+  face?: number;
 }
 
 export function chainIntakeMouths(spec: RobotSpec): ChainIntakeMouth[] {
+  // an IMPORTED robot: the mouths fitted to its hull, off-centre if that is where they were placed
+  if (spec.imported) return chainImportMouths(spec);
   const it = CHAIN_INTAKES[spec.chainIntake ?? CHAIN_DEFAULT_INTAKE];
   const reach = INTAKE_PRESETS[spec.intake].reach;
   const hl = spec.length / 2;
@@ -278,13 +283,24 @@ export function catalystRailHalf(spec: RobotSpec): number {
   if ((spec.catalystType ?? CHAIN_DEFAULT_CATALYST) !== 'rail') return 0;
   const pos = catalystMountOf(spec);
   if (!isEdgePos(pos)) return 0; // coerceSpec folds a rail onto an edge; belt and braces
+  // an IMPORT: as far as its hull runs along the rail from the rail's origin, both ways
+  if (spec.imported) return chainImportRailHalf(spec, pos);
   const span = pos === 'front' || pos === 'back' ? spec.width : spec.length;
   return Math.max(0, span / 2 - CHAIN_RAIL_MARGIN);
 }
 
+/**
+ * Where the catalyst mechanism at `pos` is bolted, robot-local — the point its reach is measured
+ * from. A standard robot: the mount cell on its frame line (`mountOrigin`). An IMPORT: where the
+ * hull ends along that position's direction from the placed base (`chainCatalystImportOrigin`).
+ */
+export function catalystOrigin(spec: RobotSpec, pos: Exclude<ChainMountPos, 'center'>): Vec2 {
+  return spec.imported ? chainCatalystImportOrigin(spec, pos) : mountOrigin(spec, pos);
+}
+
 /** the catalyst mechanism's mouth in WORLD space for ONE mount position. */
 function mouthAt(rob: RobotState, pos: Exclude<ChainMountPos, 'center'>): Vec2 {
-  const o = mountOrigin(rob.spec, pos);
+  const o = catalystOrigin(rob.spec, pos);
   // a RAIL carriage slides ALONG the mounted side, so its mouth is offset from the mount
   // point by wherever the carriage currently is. This is the whole mechanism: without it
   // the rail was drawn but the claw still worked from one fixed spot.
@@ -323,7 +339,7 @@ export function catalystRailTarget(rob: RobotState, target: Vec2 | null): number
   // the target in the ROBOT frame — the rail is a chassis axis, so the projection has to
   // happen there rather than in world space
   const d = rot({ x: target.x - rob.pos.x, y: target.y - rob.pos.y }, -rob.heading);
-  const o = mountOrigin(rob.spec, pos);
+  const o = catalystOrigin(rob.spec, pos);
   // project onto the SAME axis the carriage actually slides along (see `railOffset`)
   const dir = RAIL_DIR[pos];
   const along = (d.x - o.x) * dir.x + (d.y - o.y) * dir.y;

@@ -1,4 +1,5 @@
-import type { GameId, GameSimModule } from './types';
+import type { ImportedMech, RobotSpec } from '../types';
+import type { GameId, GameSimModule, ImportMechHandle, ImportMechIssue } from './types';
 import { DECODE_SIM } from './decode/sim';
 import { CHAIN_SIM } from './chain/sim';
 import { BIOBUZZ_SIM } from './biobuzz/sim';
@@ -48,4 +49,27 @@ export function simModuleFor(id: GameId | undefined | null): GameSimModule {
 /** the sim module a world belongs to (its `game`, defaulting to DECODE). */
 export function simGameOf(world: { game?: GameId } | null | undefined): GameSimModule {
   return simModuleFor(world?.game);
+}
+
+/**
+ * IMPORTED ROBOTS: the plain-language checks on a build's mechanism placements
+ * (`docs/robot-import-plan.md` §1, "Plain-language checks"). `spec` is COERCED for `game`; a spec
+ * with no `imported` has nothing to check. `block` issues stop Save.
+ */
+export function validateImportedMech(spec: RobotSpec, game: GameId): ImportMechIssue[] {
+  if (!spec.imported) return [];
+  return simModuleFor(game).importMech?.issues(spec) ?? [];
+}
+
+/** IMPORTED ROBOTS: the placements the importer pre-fills for this build — from its archetype's
+ *  mount cells and its hull — already coerced, so saving them changes nothing */
+export function defaultImportedMech(game: GameId, spec: RobotSpec): ImportedMech {
+  if (!spec.imported) return {};
+  return simModuleFor(game).importMech?.defaults(spec) ?? {};
+}
+
+/** IMPORTED ROBOTS: what the top-down editor lets the player drag for this game and build */
+export function mechHandles(game: GameId, spec: RobotSpec): ImportMechHandle[] {
+  if (!spec.imported) return [];
+  return simModuleFor(game).importMech?.handles(spec) ?? [];
 }

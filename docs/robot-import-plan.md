@@ -94,10 +94,28 @@ export interface ImportedRobot {
   /** 3D only (BIOBUZZ): up to 3 stacked convex prisms for the tall parts, z0 < z1 within
    *  [0, heightIn], each hull ≤ 12 vertices. Absent = one prism of `hull` to `heightIn`. */
   bands?: { z0: number; z1: number; hull: Vec2[] }[];
-  /** mechanism placements; each game reads the fields it knows (lane 2 owns the exact shape). */
+  /** mechanism placements; each game reads the fields it knows. */
   mech?: ImportedMech;
 }
+
+export interface ImportedMech {
+  /** a turret's axis, or a turretless launcher's lip centre; z = release height at rest pitch */
+  shooter?: { x: number; y: number; z: number };
+  /** BIOBUZZ double turret: the NECTAR head */
+  shooter2?: { x: number; y: number; z: number };
+  /** span along an edge (y across front/back, x along left/right); one per edge, ordered
+   *  front, back, left, right, at most 4 */
+  intakes?: { edge: 'front' | 'back' | 'left' | 'right'; from: number; to: number }[];
+  /** the placer's BASE (Box Tube, catalyst); it reaches out of the hull along its mount */
+  place?: { x: number; y: number; z: number };
+}
 ```
+
+`mech` holds POSITIONS. Which edge an intake rides and which way a placer reaches stay the game's
+own mount fields (`intakeMount`, `shooterMount`, `bbMech.lift.mount`, `catalystMount`); a span on
+an edge the mount does not use is ignored, and DECODE reads the front edge only. Game ranges (a
+DECODE launch height of at least 10.5 in, a mouth no wider than the hull at its face) are applied
+where the sim READS them and reported by `validateImportedMech`, never written back.
 
 An imported spec ALSO carries ordinary parametric fields so any reader that knows nothing about
 imports sees a legal rectangle robot: `length`/`width` = the hull's AABB (clamped as today),
@@ -108,7 +126,10 @@ Coercion (`coerceImported` in `src/sim/imported.ts`, called from `coerceSpec` wi
 carry-across for every game): recompute the convex hull from the given points (deterministic
 monotone chain), drop non-finite input, quantise to 1/64 in, cap vertex counts, scale uniformly
 about the origin if the AABB exceeds 18 in, validate `id` against `/^[0-9a-f]{16}$/`, clamp
-wheels/bands/mech into range. Anything unrecoverable returns `undefined` (the robot plays as its
+wheels/bands into range. Mech, game-blind: every point's x/y moved to the nearest point inside
+the hull, z clamped to `[0, heightIn]`; intakes need a known edge, `from < to` (swapped), clamped
+to the AABB's range on that axis, at least 1 in wide, one per edge (first wins), ordered front,
+back, left, right. Anything unrecoverable returns `undefined` (the robot plays as its
 parametric fallback). **Idempotent**: `coerce(coerce(x))` deep-equals `coerce(x)`.
 
 ### 3.2 The library record (device only, IndexedDB `decodesim.robots`, registered in `storageKeys.ts`)

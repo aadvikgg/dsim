@@ -29,6 +29,7 @@ import {
   chassis3dMechShapes,
   chassis3dPocketShapes,
   chassis3dShapes,
+  import3dShapes,
   chassis3dReachShapes,
   clearChassis3dColliders,
   swapChassis3dReachColliders,
@@ -781,6 +782,33 @@ function fitChassis(
   heightIn: number,
   rampReady: boolean,
 ): void {
+  /**
+   * ⚠️ **AN IMPORTED ROBOT IS ITS BANDS** (`import3dShapes`, `bodies.ts`). The LOCAL robot gets the
+   * authority's own compound — the mouth carved below the slot, its pocket filler, the reach
+   * hardware — because an uncarved mouth is what predicts the wall-row lift below. A REMOTE robot
+   * gets the bands UNCARVED: at most three convex prisms, the import's analogue of the one cuboid
+   * plus mechanism shapes a standard remote robot gets.
+   */
+  if (r.spec.imported) {
+    const shapes = import3dShapes(r.spec, heightIn);
+    const local = body.isDynamic();
+    for (const sh of local ? shapes.chassis : shapes.remote) {
+      world3d.createCollider(
+        chassisMechDesc(RAPIER, sh).setTranslation(sh.cx, sh.cy, sh.cz).setDensity(0).setFriction(PHYS_FRICTION).setRestitution(0).setCollisionGroups(GROUP_CHASSIS),
+        body,
+      );
+    }
+    if (local) {
+      for (const pk of shapes.pocket) {
+        world3d.createCollider(
+          chassisMechDesc(RAPIER, pk).setTranslation(pk.cx, pk.cy, pk.cz).setDensity(0).setFriction(PHYS_FRICTION).setRestitution(0).setCollisionGroups(GROUP_POCKET),
+          body,
+        );
+      }
+    }
+    for (const sh of chassis3dReachShapes(r.spec, heightIn, rampReady)) world3d.createCollider(reachColliderDesc(RAPIER, sh), body);
+    return;
+  }
   const fe = robotExtents(r);
   const hx = (fe.front + fe.rear) / 2;
   const forward = (fe.front - fe.rear) / 2;
@@ -875,6 +903,10 @@ function fitChassis(
 /** how many colliders `fitChassis` puts on before the reach hardware — the cuboid plus one per
  * standing mechanism. `refitRobotBody`'s `keep` for a RAMP-only edge; it was a bare `1`. */
 function predictBaseColliderCount(body: InstanceType<Rapier3d['RigidBody']>, r: RobotState, heightIn: number): number {
+  if (r.spec.imported) {
+    const shapes = import3dShapes(r.spec, heightIn);
+    return body.isDynamic() ? shapes.chassis.length + shapes.pocket.length : shapes.remote.length;
+  }
   if (usesCompound(body, r, heightIn)) {
     return predictChassisShapes(r.spec, heightIn).length + chassis3dPocketShapes(r.spec, heightIn).length;
   }

@@ -5,6 +5,7 @@ import { classifierRect, flywheelSpinTarget, goalCenter, launchTriangles, viewAn
 import { activeDrive, driveParams, motorStep, motorStepVec, shoveMass } from './drivetrain';
 import { robotIntersectsConvex } from './physics';
 import { importedInertia, importedWheels } from './imported';
+import { decodeImportLaunchZ, decodeImportMouth, decodeImportTurret } from './importedMech';
 import { robotsEnabled } from './match';
 
 /** launch is legal when ANY part of the robot is inside a launch zone. Uses a
@@ -17,14 +18,15 @@ export function robotInLaunchZone(r: RobotState): boolean {
 }
 
 export function turretWorldPos(r: RobotState): { x: number; y: number } {
-  const o = rot({ x: r.spec.length * C.TURRET_OFFSET_FRAC, y: 0 }, r.heading);
+  // an IMPORT's turret is where it was placed on the CAD (`decodeImportTurret`)
+  const o = rot(r.spec.imported ? decodeImportTurret(r.spec) : { x: r.spec.length * C.TURRET_OFFSET_FRAC, y: 0 }, r.heading);
   return { x: r.pos.x + o.x, y: r.pos.y + o.y };
 }
 
 /** exact ballistic solution through the goal opening. The hood angle
  * steepens at close range so a solution exists at every distance. */
-function solveShot(d: number): { speed: number; angle: number } {
-  const dh = C.GOAL_OPENING_Z - C.LAUNCH_HEIGHT;
+function solveShot(d: number, launchZ: number = C.LAUNCH_HEIGHT): { speed: number; angle: number } {
+  const dh = C.GOAL_OPENING_Z - launchZ;
   const dd = Math.max(d, 0.5);
   // Minimum-speed trajectory that reaches the goal opening at (dd, dh). Unlike a
   // fixed-hood solve, it ALWAYS exists, is finite, and varies SMOOTHLY with
@@ -45,6 +47,8 @@ export function aimSolution(r: RobotState): { yaw: number; speed: number; angle:
   const tp = turretWorldPos(r);
   const g = goalCenter(r.alliance);
   const wv = { x: r.vel.x * C.SHOT_ROBOT_VEL_INHERIT, y: r.vel.y * C.SHOT_ROBOT_VEL_INHERIT };
+  // an IMPORT releases at its placed height (`decodeImportLaunchZ`); the same constant otherwise
+  const lz = r.spec.imported ? decodeImportLaunchZ(r.spec) : C.LAUNCH_HEIGHT;
   let dx = g.x - tp.x;
   let dy = g.y - tp.y;
 
@@ -54,12 +58,12 @@ export function aimSolution(r: RobotState): { yaw: number; speed: number; angle:
   // console.log(`  Target Goal Center: (${g.x.toFixed(2)}, ${g.y.toFixed(2)})`);
   // console.log(`  Vector to Goal (dx, dy): (${dx.toFixed(2)}, ${dy.toFixed(2)})`);
 
-  let sol = solveShot(hyp(dx, dy));
+  let sol = solveShot(hyp(dx, dy), lz);
   for (let i = 0; i < 3; i++) {
     const t = hyp(dx, dy) / Math.max(sol.speed * dcos(sol.angle), 1);
     dx = g.x - tp.x - wv.x * t;
     dy = g.y - tp.y - wv.y * t;
-    sol = solveShot(hyp(dx, dy));
+    sol = solveShot(hyp(dx, dy), lz);
   }
   const yaw = datan2(dy, dx);
   // console.log(`  Calculated Yaw: ${(yaw * 180 / Math.PI).toFixed(2)} deg`);
@@ -619,10 +623,12 @@ export function intakeClaims(world: World, commands: Map<number, RobotCommand>):
     const running = (commands.get(r.id)?.intake ?? false) || r.autoIntake;
     if (!running || r.hopper.length >= C.HOPPER_CAPACITY) continue;
     const preset = C.INTAKE_PRESETS[r.spec.intake];
-    const m = C.intakeMouth(r.spec);
+    // an IMPORT's mouth: ITS face, roller line, width and lateral centre (`decodeImportMouth`)
+    const imp = r.spec.imported ? decodeImportMouth(r.spec) : null;
+    const m = imp ? imp.mouth : C.intakeMouth(r.spec);
     if (m.drawIn <= 0) continue;
-    const hl = r.spec.length / 2;
-    const tip = hl + preset.reach;
+    const hl = imp ? imp.face : r.spec.length / 2;
+    const tip = imp ? imp.tip : hl + preset.reach;
     // The WHOLE mouth opening, not just the wheel span: on a wedge preset the wheels only
     // span the narrow throat, but the wedge funnels artifacts in from the full width of the
     // opening (product decision #10), and it is those outermost ones the chassis was
@@ -636,6 +642,7 @@ export function intakeClaims(world: World, commands: Map<number, RobotCommand>):
     for (const b of world.balls) {
       if (b.state.kind !== 'ground' || b.z > 6) continue;
       const local = rot({ x: b.pos.x - r.pos.x, y: b.pos.y - r.pos.y }, -r.heading);
+      if (imp) local.y -= imp.yc;
       if (
         local.x > hl - C.BALL_RADIUS &&
         local.x < tip + C.BALL_RADIUS &&
@@ -774,7 +781,7 @@ function fire(world: World, r: RobotState): void {
     fireBall.state = { kind: 'flight', target: r.alliance };
     fireBall.pos = { x: tp.x, y: tp.y };
     fireBall.vel = vel;
-    fireBall.z = C.LAUNCH_HEIGHT;
+    fireBall.z = r.spec.imported ? decodeImportLaunchZ(r.spec) : C.LAUNCH_HEIGHT;
     fireBall.vz = speed * dsin(angle);
   } else {
     // fallback: no physical held ball (shouldn't happen once preloads are held)
@@ -784,7 +791,7 @@ function fire(world: World, r: RobotState): void {
       state: { kind: 'flight', target: r.alliance },
       pos: { x: tp.x, y: tp.y },
       vel,
-      z: C.LAUNCH_HEIGHT,
+      z: r.spec.imported ? decodeImportLaunchZ(r.spec) : C.LAUNCH_HEIGHT,
       vz: speed * dsin(angle),
     });
   }
@@ -823,15 +830,19 @@ export function intakeSuction(world: World, r: RobotState, cmd: RobotCommand): v
   if (!running || r.hopper.length >= C.HOPPER_CAPACITY) return;
 
   const preset = C.INTAKE_PRESETS[r.spec.intake];
-  const m = C.intakeMouth(r.spec); // vector's mouth spans the chassis width
-  const hl = r.spec.length / 2;
-  const tip = hl + preset.reach; // the roller line (balls pass UNDER it)
+  // an IMPORT's mouth (`decodeImportMouth`): everything below is written in the mouth's own
+  // frame, so its lateral centre `yc` is taken off `local.y` and the throat sits at (face, yc)
+  const imp = r.spec.imported ? decodeImportMouth(r.spec) : null;
+  const m = imp ? imp.mouth : C.intakeMouth(r.spec); // vector's mouth spans the chassis width
+  const hl = imp ? imp.face : r.spec.length / 2;
+  const tip = imp ? imp.tip : hl + preset.reach; // the roller line (balls pass UNDER it)
   const velRobot = rot(r.vel, -r.heading);
   const captureHalf = m.throatHalf; // the funnel throat / the vectored-to centre
 
   // the intake can't reach INTO the classifier: no vacuuming through the ramp wall
-  const capWx = r.pos.x + dcos(r.heading) * (hl + C.BALL_RADIUS);
-  const capWy = r.pos.y + dsin(r.heading) * (hl + C.BALL_RADIUS);
+  const capImp = imp ? rot({ x: hl + C.BALL_RADIUS, y: imp.yc }, r.heading) : null;
+  const capWx = capImp ? r.pos.x + capImp.x : r.pos.x + dcos(r.heading) * (hl + C.BALL_RADIUS);
+  const capWy = capImp ? r.pos.y + capImp.y : r.pos.y + dsin(r.heading) * (hl + C.BALL_RADIUS);
   for (const a of ['red', 'blue'] as const) {
     const rect = classifierRect(a);
     if (capWx > rect.x0 - 0.5 && capWx < rect.x1 + 0.5 && capWy > rect.y0 && capWy < rect.y1) {
@@ -848,6 +859,7 @@ export function intakeSuction(world: World, r: RobotState, cmd: RobotCommand): v
   for (const b of world.balls) {
     if (b.state.kind !== 'ground' || b.z > 6) continue;
     const local = rot({ x: b.pos.x - r.pos.x, y: b.pos.y - r.pos.y }, -r.heading);
+    if (imp) local.y -= imp.yc;
 
     /**
      * ...AND, ON A FUNNEL PRESET, THE ROLLER ITSELF. Its compliant wheels span the whole mouth
@@ -947,8 +959,10 @@ export function updateIntake(world: World, r: RobotState, cmd: RobotCommand): vo
   const running = cmd.intake || r.autoIntake;
   if (!running || r.hopper.length >= C.HOPPER_CAPACITY) return;
 
-  const m = C.intakeMouth(r.spec); // vector's mouth spans the chassis width
-  const hl = r.spec.length / 2;
+  // an IMPORT's mouth (`decodeImportMouth`), read in the mouth's own frame (`local.y − yc`)
+  const imp = r.spec.imported ? decodeImportMouth(r.spec) : null;
+  const m = imp ? imp.mouth : C.intakeMouth(r.spec); // vector's mouth spans the chassis width
+  const hl = imp ? imp.face : r.spec.length / 2;
   const velRobot = rot(r.vel, -r.heading);
   // ALL intakes capture at the CENTER, directly under the compliant wheels
   // (funnel throat for sloped/triangle; the vectored-to center for vector)
@@ -969,14 +983,15 @@ export function updateIntake(world: World, r: RobotState, cmd: RobotCommand): vo
    * their identity in their LATERAL bounds and their gates — which is where their identity
    * actually lives. See INTAKE_TREAD_FRAC for the derivation and for the floor under it.
    */
-  const axle = C.intakeAxleX(r.spec);
+  const axle = imp ? imp.axle : C.intakeAxleX(r.spec);
   const nip = C.intakeNip(r.spec);
   const nipLo = axle - nip.back;
   const nipHi = axle + nip.front;
 
   // the intake can't reach INTO the classifier: no vacuuming through the ramp wall
-  const capWx = r.pos.x + dcos(r.heading) * (hl + C.BALL_RADIUS);
-  const capWy = r.pos.y + dsin(r.heading) * (hl + C.BALL_RADIUS);
+  const capImp = imp ? rot({ x: hl + C.BALL_RADIUS, y: imp.yc }, r.heading) : null;
+  const capWx = capImp ? r.pos.x + capImp.x : r.pos.x + dcos(r.heading) * (hl + C.BALL_RADIUS);
+  const capWy = capImp ? r.pos.y + capImp.y : r.pos.y + dsin(r.heading) * (hl + C.BALL_RADIUS);
   for (const a of ['red', 'blue'] as const) {
     const rect = classifierRect(a);
     if (capWx > rect.x0 - 0.5 && capWx < rect.x1 + 0.5 && capWy > rect.y0 && capWy < rect.y1) {
@@ -989,6 +1004,7 @@ export function updateIntake(world: World, r: RobotState, cmd: RobotCommand): vo
   for (const b of world.balls) {
     if (b.state.kind !== 'ground' || b.z > 6) continue;
     const local = rot({ x: b.pos.x - r.pos.x, y: b.pos.y - r.pos.y }, -r.heading);
+    if (imp) local.y -= imp.yc;
     // THE fore-aft grab, for every branch below. Fore-aft only — each branch still decides
     // for itself how far ACROSS the mouth it reaches, and on what terms.
     const onNip = local.x > nipLo && local.x < nipHi;
@@ -1095,7 +1111,7 @@ export function updateIntake(world: World, r: RobotState, cmd: RobotCommand): vo
     // resident front ball on that side slides to the other side to make room
     let side = 0;
     if (r.spec.intake === 'triangle' && slot >= 1) {
-      side = loc.y >= 0 ? 1 : -1;
+      side = (imp ? loc.y - imp.yc : loc.y) >= 0 ? 1 : -1;
       for (const o of world.balls) {
         if (o.state.kind === 'held' && o.state.robot === r.id && o.state.slot >= 1 && o.state.side === side) {
           o.state.side = -side;

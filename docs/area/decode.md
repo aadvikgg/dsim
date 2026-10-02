@@ -266,6 +266,17 @@ handle (`GATE_ARM_SHORT`) pokes OUT into the gate zone (what a robot pushes) and
   `WHEEL_INSET`): intake/turret overhang neither earns nor spoils credit. The turret never
   protrudes (`TURRET_OFFSET_FRAC`). The chassis may be NARROWER than the intake
   (`ROBOT_MIN_WIDTH` 10 < vector's 17).
+- **AN IMPORTED ROBOT'S INTAKE** (`decodeImportMouth`, `src/sim/importedMech.ts`; the shared rules
+  are `docs/area/physics.md` "Imported robots: mechanisms"). FRONT ONLY. The preset keeps the depth
+  (reach, roller, nip, lid, cadences, the lip); the import moves the mouth to where its hull ends
+  inside the placed span (`tip`), puts the face `reach` behind it and gives it the span's width
+  (funnels `[throatHalf + 1.5, 9]`, vector `[5, 9]`), off-centre by `yc`. Every intake window —
+  claim, suction, capture, roof, classifier guard — reads that one mouth with `local.y − yc`, so
+  capture ⊆ suction ⊆ claim holds by construction. The artifact solids are the hull behind the
+  face plus the standard wedge quads (or the hull flanking the mouth with its rails); held slots
+  sit behind the import's own roller line on its centreline. The turret is the placed shooter,
+  the launch height the placed `z`, never under 10.5 in (a lower release would be pushed out of
+  its own hull by the flight-contact pass).
 
 ## Scoring + multi-robot
 

@@ -12,6 +12,46 @@ import type {
 import type { RobotSetup } from '../sim/spawn';
 import type { RobotSolids } from '../sim/artifactSolids';
 import type { IntakeStyle } from '../types';
+import type { ImportedEdge, ImportedMech } from '../types';
+
+/**
+ * IMPORTED ROBOTS — what the mechanism placement editor needs from a game (`GameSimModule.
+ * importMech`, wrapped by `validateImportedMech` / `defaultImportedMech` / `mechHandles` in
+ * `./sim.ts`). DOM-free; every input is a COERCED spec (`coerceSpec(…, game)`) carrying `imported`.
+ */
+export type ImportMechHandleKey = 'shooter' | 'shooter2' | 'place' | `intake:${ImportedEdge}`;
+
+/** one thing the player may drag in the top-down editor for this build */
+export interface ImportMechHandle {
+  key: ImportMechHandleKey;
+  /** a POINT inside the hull (`mech.shooter` / `shooter2` / `place`), or a SPAN along `edge`
+   *  (`mech.intakes`) */
+  kind: 'point' | 'span';
+  /** sentence-case label for the editor */
+  label: string;
+  /** the edge a span runs along */
+  edge?: ImportedEdge;
+  /** a point with a release height: the height the sim uses now, and the range it accepts */
+  z?: number;
+  zMin?: number;
+  zMax?: number;
+}
+
+/** one plain-language check on a placement. `block` stops Save; `warn` is shown beside it. */
+export interface ImportMechIssue {
+  level: 'block' | 'warn';
+  code: string;
+  text: string;
+  /** the handle the issue is about, when there is one */
+  handle?: ImportMechHandleKey;
+}
+
+export interface ImportMechSlot {
+  issues(spec: RobotSpec): ImportMechIssue[];
+  /** the placements the importer pre-fills from the archetype and the hull (coerced) */
+  defaults(spec: RobotSpec): ImportedMech;
+  handles(spec: RobotSpec): ImportMechHandle[];
+}
 
 /**
  * The GAME-ABSTRACTION seam (DOM-free core types).
@@ -350,6 +390,11 @@ export interface GameSimModule {
    * solve collides on, what its pin test would measure against, and what its sprite must draw.
    */
   artifactSolids?(r: RobotState, heldBalls: readonly Artifact[], radius: number): RobotSolids;
+  /**
+   * IMPORTED ROBOTS: this game's placement handles, pre-fills and checks (`ImportMechSlot`). Absent
+   * ⇒ the editor offers nothing to place and every check passes.
+   */
+  importMech?: ImportMechSlot;
   /**
    * WHICH PHYSICS BACKENDS THIS GAME'S UI MAY OFFER, for a room or practice setup — absent ⇒
    * only `'2d'`, which is every game before BIOBUZZ's Day 1 seam. BIOBUZZ fills

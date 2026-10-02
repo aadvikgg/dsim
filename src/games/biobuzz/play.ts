@@ -15,7 +15,6 @@ import {
   BB_HALF_Y,
   BB_HIVE_OPEN_Z,
   BB_HOOD_DEFAULT_DEG,
-  BB_LAUNCH_Z0,
   BB_NECTAR_R,
   BB_POLLEN_R,
   BB_POLLEN_WALL_REST,
@@ -36,6 +35,7 @@ import { capturePollen, hiveCellTarget, scoreTargets, takeHeld } from './element
 import { bbBites, bbElementRadius, flowerFits, flowerRetrieve, flowerStackZ, type BbElementKind } from './flower';
 import { hiveAccepts, hiveCellPos, hiveDeflect, hiveStep, hiveTakingSide, spillPoses } from './hive';
 import { bbIntakeKindOf, bbIsTurreted, bbLauncherOf, bbLiftOf } from './mechs';
+import { bbDumpZ } from './importMech';
 import {
   type BbMouthAxes,
   type BbShot,
@@ -992,7 +992,7 @@ export function bbFlowerAtIntakeMouth(r: RobotState, reach: BbFlowerReach): BbFl
     const local = rot({ x: f.x - r.pos.x, y: f.y - r.pos.y }, -r.heading);
     for (const m of mouths) {
       const ax = mouthAxes(m, hl, hw);
-      const v = local.x * ax.p.x + local.y * ax.p.y;
+      const v = local.x * ax.p.x + local.y * ax.p.y - ax.vc;
       const u = local.x * ax.n.x + local.y * ax.n.y - ax.uOut;
       if (reach.edgeGrip !== undefined) {
         // SIDE ROLLERS ARE A SOLID WHEEL NOW, SO THE GATE IS CONTACT, NOT A LATERAL BAND PLUS A
@@ -1094,7 +1094,7 @@ export function retrieveFromFlower(
 function bbRampFootprintCorners(rob: RobotState, ax: BbMouthAxes): Vec2[] {
   const corners: Vec2[] = [];
   for (const u of [ax.uOut, ax.uOut + BB_RAMP_OUT]) {
-    for (const v of [-ax.half, ax.half]) {
+    for (const v of [ax.vc - ax.half, ax.vc + ax.half]) {
       const local = { x: u * ax.n.x + v * ax.p.x, y: u * ax.n.y + v * ax.p.y };
       const w = rot(local, rob.heading);
       corners.push({ x: rob.pos.x + w.x, y: rob.pos.y + w.y });
@@ -1311,7 +1311,7 @@ export function bbDumpShotEnters(
   if (!throws || throws.length === 0) return false;
   const mid = (throws.length - 1) >> 1;
   for (let i = 0; i < throws.length; i++) {
-    const ok = bbFlightEnters(hive, r.alliance, throws[i].origin, BB_LAUNCH_Z0, throws[i].vel, dt, i === mid ? traceMid : undefined);
+    const ok = bbFlightEnters(hive, r.alliance, throws[i].origin, bbDumpZ(r.spec), throws[i].vel, dt, i === mid ? traceMid : undefined);
     if (!ok) return false;
   }
   return true;

@@ -28,11 +28,11 @@ import {
   type RoomConfig,
   type ServerMsg,
 } from '../src/net/protocol';
-import { DEFAULT_ASSISTS, DEFAULT_SPEC, coerceSpec } from '../src/sim/spawn';
+import { DEFAULT_ASSISTS, DEFAULT_SPEC } from '../src/sim/spawn';
+import { IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_REFUSED_HERE, IMPORT_REFUSED_RANKED, IMPORT_ROOM_NEEDS_UPDATE } from '../src/net/imported';
 import * as IV from '../src/net/importVisuals';
 import { visualBytesInUse } from '../server/importVisuals';
 import { glbBytes, pngBytes } from './visualFixtures';
-import { IMPORT_MEMBER_NEEDS_UPDATE, IMPORT_REFUSED_HERE, IMPORT_REFUSED_RANKED, IMPORT_ROOM_NEEDS_UPDATE, isImportedSpec } from '../src/net/imported';
 import type { Alliance, RobotCommand } from '../src/types';
 import type { Client } from '../server/room';
 import {
@@ -732,7 +732,7 @@ async function scenarios(s: Server): Promise<void> {
     K.close();
   }
   // the rest read the roster the room holds, which is what `coerceSpec` kept
-  if (isImportedSpec(coerceSpec({ ...DEFAULT_SPEC, imported: IMP }, DEFAULT_SPEC, 'decode'))) {
+  {
     const room = newCode();
     const P = await open();
     P.send({ t: 'join', room, config: versus, player: impP('P', 'red'), caps: CLIENT_CAPS });
@@ -753,8 +753,6 @@ async function scenarios(s: Server): Promise<void> {
     check(L('...while a build with it is seated'), !!(await G.until('welcome')));
     P.close();
     G.close();
-  } else {
-    console.log(`SKIP B[${s.label}]: [needs coerceSpec carry] a room holding an imported robot turns away a build without the cap — coerceSpec does not carry \`imported\` yet`);
   }
 
   await visuals(s);
@@ -771,10 +769,6 @@ async function visuals(s: Server): Promise<void> {
   const L = (name: string): string => `B[${s.label}]: ${name}`;
   const versus: RoomConfig = { kind: 'versus', game: 'decode' };
   const impP = (name: string, alliance: Alliance) => ({ ...makePlayer(name, alliance, 0), spec: { ...DEFAULT_SPEC, name, imported: IMP } as typeof DEFAULT_SPEC });
-  if (!isImportedSpec(coerceSpec({ ...DEFAULT_SPEC, imported: IMP }, DEFAULT_SPEC, 'decode'))) {
-    console.log(`SKIP ${L('the visuals relay')}: coerceSpec does not carry \`imported\``);
-    return;
-  }
   const png = pngBytes(128, 128, { noise: true, seed: 8 }); // 3 chunks
   const mesh = glbBytes({ tris: 29_000 }); // ~1 MiB, 43 chunks: the largest asset the relay takes
   const noVisuals = CLIENT_CAPS.filter((c) => c !== IV.IMPORT_VISUALS_CAP);
