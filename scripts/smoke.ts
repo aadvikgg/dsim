@@ -30060,6 +30060,14 @@ const IMP_STANDARD_PINS: Record<string, string> = {
   'chain teleop': 'rr=1281 2256841879:3095239556 3284001669:73183289 1872871630:404922659',
   'biobuzz auto': 'rr=991 4255951604:2662367511 660269574:1959277593 4168578138:2355650975',
   'biobuzz teleop': 'rr=991 1190480768:2589840997 1619190486:802938886 1865481434:3779862946',
+  'bb3d auto': 'rr=693 3060472950:2940359141 1030663276:691242207',
+  'bb3d teleop': 'rr=693 3798170826:4183526500 3022533868:2001194370',
+};
+// Re-pinned 2026-10-02 for `SIM_PATCH` 3: BIOBUZZ 3D takes the wall square-up inside its solve
+// (`sim3d/step3dImpl.ts` stage 6b), and these robots chase each other into the walls. The pins they
+// had before are kept below, and a world stepped under patch 2 must still land on them — which is
+// both the proof that the patch gate holds for old replays and that nothing else moved.
+const IMP_STANDARD_PINS_PATCH2: Record<string, string> = {
   'bb3d auto': 'rr=536 3017453969:3234063733 3359223633:3518342206',
   'bb3d teleop': 'rr=536 1542058217:1431457225 162820593:121201075',
 };
@@ -30069,8 +30077,10 @@ const IMP_STANDARD_SPECS: Partial<RobotSpec>[] = [
   { drivetrain: 'swerve', width: 16 },
   { drivetrain: 'xdrive', length: 13, width: 14 },
 ];
-function impStandardRun(g: GameId | 'bb3d', phase: 'auto' | 'teleop'): string {
+function impStandardRun(g: GameId | 'bb3d', phase: 'auto' | 'teleop', patch?: number): string {
   const { w, step: st } = impWorld(g, IMP_STANDARD_SPECS);
+  // a replay recorded under an older `SIM_PATCH` — hashed WITHOUT the field, so the pin is the world's
+  if (patch !== undefined) w.simPatch = patch;
   w.match.phase = phase;
   w.match.phaseTimeLeft = phase === 'auto' ? 30 : 25;
   const out: string[] = [];
@@ -30080,7 +30090,7 @@ function impStandardRun(g: GameId | 'bb3d', phase: 'auto' | 'teleop'): string {
     for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, impChase(w, i, t));
     st(w, 1 / 60, cmds);
     rr += w.rrContacts.length;
-    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(w))}`);
+    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(patch === undefined ? w : { ...w, simPatch: undefined }))}`);
   }
   return `rr=${rr} ${out.join(' ')}`;
 }
@@ -30090,6 +30100,11 @@ function impStandardCheck(g: GameId | 'bb3d'): void {
     const key = `${g} ${phase}`;
     const got = impStandardRun(g, phase);
     check(`imported robots: STANDARD robots step byte-identically — ${key} (worldHash + whole-world JSON, ${g === 'bb3d' ? 600 : 900} ticks)`, got === IMP_STANDARD_PINS[key], got);
+    const before = IMP_STANDARD_PINS_PATCH2[key];
+    if (before) {
+      const old = impStandardRun(g, phase, 2);
+      check(`imported robots: ...and under SIM_PATCH 2 (a replay recorded before the 3D wall square-up moved into the solve) the same scene still steps to its old pin — ${key}`, old === before, old);
+    }
   }
 }
 // one block per game, so the sharder can spread them
@@ -32555,8 +32570,11 @@ const L2_MECH_PINS: Record<string, string> = {
   decode: 'held=3611 2049313317:4014017715 2788731338:1360918128 1577943677:2318776227',
   chain: 'held=2913 280568408:432347152 3067491810:3978456955 2730570165:2501872899',
   biobuzz: 'held=1025 2762021873:2009800956 2776997930:279128570 4136908741:1973256459',
-  bb3d: 'held=907 4176744764:1760924406 112866128:1298346330',
+  bb3d: 'held=693 385226777:3749707125 2128002571:24819118',
 };
+// `bb3d` re-pinned 2026-10-02 for `SIM_PATCH` 3 (the 3D wall square-up inside the solve); the old
+// pin is the patch-2 run's, checked beside it — see `IMP_STANDARD_PINS_PATCH2`.
+const L2_MECH_PINS_PATCH2 = { bb3d: 'held=907 4176744764:1760924406 112866128:1298346330' };
 const L2_MECH_SPECS: Record<'decode' | 'chain' | 'biobuzz', Partial<RobotSpec>[]> = {
   decode: [
     { intake: 'sloped', canSort: true },
@@ -32613,7 +32631,7 @@ function l2MechCmd(w: World, i: number, tick: number): RobotCommand {
   };
 }
 
-function l2MechRun(g: GameId | 'bb3d', ticks: number): string {
+function l2MechRun(g: GameId | 'bb3d', ticks: number, patch?: number): string {
   const key = g === 'bb3d' ? 'biobuzz' : g;
   const mod = simModuleFor(key);
   const w = mod.createWorld(
@@ -32629,6 +32647,7 @@ function l2MechRun(g: GameId | 'bb3d', ticks: number): string {
     undefined,
     g === 'biobuzz' ? '2d' : g === 'bb3d' ? '3d' : undefined,
   );
+  if (patch !== undefined) w.simPatch = patch;
   w.match.phase = 'teleop';
   w.match.phaseTimeLeft = 90;
   const out: string[] = [];
@@ -32638,7 +32657,7 @@ function l2MechRun(g: GameId | 'bb3d', ticks: number): string {
     for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, l2MechCmd(w, i, t));
     mod.step(w, 1 / 60, cmds);
     for (const r of w.robots) held += r.hopper.length;
-    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(w))}`);
+    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(patch === undefined ? w : { ...w, simPatch: undefined }))}`);
   }
   return `held=${held} ${out.join(' ')}`;
 }
@@ -32658,6 +32677,8 @@ function l2MechRun(g: GameId | 'bb3d', ticks: number): string {
   await initPhysics3d();
   const got = l2MechRun('bb3d', 600);
   check('imported mechanisms: STANDARD robots step byte-identically through every intake kind/launcher/Box Tube — biobuzz 3D (worldHash + whole-world JSON, 600 ticks)', got === L2_MECH_PINS.bb3d, got);
+  const old = l2MechRun('bb3d', 600, 2);
+  check('imported mechanisms: ...and under SIM_PATCH 2 the biobuzz 3D scene still steps to the pin it had before the wall square-up moved into the solve', old === L2_MECH_PINS_PATCH2.bb3d, old);
 }
 
 /** an 18 × 16 robot with its front corners chamfered: a hull no box describes */

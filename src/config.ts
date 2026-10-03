@@ -244,8 +244,10 @@ export const SIM_VERSION = 5;
  *   2  BIOBUZZ 3D: a hive cell's floor and back colliders stand `BB3_TRAY_OUTER_SKIN` (0.5 in)
  *      out past the CAD surface instead of 1.5, so a NECTAR no longer wedges between the down
  *      cell and the ACM panel (`sim3d/bodies.ts`, `trayOuterSkin`).
+ *   3  BIOBUZZ 3D: the wall square-up is a turn the SOLVE makes (one tick of extra yaw rate),
+ *      not a heading written after it (`sim3d/step3dImpl.ts` stage 6b) — the online wall bump.
  */
-export const SIM_PATCH = 2;
+export const SIM_PATCH = 3;
 
 /** a toggle-button release shorter than this is a dropout, not a release (`debouncedPress`,
  * `src/sim/robot.ts`). 2.5 ticks: a 3-tick gap, the fastest real re-press in replay 1dc6eb8f,

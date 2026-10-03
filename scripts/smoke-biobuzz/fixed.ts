@@ -50,8 +50,12 @@ function fnv(s: string): number {
  */
 const PINS: Record<'2d' | '3d', string> = {
   '2d': 'fired=17 2126857166:3339463799 3482816271:2456356880 1881524541:1265804104',
-  '3d': 'fired=14 792568759:3921678035 1757396625:728582646',
+  '3d': 'fired=11 2256851025:431673127 2013511614:1719602821',
 };
+/** `'3d'` was re-recorded 2026-10-02 for `SIM_PATCH` 3 — the 3D wall square-up moved into the solve,
+ * not a fixed-shooter change. This is the pin it had, and a world stepped under patch 2 (a replay
+ * recorded before) must still reproduce it exactly. */
+const PIN_3D_PATCH2 = 'fired=14 792568759:3921678035 1757396625:728582646';
 const PIN_SPECS: Partial<RobotSpec>[] = [
   { drivetrain: 'tank', driveRpm: 286, length: 15, width: 16, intakeMount: 'front', scoreMode: 'dumper', shooterMount: 'front', ballStorage: 4, bbMech: { launcher: { kind: 'dumper', mount: 'front', hoodDeg: 75 }, lift: null } },
   { scoreMode: 'turret', intakeMount: 'front', bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 75 }, lift: { kind: 'vslide', mount: 'back' }, intake: { kind: 'sweeper' } } },
@@ -86,7 +90,7 @@ function pinCmd(w: World, i: number, tick: number): RobotCommand {
     fire: r.hopper.length > 0 && tick % 40 < 25,
   };
 }
-function pinRun(physics: '2d' | '3d', ticks: number): string {
+function pinRun(physics: '2d' | '3d', ticks: number, patch?: number): string {
   const mod = simModuleFor('biobuzz');
   const w = mod.createWorld(
     'match',
@@ -101,6 +105,7 @@ function pinRun(physics: '2d' | '3d', ticks: number): string {
     undefined,
     physics,
   );
+  if (patch !== undefined) w.simPatch = patch;
   w.match.phase = 'teleop';
   w.match.phaseTimeLeft = 90;
   const out: string[] = [];
@@ -110,7 +115,7 @@ function pinRun(physics: '2d' | '3d', ticks: number): string {
     for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, pinCmd(w, i, t));
     mod.step(w, SIM_DT, cmds);
     for (const r of w.robots) if (r.lastFireAt === w.time) fired++;
-    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${fnv(JSON.stringify(w))}`);
+    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${fnv(JSON.stringify(patch === undefined ? w : { ...w, simPatch: undefined }))}`);
   }
   return `fired=${fired} ${out.join(' ')}`;
 }
@@ -169,6 +174,8 @@ export function fixedChecks(check: Check): void {
   {
     const got = pinRun('3d', 600);
     check('fixed: …and in 3D (600 ticks)', got === PINS['3d'], got);
+    const old = pinRun('3d', 600, 2);
+    check('fixed: …and under SIM_PATCH 2 the 3D run still lands on its pre-patch pin', old === PIN_3D_PATCH2, old);
   }
 
   // ---- the coercer ------------------------------------------------------------------------------
