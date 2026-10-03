@@ -998,10 +998,26 @@ newest-first — it is never ranked, which is what keeps the two eras from meeti
     placeholder that stopped at the deck would hide half the robot a remote driver is about to hit.
   - **THE KEY.** `bbSpecKey` appends the descriptor's digest (id + FNV-1a of its JSON) for an import
     only, so a standard key is byte-identical. The MESH STATE (`importedMeshKey`:
-    `id@meshVersion:hull|mesh`, which also starts the load) is per device, like the wheel tier:
+    `id@meshVersion#digest:hull|mesh`, which also starts the load) is per device, like the wheel tier.
+    ⚠️ A mesh SLOT is one DESCRIPTOR, not one id: the robot edited on another device arrives as the
+    same id with another hull while this device's library still holds the old model, and a slot keyed
+    by id alone wore it on the new hull. The slot loads through `importedMeshBlob(id, imp)`, which
+    refuses a copy made for another version (`docs/area/robot-import.md`, rule 5), so it is the
+    placeholder until the newest file is imported. RENDER lane "a mesh slot answers for one
+    DESCRIPTOR".
+    `sync` folds the mesh state into its local key and the preview into `setSpec`'s, and the preview also
     `sync` folds it into its local key and the preview into `setSpec`'s, and the preview also
     re-keys itself on `onImportedMeshChange`, because the parse lands between two React renders.
     The placeholder swaps for the mesh on the first frame after the parse.
+  - ⚠️ **AN IMPORT'S FLAT TOP IS A DECK** (`importTopIsBroad`, `sim3d/engineImpl.ts`). Its bands are
+    convex prisms, which Rapier builds as `ConvexPolyhedron`, the shape `groundRoll3d`'s narrow-hull
+    rule keeps for the field's decimated CAD hulls, so a POLLEN set down on an import's top was
+    kicked and, with no rolling law off the floor, rolled at 2–3 in/s for the whole match and off the
+    edge. A `GROUP_CHASSIS` prism (only an import builds one; a standard robot is boxes, cylinders and
+    rounded boxes, so it is untouched) at least the element's diameter across (`planWidth` + the
+    contact skin each side) counts as broad, like the standard `Cuboid` deck; a thin tower band stays
+    narrow and the ball rolls off it, the Box Tube rule. SIM3D lane "imported robot 3d: a POLLEN set
+    down on an import's flat CAD top RESTS".
   - RENDER lane: `importedRobotChecks` (placeholder bounds = hull/bands and inside the hull, the
     key, the real GLTFLoader path from a byte-built GLB `fixtures/importGlb.ts`, the swap in `sync`,
     disposal, the template cap). Pictures: `scripts/robot-import/render/` (an offscreen Electron
@@ -2022,15 +2038,21 @@ spans no edge (a Box Tube may sit on the corner beside it), carries POLLEN only,
   stands in the band (`ai/policy.ts` `dRange`).
 
 **THE PRESETS** are the StarterBot (`presets.ts`, the one real kit robot, still alone in front of
-the rule-off) and four demos in `config.ts`. ⚠️ The StarterBot is a FIXED launcher since
-2026-10-02 (it was modelled as a front dumper); its 43.0 below was measured as the dumper and has
-not been re-measured. Scored head-to-head against the StarterBot with HARD
-bots, 3D, a full 150-s match: **Sniper 70.4 · Skimmer 68.0 · Forager 63.6 · Pollinator 55.0 ·
-StarterBot 43.0.**
+the rule-off) and four demos in `config.ts`. Scored 2026-09-22 head-to-head against the StarterBot
+with HARD bots, 3D, a full 150-s match: **Sniper 70.4 · Skimmer 68.0 · Forager 63.6 · Pollinator
+55.0 · StarterBot 43.0** (the StarterBot then a front dumper).
+
+⚠️ **THE STARTERBOT IS A FIXED LAUNCHER SINCE 2026-10-02, RE-MEASURED ON THE BENCH** (`npm run
+bench:ai -- --builds preset:starterbot --tiers hard --seeds 5`, 3D, every bot on the card, seeds
+7000–7004). Fixed launcher: **solo 166.2** (151–176), **2v2 153.5** per alliance (134–168). The front
+dumper it replaced, the same seeds and protocol: solo 242.6, 2v2 284.8. So the card scores about a
+third less solo and a half less in a 2v2: POLLEN only (no NECTAR), and a shot only from inside its
+26–46 in band (`bbFixedBand`). These are the bench's numbers, not the 2026-09-22 head-to-head
+protocol, so they do not compare with the column below; the demo cards were not re-measured.
 
 | card | build | mass | rpm | floor | score |
 |---|---|---|---|---|---|
-| StarterBot | tank · front sweeper · front dumper | 18 (ON its floor — no kit publishes a weight) | 286 | 18.00 | 43.0 |
+| StarterBot | tank · front sweeper · front FIXED launcher (a front dumper when scored) | 18 (ON its floor — no kit publishes a weight) | 286 | 18.00 | 43.0 as the dumper; the bench above for the fixed launcher |
 | **Pollinator** (`BB_PRESETS[0]`) | mecanum · front sweeper · centre turret · back Box Tube | 24.5 | 435 | 19.50 | 55.0 |
 | Forager | butterfly · FRONT+BACK sweepers · front dumper | 30.5 | 420 / 300 | 23.50 | 63.6 |
 | Skimmer | xdrive · front sweeper · right+left double turret | 27.5 | 520 | 21.50 | 68.0 |
