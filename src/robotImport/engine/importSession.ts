@@ -13,6 +13,7 @@
 import { bakeSceneHere, type StoredScene } from './bakeMesh';
 import { ImportError, abortError } from './importError';
 import { partBuffers, type ImportProgress, type ImportRequest, type ImportResponse } from './importProtocol';
+import { liteMesh } from './lite';
 import { loadModel, readStepFile, resolveFiles } from './load';
 import { WORKER_FORMATS } from './parse';
 import { simplifyModel, type PreparedModel } from './prepare';
@@ -68,6 +69,33 @@ export async function bakeSceneOff(scene: StoredScene): Promise<{ glb: ArrayBuff
       bakeSceneHere(scene).then(resolve, reject);
     };
     worker.postMessage({ kind: 'bake', scene } satisfies ImportRequest);
+  });
+}
+
+/**
+ * The relay's lighter float GLB (`liteMesh`) in a fresh import worker; on this thread where a worker
+ * cannot start or stops. From a 250k-triangle stored mesh it is 0.8 s of simplifying and exporting
+ * (Node, 2026-10-03), which on this thread froze the lobby the first time a room asked for the robot.
+ * `glb` is copied, never transferred: the caller keeps it.
+ */
+export async function liteMeshOff(glb: ArrayBuffer, maxBytes: number): Promise<ArrayBuffer | null> {
+  const worker = spawn();
+  if (!worker) return liteMesh(glb, maxBytes);
+  return new Promise((resolve, reject) => {
+    worker.onmessage = (e: MessageEvent<ImportResponse>) => {
+      const m = e.data;
+      if (m.kind === 'progress') return;
+      worker.terminate();
+      if (m.kind === 'lite') resolve(m.glb);
+      else reject(new Error(m.kind === 'error' ? m.message : 'unexpected answer from the import worker'));
+    };
+    worker.onerror = (e) => {
+      e.preventDefault();
+      worker.terminate();
+      console.warn('[import] the lighter mesh worker stopped; making it on the main thread', e.message);
+      liteMesh(glb, maxBytes).then(resolve, reject);
+    };
+    worker.postMessage({ kind: 'lite', glb: glb.slice(0), maxBytes } satisfies ImportRequest);
   });
 }
 

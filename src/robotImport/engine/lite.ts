@@ -15,9 +15,11 @@
  * as it is, however small (`importVisualsClient.ts`).
  */
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+// through the facade, so the import worker's build keeps the decoder in `meshoptDecoder-*.js`
+import { MeshoptDecoder } from './meshoptDecoder';
 import { triangleCount, type MeshPart } from '../geometry';
-import { exportStoredScene, readStoredScene, sceneParts, type StoredScene } from './bakeMesh';
+import { readStoredScene, sceneParts, type StoredScene } from './bakeMesh';
+import { exportStoredScene } from './floatGlb';
 import { creaseParts, disposeTree } from './meshGroup';
 import { mergeByColour } from './meshOps';
 import { simplifyLists } from './simplify';

@@ -30,7 +30,8 @@ export { simplifyModel } from './prepare';
 export type { PreparedModel } from './prepare';
 export type { NormalisedModel } from './measureSession';
 export { bake, exportGlb, renderTop, renderThumb, toRobotLocal } from './bake';
-export { liteMesh } from './lite';
+// the relay's lighter mesh, made in the import worker (`liteMeshOff`; `lite.ts` is the work itself)
+export { liteMeshOff as liteMesh } from './importSession';
 export type { BakeInput, BakeResult } from './bake';
 export { createPreview } from './preview';
 export type { PreviewController, PreviewState } from './preview';

@@ -218,7 +218,8 @@ function routeFor(file, buf) {
   // reaches `threeMf.ts` by the same `import()`, so the main build has one too, billed here as well.
   // `meshoptEncoder-*.js` is meshoptimizer's encoder, which the bake's stored-mesh writer
   // (`storedGlb.ts`) fetches on a Save; the worker and the engine's fallback share the one file
-  if (/^(importWorker|measureWorker|meshoptDecoder|meshoptEncoder|threeMf|zip)-[^/]*\.js$/.test(base)) return 'importworker';
+  // `lite-*.js` is the worker's lazy chunk for a room's lighter mesh (`lite.ts` with GLTFExporter)
+  if (/^(importWorker|measureWorker|meshoptDecoder|meshoptEncoder|threeMf|zip|lite)-[^/]*\.js$/.test(base)) return 'importworker';
   // THE ROBOT LIBRARY (`src/robotImport/library.ts`, IndexedDB), by FILENAME: the renderers' asset
   // seam (`src/render/importedAssets.ts`) reaches it with a dynamic `import()` the first time an
   // imported robot is drawn, so it is its own small chunk rather than a cost in `main`.
@@ -653,9 +654,12 @@ const BASELINE = {
   // 2026-10-03 (compressed stored mesh): 139.68 -> 140.34 (ede417c4 measured 141.82 the same minute).
   // NEW `meshoptEncoder-*.js` 8.13, meshoptimizer's encoder with its inlined wasm, fetched on a Save
   // by the bake's writer; one file, since the worker's copy and the engine fallback's are the same
-  // bytes. `importWorker-*.js` 107.83 -> 98.22: the bake writes with the encoder now, so GLTFExporter
-  // left the worker (the float writer stays in the engine, for the relay's `liteMesh`).
-  importworker: { gzip: 140.34 * 1000 },
+  // bytes. `importWorker-*.js` 107.83 -> 99.66: the bake writes with the encoder now, so GLTFExporter
+  // left the worker's main chunk. Then 140.34 -> 154.05: NEW `lite-*.js` 12.26, `liteMesh` and the
+  // float writer (`floatGlb.ts`, GLTFExporter), lazy in the worker and fetched only when a room asks
+  // for the lighter mesh. It ran on the main thread, 0.3 s from the old 69k float mesh and 0.8 s
+  // from a 250k one (Node), which froze the lobby the first time a room asked.
+  importworker: { gzip: 154.05 * 1000 },
   // 2026-10-01: NEW. `occt-import-js-*.wasm` 3110.91 (OpenCascade, 7.6 MB raw), `stepWorker-*.js`
   // 21.95 (the worker with occt's glue) and `stepReader-*.js` 0.42. Fetched only when a STEP file is
   // dropped; every other import, and every player who never imports a robot, pays nothing.

@@ -2,8 +2,8 @@
  * THE STORED MESH: parts → a GLB in the stored mesh frame (`STORED_MESH_TO_ROBOT`), held to
  * `MAX_MESH_BYTES`. DOM-free, so `bake` runs it in the import worker and keeps only the two pictures,
  * which need WebGL, on the main thread. The bake writes it compressed (`storedGlb.ts`); the float
- * writer here (`exportStoredScene`, GLTFExporter through a `Blob` and a `FileReader`) is what a room
- * is sent (`liteMesh`), since the relay's validator takes no extension.
+ * writer (`floatGlb.ts`) is what a room is sent (`liteMesh`), since the relay's validator takes no
+ * extension.
  *
  * MOVING PARTS ARE NODES OF THEIR OWN (`docs/area/robot-import.md`, "Moving parts"): each is a group
  * translated to its pivot, its meshes relative to it, and `extras.dsim` (`StoredMotion`) saying what
@@ -11,10 +11,9 @@
  * child. Everything else is the static rest, one mesh per colour, as it always was.
  */
 import * as THREE from 'three';
-import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { transformParts, triangleCount, type MeshPart } from '../geometry';
 import { MAX_MESH_BYTES, ROBOT_TO_STORED_MESH, STORED_MESH_TO_ROBOT, readStoredMotion, type StoredMotion } from '../types';
-import { buildMeshGroup, creaseParts, disposeTree } from './meshGroup';
+import { creaseParts } from './meshGroup';
 import { partsFromObject } from './parse';
 import { simplifyLists } from './simplify';
 import { writeStoredGlb } from './storedGlb';
@@ -74,51 +73,6 @@ export function readStoredScene(root: THREE.Object3D): StoredScene {
 /** every part of a scene, rest first then each moving part's, in order */
 export function sceneParts(scene: StoredScene): MeshPart[] {
   return [...scene.rest, ...scene.moving.flatMap((m) => m.parts)];
-}
-
-/** robot-local parts → a GLB in the stored mesh frame (no moving parts) */
-export async function exportGlb(robotParts: readonly MeshPart[]): Promise<ArrayBuffer> {
-  return exportGlbStored(transformParts(robotParts, ROBOT_TO_STORED_MESH));
-}
-
-/** parts ALREADY in the stored mesh frame → a GLB (no moving parts) */
-export async function exportGlbStored(stored: readonly MeshPart[]): Promise<ArrayBuffer> {
-  return exportStoredScene({ rest: [...stored], moving: [] });
-}
-
-const translateParts = (parts: readonly MeshPart[], d: V3): MeshPart[] =>
-  transformParts(parts, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, d[0], d[1], d[2], 1]);
-
-/** a stored scene → a FLOAT GLB (no extensions, what the relay takes): the rest under the root, each
- *  moving part a node at its pivot */
-export async function exportStoredScene(scene: StoredScene): Promise<ArrayBuffer> {
-  const root3 = new THREE.Scene();
-  const group = buildMeshGroup(scene.rest, 'dsim_robot');
-  root3.add(group);
-  const nodes: (THREE.Group | null)[] = scene.moving.map(() => null);
-  const make = (i: number, depth = 0): THREE.Group | null => {
-    if (nodes[i]) return nodes[i];
-    const m = scene.moving[i];
-    if (!m || depth > 8) return null;
-    const parent = m.parent >= 0 && m.parent !== i ? make(m.parent, depth + 1) : null;
-    const node = new THREE.Group();
-    node.name = `dsim_motion_${i}_${m.info.role}`;
-    const base: V3 = parent ? scene.moving[m.parent].pivot : [0, 0, 0];
-    node.position.set(m.pivot[0] - base[0], m.pivot[1] - base[1], m.pivot[2] - base[2]);
-    node.userData = { dsim: m.info };
-    const meshes = buildMeshGroup(translateParts(m.parts, [-m.pivot[0], -m.pivot[1], -m.pivot[2]]), `dsim_motion_${i}_mesh`);
-    for (const c of [...meshes.children]) node.add(c);
-    (parent ?? group).add(node);
-    nodes[i] = node;
-    return node;
-  };
-  for (let i = 0; i < scene.moving.length; i++) make(i);
-  try {
-    const out = await new GLTFExporter().parseAsync(root3, { binary: true, onlyVisible: true });
-    return out as ArrayBuffer;
-  } finally {
-    disposeTree(root3);
-  }
 }
 
 /**

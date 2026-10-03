@@ -32320,7 +32320,7 @@ function impPlayCheck(g: GameId): void {
       /e\.importModel\(files,/.test(ed) && /e\.prepareMeasure\(prepared, setup\)/.test(ed) && !/e\.loadModel\(files, \(stage\)/.test(ed) && /onCancel=\{\(\) => \{[^}]*importAbort\.current\?\.abort\(\)/.test(ed),
     );
     // the worker modules touch no DOM: their whole graph must run where there is none
-    const workerSide = ['importWorker.ts', 'measureWorker.ts', 'parse.ts', 'prepare.ts', 'simplify.ts', 'meshOps.ts', 'bakeMesh.ts', 'meshGroup.ts', 'importError.ts'].map((f) => joinPath('src', 'robotImport', 'engine', f));
+    const workerSide = ['importWorker.ts', 'measureWorker.ts', 'parse.ts', 'prepare.ts', 'simplify.ts', 'meshOps.ts', 'bakeMesh.ts', 'meshGroup.ts', 'importError.ts', 'storedGlb.ts', 'meshoptEncoder.ts', 'lite.ts', 'floatGlb.ts'].map((f) => joinPath('src', 'robotImport', 'engine', f));
     const domUsers = workerSide.filter((f) => /\b(document|window|localStorage|indexedDB)\b/.test(src(f).replace(/^\s*(\/\/|\*|\/\*).*$/gm, '')));
     check('robot import (scale): what the import and measure workers run uses no DOM (no document, window, storage)', domUsers.length === 0, domUsers.join(', '));
     const spawns = ['importSession.ts', 'measureSession.ts', 'stepReader.ts'].map((f) => src(joinPath('src', 'robotImport', 'engine', f)));
@@ -35209,7 +35209,8 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
   // ---- the stored GLB: each moving part a node at its pivot, through the lighter relay mesh -----
   const THREE = await import('three');
   const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
-  const { exportStoredScene, readStoredScene, sceneParts } = await import('../src/robotImport/engine/bakeMesh');
+  const { readStoredScene, sceneParts } = await import('../src/robotImport/engine/bakeMesh');
+  const { exportStoredScene } = await import('../src/robotImport/engine/floatGlb');
   const { splitMoving } = await import('../src/robotImport/engine/bake');
   const { liteMesh } = await import('../src/robotImport/engine/lite');
   const { creaseParts } = await import('../src/robotImport/engine/meshGroup');
@@ -36746,7 +36747,8 @@ function fxImportFixed(): RobotSpec {
   const THREE = await import('three');
   const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
   const { MeshoptDecoder } = await import('three/examples/jsm/libs/meshopt_decoder.module.js');
-  const { exportStoredScene, readStoredScene, sceneParts, bakeSceneHere } = await import('../src/robotImport/engine/bakeMesh');
+  const { readStoredScene, sceneParts, bakeSceneHere } = await import('../src/robotImport/engine/bakeMesh');
+  const { exportStoredScene } = await import('../src/robotImport/engine/floatGlb');
   const { writeStoredGlb, glbUsesExtensions, STORED_POSITION_BITS } = await import('../src/robotImport/engine/storedGlb');
   const { liteMesh } = await import('../src/robotImport/engine/lite');
   const { creaseParts } = await import('../src/robotImport/engine/meshOps');
@@ -36990,6 +36992,14 @@ function fxImportFixed(): RobotSpec {
       'stored mesh: liteMesh re-writes a small compressed mesh as a FLOAT GLB the validator takes, whole (every triangle) and without extensions',
       !!small && VC.validateMeshGlb(new Uint8Array(small)) === null && !glbUsesExtensions(small) && triangleCount(smallParts) === triangleCount(srcParts),
       String(small && VC.validateMeshGlb(new Uint8Array(small))),
+    );
+    const { liteMeshOff } = await import('../src/robotImport/engine/importSession');
+    const offThread = await liteMeshOff(glb, IV.VISUAL_MAX_BYTES.mesh);
+    const engineSrc = readFileSync('src/robotImport/engine/importerEngine.ts', 'utf8');
+    const workerSrc = readFileSync('src/robotImport/engine/importWorker.ts', 'utf8');
+    check(
+      'stored mesh: the relay copy is made in the import worker (the engine’s liteMesh is liteMeshOff, the worker answers `lite` from a lazy lite.ts), and with no Worker the same file on this thread',
+      /export \{ liteMeshOff as liteMesh \} from '\.\/importSession';/.test(engineSrc) && /req\.kind === 'lite'/.test(workerSrc) && /await import\('\.\/lite'\)/.test(workerSrc) && !!offThread && !!small && offThread.byteLength === small.byteLength,
     );
     const ivc = readFileSync('src/net/importVisualsClient.ts', 'utf8');
     check(

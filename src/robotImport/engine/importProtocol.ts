@@ -28,12 +28,15 @@ export type ImportRequest =
   /** parts read elsewhere (STEP in its own workers), not yet merged */
   | { kind: 'parts'; name: string; format: ModelFormat; parsed: ParsedFiles; budget: number }
   /** the bake's mesh half (`bakeSceneHere`): the stored scene (rest and moving parts) → the stored GLB */
-  | { kind: 'bake'; scene: StoredScene };
+  | { kind: 'bake'; scene: StoredScene }
+  /** the relay's lighter float GLB (`liteMesh`) from the stored GLB */
+  | { kind: 'lite'; glb: ArrayBuffer; maxBytes: number };
 
 export type ImportResponse =
   | ({ kind: 'progress' } & ImportProgress)
   | { kind: 'done'; model: PreparedModel }
   | { kind: 'baked'; glb: ArrayBuffer; scene: StoredScene; refits: number }
+  | { kind: 'lite'; glb: ArrayBuffer | null }
   | { kind: 'error'; code: ImportErrorCode | null; name: string; message: string };
 
 /** every distinct ArrayBuffer under these parts (a buffer listed twice is a DataCloneError) */
