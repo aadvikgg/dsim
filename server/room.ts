@@ -64,6 +64,7 @@ import {
   isImportedSpec,
   setupsHaveImported,
   stripImported,
+  stripTune,
   type ImportRoomState,
 } from '../src/net/imported';
 import { VisualRelay } from './importVisuals';
@@ -2416,6 +2417,11 @@ export class Room {
       setups = setups.map((s) => (isImportedSpec(s.spec) ? { ...s, spec: stripImported(s.spec) } : s));
       this.visuals.reconcile();
     }
+    // ...and an import's PRACTICE TUNING never plays in a room, any room (`stripTune`)
+    setups = setups.map((s) => {
+      const spec = s.spec ? stripTune(s.spec) : s.spec;
+      return spec === s.spec ? s : { ...s, spec };
+    });
     this.phase = 'match';
     this.matchGen++; // any input stamped with an older generation is now stale
     this.rematchVotes.clear();

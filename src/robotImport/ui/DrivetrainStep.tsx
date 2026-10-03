@@ -1,4 +1,4 @@
-import { Fragment } from 'react';
+import { Fragment, type ReactNode } from 'react';
 import type { DrivetrainType } from '../../types';
 import { OptRow } from '../../ui/OptRow';
 import { DRIVETRAIN_LABELS } from '../../ui/labelData';
@@ -48,10 +48,13 @@ export function DrivetrainStep({
   drive,
   numbers,
   onDrive,
+  tuning,
 }: {
   drive: DriveSetup;
   numbers: DriveNumbers | null;
   onDrive: (patch: Partial<DriveSetup>) => void;
+  /** the drive's practice tuning (`TunePanel`), after the numbers */
+  tuning?: ReactNode;
 }) {
   const m = drive.motor;
   const wheelTypes = WHEEL_TYPES[drive.drivetrain];
@@ -218,6 +221,7 @@ export function DrivetrainStep({
           </dl>
         </>
       ) : null}
+      {tuning}
     </>
   );
 }

@@ -38,6 +38,9 @@ export function fixedAimTurn(r: RobotState, err: number): number {
   if (!(maxTurn > 0) || !Number.isFinite(err)) return 0;
   const a = dp.turnAccel * slow * C.MOTOR_BRAKE_MULT * C.FIXED_AIM_DECEL_FRAC;
   const e = Math.abs(err);
-  const w = Math.min(maxTurn, Math.sqrt(2 * Math.max(a, 0) * e), C.FIXED_AIM_SETTLE_RATE * e);
+  // an import's practice tuning may cap the aim's turn below the chassis's (`ImportTuning.aimTurn`)
+  const cap = r.spec.imported?.tune?.aimTurn;
+  const top = cap !== undefined ? Math.min(maxTurn, ((cap * Math.PI) / 180) * slow) : maxTurn;
+  const w = Math.min(top, Math.sqrt(2 * Math.max(a, 0) * e), C.FIXED_AIM_SETTLE_RATE * e);
   return clamp((Math.sign(err) * w) / maxTurn, -1, 1);
 }

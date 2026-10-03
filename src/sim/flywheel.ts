@@ -104,7 +104,8 @@ export function flyStep(r: RobotState, cmd: RobotCommand | undefined, enabled: b
     else r.flyPresetUpAt = p.upAt;
     if (p.press) r.flyPreset = (flyPresetIndex(r) + 1) % f.rpm.length;
   }
-  const rate = C.FLY_RAMP_RPM_S * (1 - C.FLY_RAMP_INERTIA_SLOW * clamp(r.spec.flywheelInertia, 0, 1));
+  const spinUp = r.spec.imported?.tune?.spinUp;
+  const rate = spinUp !== undefined ? spinUp : C.FLY_RAMP_RPM_S * (1 - C.FLY_RAMP_INERTIA_SLOW * clamp(r.spec.flywheelInertia, 0, 1));
   r.flyRpm = Math.round(approach(r.flyRpm ?? 0, flySetpoint(r), rate * dt));
 }
 

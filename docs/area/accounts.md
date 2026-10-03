@@ -407,7 +407,10 @@ clamped to 15, the width raised to 14.5, measured on alpha's coercer) counts as 
 build that drops the import on purpose is never "repaired". Backward-compatible both ways (an older
 server ignores `caps`). `npm run dbtest` "settings:" drives the write on PGlite; smoke "settings
 keep:" holds the rules, including the one robot an older build rewrites rather than strips (a
-BIOBUZZ fixed launcher reads as a turret there) and so is not re-attached.
+BIOBUZZ fixed launcher reads as a turret there) and so is not re-attached. A second cap,
+`importTune` (2026-10-03), does the same for an import's practice tuning: a save from an import
+build without it keeps the stored `imported.tune` when the robot is otherwise the stored one
+(`keepTuneFromOlderClient`).
 ⚠️ **THE FLAG COULD NOT LIVE IN `profiles.settings`.** That blob is client-shaped,
 client-validated and opaque to the server — nothing in SQL reads it — so a privacy bit stored
 there would be enforced only by asking the client, which is not enforcement. It is a real column,

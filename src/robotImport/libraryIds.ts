@@ -67,7 +67,8 @@ function same(a: unknown, b: unknown): boolean {
 /** two descriptors of the SAME robot: everything but the id equal (hull, bands, height, mechanisms) */
 export function sameImportedRobot(a: ImportedRobot | null | undefined, b: ImportedRobot | null | undefined): boolean {
   if (!a || !b) return false;
-  return same({ ...a, id: '' }, { ...b, id: '' });
+  // practice tuning is not the robot: a retune on one device must not make the other's model "out of date"
+  return same({ ...a, id: '', tune: undefined }, { ...b, id: '', tune: undefined });
 }
 
 /**

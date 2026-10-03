@@ -173,6 +173,7 @@ export const COPY = {
   massLow: (min: number) => `Under this build’s ${min} lb minimum. It drives as ${min} lb.`,
   massHigh: (max: number) => `Over ${max} lb. It drives as ${max} lb.`,
   speedLine: 'Follows drive rpm and the drivetrain.',
+  speedTuned: 'Set under Practice tuning. Online rooms use the calculated numbers.',
   pushLine: 'Grows with weight and traction, and with gearing down.',
 
   // ---- Mechanisms ----
@@ -217,6 +218,25 @@ export const COPY = {
   motionAdd: (role: MotionRole) => `Add ${(ROLE_NAME[role] ?? 'moving part').toLowerCase()}`,
   motionPlay: 'Play',
   motionStop: 'Stop',
+  tuneDrive: 'Practice tuning',
+  tuneMech: 'Mechanism tuning',
+  tuneHint: 'Set these to match your real robot. They play in solo practice, Free Drive and the test drive; online rooms use the calculated numbers.',
+  tuneCalculated: 'Calculated',
+  tuneReset: 'Reset',
+  tuneResetAria: (label: string) => `Reset ${label.toLowerCase()} to the calculated number`,
+  tuneResetAll: 'Reset all to calculated',
+  tune: {
+    topSpeed: { label: 'Top speed', unit: 'in/s' },
+    accel: { label: 'Acceleration', unit: 'in/s²' },
+    turnRate: { label: 'Turn rate', unit: '°/s' },
+    aimTurn: { label: 'Aim turn rate', unit: '°/s' },
+    shotInterval: { label: 'Time between shots', unit: 's' },
+    spinUp: { label: 'Flywheel spin-up', unit: 'rpm/s' },
+    intakeTime: { label: 'Intake time', unit: '×' },
+    reload: { label: 'Reload', unit: 's' },
+    turretSlew: { label: 'Turret speed', unit: '°/s' },
+    rampDeployS: { label: 'Ramp swing', unit: 's' },
+  },
 
   // ---- Review ----
   checks: 'Checks',

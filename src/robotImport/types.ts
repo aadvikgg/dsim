@@ -4,7 +4,7 @@
  * `src/types.ts`; `docs/robot-import-plan.md` §3 binds both; `docs/area/robot-import.md` names the
  * frames every number below is in.
  */
-import type { DrivetrainType, GameId, RobotSpec, Vec2 } from '../types';
+import type { DrivetrainType, GameId, ImportTuning, RobotSpec, Vec2 } from '../types';
 
 export type LengthUnit = 'mm' | 'cm' | 'm' | 'in' | 'ft';
 /** a signed source axis; `+z` means "the file's +Z points up" */
@@ -124,6 +124,8 @@ export interface ImportSetup {
   /** the parts that move in a match (`docs/area/robot-import.md`, "Moving parts"). Absent = not yet
    *  looked for (the editor finds the wheels once); `[]` = none. */
   motion?: MotionGroup[];
+  /** practice tuning (`ImportedRobot.tune`), copied onto the descriptor by `buildSpec` */
+  tune?: ImportTuning;
 }
 
 // ---- moving parts ----------------------------------------------------------------------------

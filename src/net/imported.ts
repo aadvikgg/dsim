@@ -31,6 +31,8 @@ export const ROBOT_IMPORT_CAP = 'robotImport';
  * never happened. A container without an import stays format 2, byte for byte.
  */
 export const REPLAY_FORMAT_IMPORTED = 3;
+/** ...and one whose import carries practice tuning (`ImportedRobot.tune`) with this */
+export const REPLAY_FORMAT_TUNED = 4;
 
 /** does this spec (anything shaped like one, typically straight off the wire) carry an import? */
 export function isImportedSpec(spec: unknown): boolean {
@@ -47,6 +49,22 @@ export function stripImported<T extends object>(spec: T): T {
   const out = { ...spec } as T & { imported?: unknown };
   delete out.imported;
   return out;
+}
+
+/** `spec` without an import's practice tuning: the same object when it carries none. A ROOM never
+ *  plays tuning (`Room.beginMatch`): the room is everyone's, and an older client would predict the
+ *  untuned robot. */
+export function stripTune<T extends object>(spec: T): T {
+  const imp = (spec as { imported?: { tune?: unknown } }).imported;
+  if (!imp || typeof imp !== 'object' || imp.tune === undefined) return spec;
+  const { tune: _t, ...rest } = imp;
+  void _t;
+  return { ...spec, imported: rest } as T;
+}
+
+/** does any setup in this list carry an import with practice tuning? */
+export function setupsHaveTune(setups: readonly { spec?: unknown }[] | null | undefined): boolean {
+  return !!setups && setups.some((s) => isImportedSpec(s?.spec) && typeof (s.spec as { imported: { tune?: unknown } }).imported.tune === 'object');
 }
 
 /** does any setup in this list carry an import? (a match's `setups`, a replay's `setups`) */

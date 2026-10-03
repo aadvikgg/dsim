@@ -89,7 +89,7 @@ export function buildSpec(doc: EditorDoc, m: ImportMeasurement): Built {
   const raw: RobotSpec = {
     ...doc.spec,
     ...fields,
-    imported: descriptor,
+    imported: doc.setup.tune ? { ...descriptor, tune: doc.setup.tune } : descriptor,
     ...(doc.game === 'biobuzz' ? { heightIn: descriptor.heightIn } : {}),
   };
   const spec: RobotSpec = { ...coerceSpec(raw, undefined, doc.game), name: doc.spec.name, teamName: doc.spec.teamName };
@@ -142,7 +142,7 @@ export function driveNumbers(built: Built, game: GameId): DriveNumbers {
     lines: [
       { label: COPY.statRpm, ...rpmLine },
       { label: COPY.weight, ...massLine },
-      { label: COPY.statSpeed, text: COPY.speedLine, warn: false },
+      { label: COPY.statSpeed, text: s.imported?.tune?.topSpeed !== undefined || s.imported?.tune?.accel !== undefined ? COPY.speedTuned : COPY.speedLine, warn: false },
       { label: COPY.statPush, text: COPY.pushLine, warn: false },
     ],
     checks: ro.checks,

@@ -51,6 +51,14 @@ export function keepsImports(caps: unknown): boolean {
   return Array.isArray(caps) && caps.includes(SETTINGS_KEEPS_IMPORTS);
 }
 
+/** ...and the cap of a build that also round-trips an import's practice tuning (`ImportedRobot.tune`) */
+export const SETTINGS_KEEPS_TUNE = 'importTune';
+
+/** does a settings save come from a build that round-trips practice tuning? */
+export function keepsTune(caps: unknown): boolean {
+  return Array.isArray(caps) && caps.includes(SETTINGS_KEEPS_TUNE);
+}
+
 type Obj = Record<string, unknown>;
 const isObj = (x: unknown): x is Obj => typeof x === 'object' && x !== null && !Array.isArray(x);
 const isImported = (spec: unknown): boolean => isObj(spec) && isObj(spec.imported);
@@ -145,6 +153,33 @@ export function keepImportsFromOlderClient(stored: unknown, incoming: Obj): Obj 
     // 2. its last standard robot, which only an imported robot needs
     if (target.lastStandardSpec === undefined && st.lastStandardSpec !== undefined) target.lastStandardSpec = st.lastStandardSpec;
     if (g !== inActive) (o.loadouts as Obj)[g] = target;
+  }
+  return out ?? incoming;
+}
+
+/**
+ * 4. **Practice tuning** (`ImportedRobot.tune`). A build that keeps imports but predates tuning
+ * (no `SETTINGS_KEEPS_TUNE`) sends the imported robot without it: its coercer rebuilds the import
+ * field by field. When that robot is the stored one minus the tuning, the stored robot is kept
+ * whole; any other difference is a real change and stands. Never mutates either argument.
+ */
+export function keepTuneFromOlderClient(stored: unknown, incoming: Obj): Obj {
+  if (!isObj(stored)) return incoming;
+  let out: Obj | null = null;
+  const own = (): Obj => (out ??= { ...incoming, ...(isObj(incoming.loadouts) ? { loadouts: { ...incoming.loadouts } } : {}) });
+  const inActive = activeGame(incoming);
+  for (const g of GAME_IDS) {
+    const st = sliceOf(stored, g);
+    const sent = sliceOf(incoming, g);
+    if (!st || !sent || !isObj(st.spec) || !isObj(sent.spec)) continue;
+    const imp = st.spec.imported;
+    if (!isObj(imp) || !isObj(imp.tune)) continue;
+    const sentImp = sent.spec.imported;
+    if (!isObj(sentImp) || sentImp.tune !== undefined) continue;
+    if (!deepEqual(sent.spec, { ...st.spec, imported: { ...imp, tune: undefined } })) continue;
+    const o = own();
+    if (g === inActive) o.spec = st.spec;
+    else (o.loadouts as Obj)[g] = { ...((o.loadouts as Obj)[g] as Obj), spec: st.spec };
   }
   return out ?? incoming;
 }

@@ -29598,7 +29598,7 @@ const dumperSetup = (): RobotSetup => {
   const runImp = runOf(impSpec);
   check('imports/replay: a replay with NO imported robot is still format 2', runStd.replay.format === REPLAY_FORMAT_BASE && REPLAY_FORMAT_BASE === 2);
   check('imports/replay: ...and one WITH an imported robot is format 3', runImp.replay.format === REPLAY_FORMAT_IMPORTED && REPLAY_FORMAT_IMPORTED === 3);
-  check('imports/replay: REPLAY_FORMAT (what this build reads) is the imported format, so an older build calls it `future`', REPLAY_FORMAT === REPLAY_FORMAT_IMPORTED);
+  check('imports/replay: REPLAY_FORMAT (what this build reads) is at least the imported format, so an older build calls it `future`', REPLAY_FORMAT >= REPLAY_FORMAT_IMPORTED);
   {
     const r = runStd.replay;
     // the container as the build BEFORE imports wrote it: same keys, same order, format 2
@@ -29729,7 +29729,7 @@ const dumperSetup = (): RobotSetup => {
   check('settings keep: the blob this branch writes holds both imports and both standard robots (the premise)',
     isImportedSpec(st.spec) && (st.spec as { launcher?: string }).launcher === 'fixed' && !!st.lastStandardSpec && isImportedSpec(st.loadouts?.biobuzz?.spec) && !!st.loadouts?.biobuzz?.lastStandardSpec);
   check('settings keep: this build\'s settings save says it keeps imports (`caps` on the POST body)',
-    /body: JSON\.stringify\(\{ settings, caps: \[SETTINGS_KEEPS_IMPORTS\] \}\)/.test(readFileSync('src/net/api.ts', 'utf8')));
+    /body: JSON\.stringify\(\{ settings, caps: \[SETTINGS_KEEPS_IMPORTS(, SETTINGS_KEEPS_TUNE)?\] \}\)/.test(readFileSync('src/net/api.ts', 'utf8')));
   check('settings keep: only a save whose caps name the import cap is taken as sent',
     keepsImports([SETTINGS_KEEPS_IMPORTS]) && keepsImports(['x', 'robotImport']) && !keepsImports(undefined) && !keepsImports([]) && !keepsImports('robotImport') && !keepsImports({ 0: 'robotImport' }));
 
@@ -36551,6 +36551,124 @@ function fxImportFixed(): RobotSpec {
       JSON.stringify({ staged, doneAtStage, hopper: r.hopper.length, pos: r.pos, inZone: robotIntersectsRect(r, zone) }),
     );
   }
+}
+
+/**
+ * PRACTICE TUNING (`ImportedRobot.tune`, `docs/area/robot-import.md` "Practice tuning"). Coerced to
+ * its ranges and steps, idempotent; each number reaches the sim where the derived one is read; an
+ * untuned robot is untouched (the import pins above hold without a re-pin); a room never plays it;
+ * a replay that carries it is stamped so an older build refuses it; a retune is the same robot to
+ * the library; an older build's settings save keeps it.
+ */
+{
+  const { coerceImported, coerceTune, IMPORT_TUNE } = await import('../src/sim/imported');
+  const { driveParams } = await import('../src/sim/drivetrain');
+  const { fixedAimTurn } = await import('../src/sim/aimTurn');
+  const { stripTune, setupsHaveTune, REPLAY_FORMAT_TUNED, REPLAY_FORMAT_IMPORTED } = await import('../src/net/imported');
+  const { sameImportedRobot } = await import('../src/robotImport/libraryIds');
+  const { keepTuneFromOlderClient, keepsTune, SETTINGS_KEEPS_TUNE } = await import('../src/net/settingsKeep');
+  const { bbRampDeployS, BB_RAMP_DEPLOY_S } = await import('../src/games/biobuzz/config');
+  type ImportTuning = import('../src/types').ImportTuning;
+  const { mechTuneFields, driveTuneFields } = await import('../src/robotImport/ui/tuneFields');
+  const J = (v: unknown): string => JSON.stringify(v);
+  const base: ImportedRobot = {
+    v: 1,
+    id: '00112233445566aa',
+    hull: [{ x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }, { x: -8, y: -8 }],
+    heightIn: 14,
+    mech: { shooter: { x: -2, y: 0, z: 12.5 }, intakes: [{ edge: 'front', from: -6, to: 6 }] },
+  };
+
+  // ---- the coercer ----
+  const t = coerceTune({ topSpeed: 61.3, accel: 9999, turnRate: -5, shotInterval: 0.237, intakeTime: 'x', bogus: 3, reload: NaN });
+  check(
+    'tune: coerced onto each range and step (61.3 → 61.5 in/s, accel to its 1500 top, a negative turn rate to its 60 floor, 0.237 → 0.24 s), unknown, non-numeric and NaN fields dropped',
+    J(t) === J({ topSpeed: 61.5, accel: 1500, turnRate: 60, shotInterval: 0.24 }),
+    J(t),
+  );
+  check('tune: coercing twice is coercing once; nothing left is no tuning at all', J(coerceTune(t)) === J(t) && coerceTune({}) === undefined && coerceTune({ bogus: 1 }) === undefined && coerceTune(null) === undefined && coerceTune([1]) === undefined);
+  const every = Object.fromEntries((Object.keys(IMPORT_TUNE) as (keyof typeof IMPORT_TUNE)[]).map((k) => [k, (IMPORT_TUNE[k].min + IMPORT_TUNE[k].max) / 2 + IMPORT_TUNE[k].step / 3]));
+  const all = coerceTune(every)!;
+  check('tune: every field of IMPORT_TUNE survives the coercer on its step and inside its range', (Object.keys(IMPORT_TUNE) as (keyof typeof IMPORT_TUNE)[]).every((k) => { const v = all[k]!; const L = IMPORT_TUNE[k]; return v >= L.min && v <= L.max && Math.abs(Math.round(v / L.step) * L.step - v) < 1e-9; }), J(all));
+  const ci = coerceImported({ ...base, tune: { topSpeed: 70, shotInterval: 0.5 } })!;
+  check('tune: coerceImported keeps it, and is still a fixed point with it', J(ci.tune) === J({ topSpeed: 70, shotInterval: 0.5 }) && J(coerceImported(ci)) === J(ci) && coerceImported(base)!.tune === undefined);
+
+  // ---- the sim reads it ----
+  const spec = (tune?: ImportTuning): RobotSpec => coerceSpec({ ...DEFAULT_SPEC, drivetrain: 'mecanum', driveRpm: 435, imported: { ...base, ...(tune ? { tune } : {}) } } as RobotSpec);
+  const plain = driveParams(spec());
+  const fast = driveParams(spec({ topSpeed: 120, accel: 300, turnRate: 400 }));
+  const slowOnly = driveParams(spec({ topSpeed: plain.maxSpeed / 2 }));
+  check(
+    'tune: driveParams takes the tuned top speed, acceleration (the turn acceleration with it) and turn rate (°/s); a tuned speed alone scales the derived turn rate with it',
+    Math.abs(fast.maxSpeed - 120) < 1e-9 && Math.abs(fast.accel - 300) < 1e-9 && Math.abs(fast.turnAccel / fast.accel - plain.turnAccel / plain.accel) < 1e-12 &&
+      Math.abs(fast.maxTurn - (400 * Math.PI) / 180) < 1e-9 && Math.abs(slowOnly.maxTurn - plain.maxTurn / 2) < 0.05,
+    J({ fast, slowOnly: slowOnly.maxTurn, plain: plain.maxTurn }),
+  );
+  {
+    const { w, step: stepW } = impWorld('decode', [{ drivetrain: 'mecanum', driveRpm: 435, imported: { ...base, tune: { topSpeed: 40 } } }]);
+    w.match.phase = 'teleop';
+    w.match.phaseTimeLeft = 100;
+    const r = w.robots[0];
+    r.pos = { x: -40, y: 0 };
+    r.heading = 0;
+    let top = 0;
+    for (let k = 0; k < 120; k++) {
+      stepW(w, 1 / 60, new Map([[0, { driveX: 0, driveY: 1, rotate: 0, leftDrive: 1, rightDrive: 1, intake: false, fire: false }]]));
+      top = Math.max(top, Math.hypot(r.vel.x, r.vel.y));
+    }
+    check('tune: a robot tuned to 40 in/s drives at 40 in/s (two seconds of full forward in DECODE)', Math.abs(top - 40) < 1.5, top.toFixed(2));
+  }
+  {
+    const r0 = { spec: spec(), butterflyTank: false, powerDraw: 0 } as unknown as RobotState;
+    const r1 = { spec: spec({ aimTurn: 60 }), butterflyTank: false, powerDraw: 0 } as unknown as RobotState;
+    const free = fixedAimTurn(r0, 1.2);
+    const capped = fixedAimTurn(r1, 1.2);
+    check('tune: the fixed aim turns no faster than its tuned aim rate (60 °/s), and untuned it is the chassis’s', Math.abs(capped * driveParams(r1.spec).maxTurn - Math.PI / 3) < 1e-9 && free > capped && fixedAimTurn(r0, 0.001) === fixedAimTurn(r1, 0.001));
+  }
+  {
+    // the import's fixed launcher (fxImportFixed): fed every 0.20 s by its wheel, every 0.40 s tuned
+    const tuned = { ...fxImportFixed(), imported: { ...fxImportFixed().imported!, tune: { shotInterval: 0.4 } } } as RobotSpec;
+    const gaps = fxGaps(fxAimTrace(tuned, { ticks: 240 }).fires);
+    check('tune: a tuned time between shots (0.40 s) is what the feed runs at, 24 ticks every gap', gaps.length >= 4 && gaps.every((g) => g === 24), J(gaps));
+  }
+  check('tune: BIOBUZZ’s ramp swing reads the tuning, and the constant without it', bbRampDeployS({ ...DEFAULT_SPEC, imported: { ...base, tune: { rampDeployS: 0.8 } } } as RobotSpec) === 0.8 && bbRampDeployS(DEFAULT_SPEC) === BB_RAMP_DEPLOY_S);
+
+  // ---- the editor's fields ----
+  const fieldsBb = mechTuneFields('biobuzz', { ...DEFAULT_SPEC, scoreMode: 'turret', bbMech: { launcher: { kind: 'turret', mount: 'center', hoodDeg: 75 }, lift: null, intake: { kind: 'ramp' } }, imported: base } as RobotSpec).map((f) => f.key);
+  const fieldsCr = mechTuneFields('chain', { ...DEFAULT_SPEC, scoreMode: 'dumper', imported: base } as RobotSpec).map((f) => f.key);
+  const drive = driveTuneFields(spec({ topSpeed: 30 }));
+  check(
+    'tune: the editor offers each build its own numbers (a BIOBUZZ turret on a ramp: shots, turret speed, intake, ramp swing; a Chain dumper: its reload) and shows the CALCULATED drive, not the tuned one',
+    J(fieldsBb) === J(['shotInterval', 'turretSlew', 'intakeTime', 'rampDeployS']) && J(fieldsCr) === J(['reload']) && Math.abs(drive[0].calculated - plain.maxSpeed) < 1e-9,
+    J({ fieldsBb, fieldsCr, drive: drive[0].calculated }),
+  );
+
+  // ---- rooms, replays, the library, settings ----
+  const tunedSpec = spec({ topSpeed: 70 });
+  const stripped = stripTune(tunedSpec);
+  const untunedSpec = spec();
+  check(
+    'tune: a room strips it (`stripTune`), keeping the import; a spec without it is returned as is',
+    stripped.imported?.tune === undefined && J(stripped.imported?.hull) === J(tunedSpec.imported?.hull) && stripTune(untunedSpec) === untunedSpec && stripTune(DEFAULT_SPEC) === DEFAULT_SPEC,
+  );
+  const rd = (f: string): string => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  const roomSrc = rd('server/room.ts');
+  check('tune: Room.beginMatch strips it for every room, beside the import strip (source pin)', /setups = setups\.map\(\(s\) => \{\s*const spec = s\.spec \? stripTune\(s\.spec\)/.test(roomSrc));
+  const setupOf = (sp: RobotSpec) => ({ id: 0, alliance: 'blue' as const, spec: sp, assists: { ...DEFAULT_ASSISTS }, startIndex: 0 });
+  const fmtTuned = new ReplayRecorder(1, [setupOf(tunedSpec)], 'match', 'decode').finish().format;
+  const fmtPlain = new ReplayRecorder(1, [setupOf(spec())], 'match', 'decode').finish().format;
+  check('tune: a replay with a tuned import is stamped format 4 (an older build refuses it); an untuned import is still format 3', fmtTuned === REPLAY_FORMAT_TUNED && fmtPlain === REPLAY_FORMAT_IMPORTED && setupsHaveTune([setupOf(tunedSpec)]) && !setupsHaveTune([setupOf(spec())]));
+  check('tune: a retune is the same robot to the library (`sameImportedRobot`), so the other device’s model is not called out of date', sameImportedRobot(tunedSpec.imported, spec().imported) && !sameImportedRobot(tunedSpec.imported, { ...spec().imported!, heightIn: 13 }));
+  const stored = { game: 'decode', spec: tunedSpec };
+  const olderSave = { game: 'decode', spec: stripTune(tunedSpec) };
+  const changed = { game: 'decode', spec: { ...stripTune(tunedSpec), name: 'Renamed' } };
+  check(
+    'tune: an older build’s save (imports, no tuning cap) keeps the stored tuning when the robot is otherwise the same, and a real change stands',
+    J((keepTuneFromOlderClient(stored, olderSave).spec as RobotSpec).imported?.tune) === J({ topSpeed: 70 }) &&
+      (keepTuneFromOlderClient(stored, changed).spec as RobotSpec).imported?.tune === undefined &&
+      keepsTune([SETTINGS_KEEPS_TUNE]) && !keepsTune(['robotImport']),
+  );
+  check('tune: this build’s settings save says it keeps tuning (source pin)', /caps: \[SETTINGS_KEEPS_IMPORTS, SETTINGS_KEEPS_TUNE\]/.test(rd('src/net/api.ts')) && /keepsTune\(caps\) \? withImports : keepTuneFromOlderClient/.test(rd('server/db/repo.ts')));
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

@@ -1,4 +1,4 @@
-import type { ImportedBand, ImportedEdge, ImportedMech, ImportedRobot, Vec2 } from '../types';
+import type { ImportedBand, ImportedEdge, ImportedMech, ImportedRobot, ImportTuning, Vec2 } from '../types';
 import { WHEEL_INSET } from '../config';
 import { clamp, hyp } from '../math';
 
@@ -852,5 +852,41 @@ export function coerceImported(raw: unknown): ImportedRobot | undefined {
   // 9) mechanisms
   const mech = coerceMech(r.mech, f, bb, hull, heightIn);
   if (mech) out.mech = mech;
+
+  // 10) practice tuning
+  const tune = coerceTune(r.tune);
+  if (tune) out.tune = tune;
   return out;
+}
+
+/** each practice-tuning field's range and step (`ImportTuning`), game-blind: a game reads only the
+ *  ones its robot has */
+export const IMPORT_TUNE: Readonly<Record<keyof ImportTuning, { min: number; max: number; step: number }>> = {
+  topSpeed: { min: 20, max: 130, step: 0.5 },
+  accel: { min: 60, max: 1500, step: 5 },
+  turnRate: { min: 60, max: 685, step: 5 },
+  aimTurn: { min: 30, max: 685, step: 5 },
+  shotInterval: { min: 0.03, max: 2, step: 0.01 },
+  spinUp: { min: 500, max: 20000, step: 100 },
+  intakeTime: { min: 0.25, max: 4, step: 0.05 },
+  reload: { min: 0.1, max: 3, step: 0.05 },
+  turretSlew: { min: 60, max: 1145, step: 5 },
+  rampDeployS: { min: 0.05, max: 1.5, step: 0.05 },
+};
+
+/** `raw` as practice tuning: each known field clamped and put on its step (so coercing twice is
+ *  coercing once), unknown ones dropped; undefined when nothing is left */
+export function coerceTune(raw: unknown): ImportTuning | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: ImportTuning = {};
+  let any = false;
+  for (const k of Object.keys(IMPORT_TUNE) as (keyof ImportTuning)[]) {
+    const v = num(r[k]);
+    if (v === null) continue;
+    const L = IMPORT_TUNE[k];
+    out[k] = Number(clamp(Math.round(clamp(v, L.min, L.max) / L.step) * L.step, L.min, L.max).toFixed(4));
+    any = true;
+  }
+  return any ? out : undefined;
 }

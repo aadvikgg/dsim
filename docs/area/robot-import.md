@@ -328,6 +328,31 @@ within 4 in of it and under 10 in, grown to its axle). `[]` = none.
   ramp off `bbRampOut`. Drawn spin is capped at 26 rad/s, past which a spoked wheel strobes. The
   editor's preview has Play for the same, with fixed rates.
 
+## Practice tuning
+
+`ImportedRobot.tune` (`ImportTuning`, `docs/area/robot-import.md`; coerced by `coerceTune` to
+`IMPORT_TUNE`'s ranges and steps) lets a player set the numbers the sim would otherwise derive:
+top speed, acceleration, turn rate (`driveParams`), the fixed aim's turn rate (`fixedAimTurn`), time
+between shots (DECODE turret and fixed, BIOBUZZ turret and fixed, Chain turret), flywheel spin-up,
+intake time (DECODE, BIOBUZZ), dumper reload (BIOBUZZ, Chain), turret slew (BIOBUZZ, Chain) and the
+BIOBUZZ ramp swing (`bbRampDeployS`, which every ramp reader asks). Turn rates are stored in °/s.
+The editor keeps it in `ImportSetup.tune` and `buildSpec` puts it on the descriptor; the fields and
+their calculated values are `ui/tuneFields.ts`.
+
+- **Every read is `tune?.x !== undefined ? tune.x : <the old expression>`**, so a robot without
+  tuning steps byte for byte as before (the import pins hold unchanged). A tuned interval that a
+  `world.time >= fireReadyAt` test reads is scheduled `FLY_FEED_TIME_EPS` early, or it slips a tick.
+- **Practice only.** `Room.beginMatch` strips it from every setup (`stripTune`), custom and LAN
+  rooms included: the room is everyone's, and a client without tuning would predict the untuned
+  robot. Ranked and records never see an import at all.
+- **A replay with tuning is format 4** (`REPLAY_FORMAT_TUNED`), so a build before it calls it
+  `future` instead of re-simulating the untuned robot. Untuned imports stay format 3.
+- **A retune is the same robot** to the library (`sameImportedRobot` ignores `tune`) and does not
+  re-bake the mesh (the bake stamp leaves it out).
+- **Settings:** this build sends `caps: ['robotImport', 'importTune']`; a save from an import build
+  without the second keeps the stored tuning when the robot is otherwise the same
+  (`keepTuneFromOlderClient`).
+
 ## Relayed to a room (VISUALS RELAY)
 
 The picture and mesh live on the owner's device, so a custom or LAN room relays them (`docs/area/netcode.md`, VISUALS RELAY has the wire, budgets and validation). What the importer owns:

@@ -1434,6 +1434,13 @@ export const BB_RAMP_TIP_Z = BB_RAMP_PIVOT_Z - BB_RAMP_L * dsin(BB_RAMP_ANGLE);
  * the sim credits the ramp only once it has arrived (`bbRampSettled`), and the renderer eases
  * the same interval off `RobotState.bbRampAt`, so the drawn ramp and the credited one agree. */
 export const BB_RAMP_DEPLOY_S = 0.3;
+/** the ramp's swing time for this robot: `BB_RAMP_DEPLOY_S`, or an import's practice tuning
+ *  (`ImportTuning.rampDeployS`). Every reader of the swing (the sim, the 3D jam guard, both
+ *  renderers) asks this, so the drawn ramp and the credited one stay one ramp. */
+export function bbRampDeployS(spec: RobotSpec): number {
+  const t = spec.imported?.tune?.rampDeployS;
+  return t !== undefined ? t : BB_RAMP_DEPLOY_S;
+}
 /** how deep a fixed body may press a SETTLED ramp vertically before it folds (in) — the 3D jam
  * guard in `elements3d.ts`'s `bbRampSwingStep3d`. Resting contact sits near `PHYS_ALLOWED_ERROR`
  * (0.01); the jam in replay 1dc6eb8f was 0.13 deep, the random-drive jams 0.38–0.45. */

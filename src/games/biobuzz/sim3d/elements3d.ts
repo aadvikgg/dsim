@@ -1,5 +1,5 @@
 import type { Alliance, Artifact, RobotCommand, RobotState, World } from '../../../types';
-import { BB_HOOD_DEFAULT_DEG, BB_RAMP_DEPLOY_S, BB_RAMP_EMBED_DEPTH, bbHeightNow } from '../config';
+import { BB_HOOD_DEFAULT_DEG, BB_RAMP_EMBED_DEPTH, bbHeightNow, bbRampDeployS } from '../config';
 import { capturePollen } from '../elements';
 import {
   bbAimTarget,
@@ -153,7 +153,7 @@ function bbRampSwingStep3d(world: World, r: RobotState): void {
   const e = bbRampSwingProgress(r, world.time);
   if (e === null) {
     if (bbRampSettled(r, world.time) && rampEmbedded(engineFor(world), r)) {
-      bbRampReverse(r, world.time, BB_RAMP_DEPLOY_S);
+      bbRampReverse(r, world.time, bbRampDeployS(r.spec));
     }
     return;
   }

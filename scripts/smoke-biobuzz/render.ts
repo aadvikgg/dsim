@@ -8030,7 +8030,7 @@ function graphicsChecks(check: Check, allFiles: string[]): void {
         check(
           'the sync code eases the ramp off `bbRampAt`/`world.time`, clamped and smoothstepped',
           robotsCode.includes('r.bbRampAt ?? -Infinity') &&
-            robotsCode.includes('BB_RAMP_DEPLOY_S') &&
+            robotsCode.includes('/ bbRampDeployS(r.spec)') && // the swing time, an import's tuning included
             robotsCode.includes('smoothstep01(t)'),
         );
         check(

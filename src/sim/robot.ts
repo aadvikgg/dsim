@@ -800,7 +800,8 @@ function fireFixed(world: World, r: RobotState): void {
   if (r.spec.flywheel) {
     // a SETPOINT WHEEL: the feeder's own time per artifact, and the wheel gives up some speed —
     // the next feed waits for it to come back (`flyReady`), which is the recovery
-    r.fireReadyAt = world.time + Math.max(r.spec.flywheel.feedS + sortPenalty, ip.fireCap);
+    const tuned = r.spec.imported?.tune?.shotInterval;
+    r.fireReadyAt = world.time + (tuned !== undefined ? tuned : Math.max(r.spec.flywheel.feedS + sortPenalty, ip.fireCap));
     flyShot(r);
   } else {
     // a SOLVED wheel behind a fixed launcher or hood: the turret's own recovery model, unchanged
@@ -812,7 +813,10 @@ function fireFixed(world: World, r: RobotState): void {
       C.FLYWHEEL_CLOSE_RECOVERY * Math.max(0, 1 - r.spec.flywheelInertia / C.FLYWHEEL_CLOSE_INERTIA_KNEE);
     const recovery =
       closeRecovery + C.FLYWHEEL_RECOVERY_MAX * shotNorm * shotNorm * (1 - r.spec.flywheelInertia);
-    r.fireReadyAt = world.time + Math.max(ip.fireInterval + recovery + sortPenalty, ip.fireCap);
+    const tuned = r.spec.imported?.tune?.shotInterval;
+    // a tuned interval is the whole cycle, scheduled a hair early so `flyFeedDue`'s exact
+    // comparison cannot slip it a tick
+    r.fireReadyAt = tuned !== undefined ? world.time + tuned - C.FLY_FEED_TIME_EPS : world.time + Math.max(ip.fireInterval + recovery + sortPenalty, ip.fireCap);
   }
   if (fireBall) {
     fireBall.state = { kind: 'flight', target: r.alliance };
@@ -899,7 +903,10 @@ function fire(world: World, r: RobotState): void {
   // cap (fireCap): it can't fire faster than the cap, but a slower shot (recovery >
   // cap) fires at the same rate as everyone else.
   const interval = Math.max(ip.fireInterval + recovery + sortPenalty, ip.fireCap);
-  r.fireReadyAt = world.time + interval;
+  // an import's practice tuning names the whole cycle (`ImportTuning.shotInterval`), scheduled a
+  // hair early so `world.time >= fireReadyAt` fires on its own tick rather than the next
+  const tunedShot = r.spec.imported?.tune?.shotInterval;
+  r.fireReadyAt = tunedShot !== undefined ? world.time + tunedShot - C.FLY_FEED_TIME_EPS : world.time + interval;
 
   const vel = {
     x: dcos(yaw) * speed * cos + r.vel.x * C.SHOT_ROBOT_VEL_INHERIT,
@@ -1227,7 +1234,8 @@ export function updateIntake(world: World, r: RobotState, cmd: RobotCommand): vo
   // feed it fast. A FLAT vector intake gets NO clump bonus: it can't devour a pile,
   // so a clump feeds at the normal per-ball (vectoring) rate, not faster.
   const interval = candidates.length >= 2 && m.wedge ? m.clumpInterval : single;
-  if (world.time - r.lastIntakeAt < interval) return;
+  const intakeK = r.spec.imported?.tune?.intakeTime;
+  if (world.time - r.lastIntakeAt < (intakeK !== undefined ? interval * intakeK : interval)) return;
 
   // triangle devours TWO from a clump per cycle (its two front storage slots)
   const room = C.HOPPER_CAPACITY - r.hopper.length;

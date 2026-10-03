@@ -175,6 +175,18 @@
   gap: var(--ds-s-2);
 }
 
+/* ---- practice tuning ---- */
+.ds-import-tune {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ds-s-3);
+}
+.ds-import-tune-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--ds-s-2);
+}
+
 /* ---- Mechanisms: the moving parts ---- */
 .ds-import-moving {
   list-style: none;

@@ -354,6 +354,38 @@ export interface ImportedRobot {
   bands?: ImportedBand[];
   /** mechanism placements; each game reads the fields it knows. */
   mech?: ImportedMech;
+  /** PRACTICE TUNING (`docs/area/robot-import.md`, "Practice tuning"): numbers the player sets to
+   *  make the robot behave like their real one. Read by the sim only beside an import, never in a
+   *  room (`Room.beginMatch` strips it), so it changes nothing ranked, recorded or shared. */
+  tune?: ImportTuning;
+}
+
+/**
+ * An imported robot's practice tuning. Every field is optional; an absent one is what the sim
+ * derives today. Ranges and steps: `IMPORT_TUNE` (`src/sim/imported.ts`), which `coerceImported`
+ * clamps and quantises to.
+ */
+export interface ImportTuning {
+  /** top drive speed, in/s */
+  topSpeed?: number;
+  /** drive acceleration, in/s² (the turn's follows it) */
+  accel?: number;
+  /** top turn rate, degrees/s */
+  turnRate?: number;
+  /** a FIXED launcher's aim assist turns the chassis no faster than this, degrees/s */
+  aimTurn?: number;
+  /** the shortest time between two shots, s (a turret's cadence; a setpoint wheel's feed) */
+  shotInterval?: number;
+  /** a setpoint flywheel's spin-up, rpm/s */
+  spinUp?: number;
+  /** the intake's time per element, as a multiple of what the sim derives */
+  intakeTime?: number;
+  /** a dumper's re-arm after a throw, s */
+  reload?: number;
+  /** a turret's top slew rate, degrees/s */
+  turretSlew?: number;
+  /** BIOBUZZ: the ramp's swing time, s */
+  rampDeployS?: number;
 }
 
 export interface ImportedBand {

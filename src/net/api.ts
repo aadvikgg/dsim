@@ -10,7 +10,7 @@ import { gameServerHttpUrl, lanActive, lanServerHttpUrl, setLanFromServer } from
 import { tabHosting } from '../lan/hosting';
 import { ROBOT_IMPORT_CAP, replayHasImported } from './imported';
 import { IMPORT_VISUALS_CAP } from './importVisuals';
-import { SETTINGS_KEEPS_IMPORTS } from './settingsKeep';
+import { SETTINGS_KEEPS_IMPORTS, SETTINGS_KEEPS_TUNE } from './settingsKeep';
 import { getAuthToken } from '../lib/authClient';
 import { readAccountSettings, sendWithTokenRetry } from './authFetch';
 import { DISCORD_REGION } from './discordActivity';
@@ -682,7 +682,7 @@ export async function saveAccountSettings(settings: unknown): Promise<void> {
     headers: { 'content-type': 'application/json' },
     // `caps` says this build keeps imported robots in the blob, so the server stores it as sent; a
     // save WITHOUT it is an older build's, which the server merges (`src/net/settingsKeep.ts`)
-    body: JSON.stringify({ settings, caps: [SETTINGS_KEEPS_IMPORTS] }),
+    body: JSON.stringify({ settings, caps: [SETTINGS_KEEPS_IMPORTS, SETTINGS_KEEPS_TUNE] }),
   }).catch(() => null);
   // best-effort by design (the next edit saves again), but not SILENT: a refused save is the
   // one way the account copy drifts from this device without anybody noticing

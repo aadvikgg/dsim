@@ -47,6 +47,8 @@ import { ConfirmDialog, DuplicateDialog } from './LibraryDialogs';
 import { MechanismsStep } from './MechanismsStep';
 import { ModelStep } from './ModelStep';
 import { MotionPanel } from './MotionPanel';
+import { TunePanel } from './TunePanel';
+import { driveTuneFields, mechTuneFields } from './tuneFields';
 import { PreviewPane } from './PreviewPane';
 import { ReviewStep } from './ReviewStep';
 import { TopDownMap } from './TopDownMap';
@@ -553,7 +555,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
     const cur = draftRef.current;
     const e = engRef.current;
     if (!cur || !e || !normalised || measuring || !built?.spec.imported) return null;
-    const stamp = JSON.stringify([cur.doc.setup, cur.doc.mech, built.spec.imported]);
+    // practice tuning moves no triangle: a retune does not re-bake
+    const stamp = JSON.stringify([{ ...cur.doc.setup, tune: undefined }, cur.doc.mech, { ...built.spec.imported, tune: undefined }]);
     if (cur.baked?.stamp === stamp) return cur.baked;
     const r = await e.bake({
       modelParts: normalised.modelParts,
@@ -783,6 +786,15 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         onSelect={setSelHandle}
         onMech={(next: ImportedMech) => update((d) => ({ ...d, mech: next }))}
         onReset={() => update((d) => ({ ...d, mech: null }))}
+        tuning={
+          <TunePanel
+            id="ri-tune-mech"
+            title={COPY.tuneMech}
+            fields={mechTuneFields(game, built.spec)}
+            tune={doc.setup.tune}
+            onTune={(tune) => update((d) => ({ ...d, setup: { ...d.setup, tune } }))}
+          />
+        }
         moving={
           <MotionPanel
             rampOk={game === 'biobuzz' && bbIntakeKindOf(built.spec) === 'ramp'}
@@ -924,6 +936,17 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
                 drive={doc.setup.drive}
                 numbers={numbers}
                 onDrive={(patch) => update((d) => ({ ...d, setup: { ...d.setup, drive: { ...d.setup.drive, ...patch } } }))}
+                tuning={
+                  built ? (
+                    <TunePanel
+                      id="ri-tune-drive"
+                      title={COPY.tuneDrive}
+                      fields={driveTuneFields(built.spec)}
+                      tune={doc.setup.tune}
+                      onTune={(tune) => update((d) => ({ ...d, setup: { ...d.setup, tune } }))}
+                    />
+                  ) : null
+                }
               />
             ) : step === 2 ? (
               mechPanel

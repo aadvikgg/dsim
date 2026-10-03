@@ -33,7 +33,7 @@ import {
   BB_LAUNCH_PLATE_GAP,
   BB_LAUNCH_PLATE_OVERHANG,
   BB_POLLEN_R,
-  BB_RAMP_DEPLOY_S,
+  bbRampDeployS,
   BB_RAMP_OUT,
   BB_RAMP_PIVOT_BACK,
   BB_SIDE_ROLLER_BOSS_R,
@@ -474,7 +474,7 @@ function drawBiobuzzIntake(ctx: CanvasRenderingContext2D, r: RobotState, on: boo
  */
 function bbRampEaseFrac(r: RobotState, world: World | undefined): number {
   if (!world) return r.bbRampOut ? 1 : 0;
-  const t = clamp((world.time - (r.bbRampAt ?? -Infinity)) / BB_RAMP_DEPLOY_S, 0, 1);
+  const t = clamp((world.time - (r.bbRampAt ?? -Infinity)) / bbRampDeployS(r.spec), 0, 1);
   const e = t * t * (3 - 2 * t); // smoothstep — matches `scene/renderRobots.ts`'s `smoothstep01`
   return r.bbRampOut ? e : 1 - e;
 }

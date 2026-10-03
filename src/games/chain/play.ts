@@ -222,7 +222,8 @@ export function updateChain(
       // fly along the STALE heading and miss. The launch reads r.turretHeading (physical).
       // solved FROM the turret's own position (see turretOrigin), not the chassis centre
       const desiredTurret = leadDir(turretOrigin(r), mouth, CHAIN_SHOT_SPEED, r.vel);
-      r.turretHeading = slewAngle(r.turretHeading, desiredTurret, CHAIN_TURRET_SLEW * dt);
+      const tunedSlew = r.spec.imported?.tune?.turretSlew;
+      r.turretHeading = slewAngle(r.turretHeading, desiredTurret, (tunedSlew !== undefined ? (tunedSlew * Math.PI) / 180 : CHAIN_TURRET_SLEW) * dt);
       if (wantsFire && r.hopper.length > 0 && world.time >= r.fireReadyAt) {
         const twin = mode === 'twinturret';
         r.hopper.shift();
@@ -236,7 +237,9 @@ export function updateChain(
         // carries and the cadence averages EXACTLY its nominal rate; clamp forward when the
         // hopper has been idle so a resumed burst can't catch up on accumulated debt.
         // A twin divides the interval by CHAIN_TWIN_FIRE_MULT — two barrels, one indexer.
-        r.fireReadyAt += twin ? CHAIN_FIRE_INTERVAL / CHAIN_TWIN_FIRE_MULT : CHAIN_FIRE_INTERVAL;
+        // an import's practice tuning names the time between shots, both barrels together
+        const tunedShot = r.spec.imported?.tune?.shotInterval;
+        r.fireReadyAt += tunedShot !== undefined ? tunedShot : twin ? CHAIN_FIRE_INTERVAL / CHAIN_TWIN_FIRE_MULT : CHAIN_FIRE_INTERVAL;
         if (r.fireReadyAt < world.time) r.fireReadyAt = world.time;
         r.lastFireAt = world.time;
       }
@@ -263,7 +266,8 @@ export function updateChain(
           const n = r.hopper.length;
           r.hopper.length = 0;
           launchLine(world, chain, r, n, CHAIN_DUMP_SPEED, CHAIN_DUMP_SIDE_VAR);
-          r.fireReadyAt = world.time + CHAIN_DUMP_INTERVAL;
+          const reload = r.spec.imported?.tune?.reload;
+          r.fireReadyAt = world.time + (reload !== undefined ? reload : CHAIN_DUMP_INTERVAL);
         }
         r.lastFireAt = world.time;
       }

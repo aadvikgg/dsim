@@ -32,7 +32,7 @@ import {
   BB_LAUNCH_SPEED_MAX,
   BB_LAUNCH_Z0,
   BB_PLACE_REACH,
-  BB_RAMP_DEPLOY_S,
+  bbRampDeployS,
   BB_RAMP_OUT,
   BB_SIDE_ROLLER_PROTRUDE,
   BB_TURRET_AXLE_Z,
@@ -545,9 +545,11 @@ export function bbIntakeAct(world: World, r: RobotState, opts: BbIntakeOpts = {}
       const seated = arrived && (Math.abs(v) < throatHalf || pinned);
       const t = pinned ? 1 : clamp(Math.abs(v) / g.half, 0, 1);
       const closing = clamp(-relU / BB_INTAKE_CLOSE_REF, 0, 1);
-      const period =
+      const period0 =
         (BB_INTAKE_PERIOD_MIN + (BB_INTAKE_PERIOD_MAX - BB_INTAKE_PERIOD_MIN) * t) /
         (1 + BB_INTAKE_CLOSE_BONUS * closing);
+      const intakeK = r.spec.imported?.tune?.intakeTime;
+      const period = intakeK !== undefined ? period0 * intakeK : period0;
       cands.push({ ball: b, v, half: g.half, seated, period });
       break; // an element is in at most one mouth: opposite edges cannot both hold it
     }
@@ -1012,7 +1014,8 @@ export function bbLaunch(world: World, r: RobotState, cmd: RobotCommand, enabled
     r.lastFireAt = world.time;
     // A FLING IS ONE MOTION, so the re-arm is the full `BB_DUMP_RELOAD_S` either way. The
     // short "still pouring" re-arm the stagger needed is gone with the stagger.
-    r.fireReadyAt = world.time + BB_DUMP_RELOAD_S;
+    const reload = r.spec.imported?.tune?.reload;
+    r.fireReadyAt = world.time + (reload !== undefined ? reload : BB_DUMP_RELOAD_S);
     return;
   }
 
@@ -1027,7 +1030,8 @@ export function bbLaunch(world: World, r: RobotState, cmd: RobotCommand, enabled
     const rel = bbFixedRelease(r, flyExitSpeed(r));
     releasePollen(world, r, rel.vel, undefined, rel.origin, colour, rel.z);
     r.lastFireAt = world.time;
-    r.fireReadyAt = world.time + (r.spec.flywheel?.feedS ?? BB_FIXED_FLY_DEFAULT.feedS);
+    const tunedFeed = r.spec.imported?.tune?.shotInterval;
+    r.fireReadyAt = world.time + (tunedFeed !== undefined ? tunedFeed : (r.spec.flywheel?.feedS ?? BB_FIXED_FLY_DEFAULT.feedS));
     flyShot(r);
     return;
   }
@@ -1041,6 +1045,7 @@ export function bbLaunch(world: World, r: RobotState, cmd: RobotCommand, enabled
   // with nothing of its kind in the hopper, or one still slewing, is SKIPPED — never a `break`,
   // which is what used to stall a loaded turret behind its partner.
   let beats = 0;
+  const tunedBeat = r.spec.imported?.tune?.shotInterval;
   while (r.fireReadyAt <= world.time && beats < BB_FIRE_BURST_MAX) {
     let released = false;
     for (const which of exits) {
@@ -1054,7 +1059,7 @@ export function bbLaunch(world: World, r: RobotState, cmd: RobotCommand, enabled
       released = true;
     }
     if (!released) break; // nothing left either exit can fire: stop, and leave the clock alone
-    r.fireReadyAt += BB_FIRE_INTERVAL;
+    r.fireReadyAt += tunedBeat !== undefined ? tunedBeat : BB_FIRE_INTERVAL;
     beats++;
   }
   if (beats > 0) r.lastFireAt = world.time;
@@ -1550,7 +1555,8 @@ export function bbSlewTurret(
     const now = which === 1 ? (r.bbTurret2Heading ?? r.turretHeading) : r.turretHeading;
     const was = (which === 1 ? r.bbTurret2YawVel : r.bbTurretYawVel) ?? 0;
     // the CHASSIS's own yaw rate is the base the turret ring is bolted to — see `slewAxis`
-    const s = slewAxis(now, wantYaw, was, BB_TURRET_SLEW, BB_TURRET_ACCEL, r.angVel, dt, true);
+    const slew = r.spec.imported?.tune?.turretSlew;
+    const s = slewAxis(now, wantYaw, was, slew !== undefined ? (slew * Math.PI) / 180 : BB_TURRET_SLEW, BB_TURRET_ACCEL, r.angVel, dt, true);
     if (which === 1) {
       r.bbTurret2Heading = s.at;
       r.bbTurret2YawVel = s.vel;
@@ -1699,8 +1705,9 @@ export function bbRampSwingProgress(r: RobotState, time: number): number | null 
   const at = r.bbRampAt;
   if (at === undefined) return null;
   const elapsed = time - at;
-  if (elapsed < 0 || elapsed >= BB_RAMP_DEPLOY_S) return null; // settled, either way
-  const t = clamp(elapsed / BB_RAMP_DEPLOY_S, 0, 1);
+  const swing = bbRampDeployS(r.spec);
+  if (elapsed < 0 || elapsed >= swing) return null; // settled, either way
+  const t = clamp(elapsed / swing, 0, 1);
   const e = t * t * (3 - 2 * t);
   return r.bbRampOut ? e : 1 - e;
 }
@@ -1716,7 +1723,7 @@ export function bbRampSwingProgress(r: RobotState, time: number): number | null 
  */
 export function bbRampReverse(r: RobotState, time: number, elapsed: number): void {
   r.bbRampOut = !r.bbRampOut;
-  r.bbRampAt = time - (BB_RAMP_DEPLOY_S - elapsed);
+  r.bbRampAt = time - (bbRampDeployS(r.spec) - elapsed);
   r.bbRampBlocked = true;
 }
 
@@ -1731,7 +1738,7 @@ export function bbRampReverse(r: RobotState, time: number, elapsed: number): voi
  * way (a staged scene, a future spawn default) with no matching stamp.
  */
 export function bbRampSettled(r: RobotState, time: number): boolean {
-  return !!r.bbRampOut && time - (r.bbRampAt ?? -Infinity) >= BB_RAMP_DEPLOY_S;
+  return !!r.bbRampOut && time - (r.bbRampAt ?? -Infinity) >= bbRampDeployS(r.spec);
 }
 
 /**
