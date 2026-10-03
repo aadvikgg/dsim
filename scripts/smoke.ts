@@ -36857,6 +36857,44 @@ function fxImportFixed(): RobotSpec {
     r.trisOut <= 3000 && kept >= 0.97 && worst < 0.02 * R * 0.5 && triangleCount(r.parts) === r.trisOut,
     JSON.stringify({ tris: r.trisOut, kept: kept.toFixed(4), worst: worst.toFixed(4) }),
   );
+  // ONE CALL PER BODY: a dense plate (body 0) with 300 tiny blocks standing on its grid points
+  // (bodies 1..300, one colour). Their corners share the plate's positions but not its vertices; in
+  // one call the blocks read as joined to the plate, `Prune` could not take them, and the bound
+  // climbed until EVERYTHING went (measured: 0 triangles at 80 % of the plate's size). Each body
+  // alone, the plate collapses and the smallest blocks are dropped first at the shape cap.
+  {
+    const N = 40;
+    const pos: number[] = [];
+    const idx: number[] = [];
+    const body: number[] = [];
+    for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) {
+      pos.push(i / N, j / N, 0);
+      body.push(0);
+    }
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      const a = j * (N + 1) + i;
+      idx.push(a, a + 1, a + N + 2, a, a + N + 2, a + N + 1);
+    }
+    let b = 1;
+    for (let j = 1; j < N - 1 && b <= 300; j += 2) for (let i = 1; i < N - 1 && b <= 300; i += 2) {
+      const [x0, y0, x1, y1, z] = [i / N, j / N, (i + 1) / N, (j + 1) / N, 0.5 / N];
+      const base = pos.length / 3;
+      for (const v of [[x0, y0, 0], [x1, y0, 0], [x1, y1, 0], [x0, y1, 0], [x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]]) {
+        pos.push(v[0], v[1], v[2]);
+        body.push(b);
+      }
+      for (const t of [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]]) idx.push(base + t[0], base + t[1], base + t[2]);
+      b++;
+    }
+    const plate: P = { positions: new Float32Array(pos), indices: new Uint32Array(idx), color: [0.7, 0.7, 0.7], name: 'plate', body: new Uint32Array(body) };
+    const r2 = await simplifyParts([plate], 300);
+    const kept = new Set(Array.from(r2.parts[0]?.body ?? []));
+    check(
+      'mesh quality: blocks standing on a plate (one colour, separate bodies sharing positions) do not take the plate with them: one call per body keeps the plate, drops blocks smallest first, and stops at the shape cap',
+      r2.trisOut <= 300 && r2.trisOut > 200 && kept.has(0) && kept.size > 10 && r2.error <= 0.0021,
+      JSON.stringify({ tris: r2.trisOut, bodies: kept.size, bound: r2.error }),
+    );
+  }
   check('mesh quality: no sloppy pass is left in the simplifier (source pin)', !/simplifySloppy\(/.test(readFileSync('src/robotImport/engine/simplify.ts', 'utf8')));
   // the lists stay apart and share one bound
   const ring = new THREE.TorusGeometry(1, 0.3, 40, 120);

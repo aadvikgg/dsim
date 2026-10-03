@@ -382,9 +382,19 @@ sampled, offscreen renders under the match's lighting):
 - **One error bound for the robot, no sloppy pass** (`engine/simplify.ts`). The per-group share
   plus `simplifySloppy` fallback shredded every goBILDA group and 88 % of REV's (holes through
   perforated plates, gears as blobs): p90 2.09 mm, max 15.9 mm at 84k triangles. One absolute bound,
-  found by a doubling ladder and five bisection steps, each colour group its own call with `Prune`:
-  p90 0.66 mm, max 3.6 mm at the same count. The bake's refit and `liteMesh` use it too, over the
-  robot and its moving parts at once (`simplifyLists`). Costs a few seconds more in the import worker.
+  found by a doubling ladder and five bisection steps, with `Prune`: p90 0.66 mm, max 3.6 mm at the
+  same count. The bake's refit and `liteMesh` use it too, over the robot and its moving parts at once
+  (`simplifyLists`).
+- ⚠️ **One simplifier call per BODY, not per colour.** Touching bodies share positions but never
+  vertices (`weld` keeps them apart); in one call the coincident vertices are seams, and a small body
+  touching a big one reads as joined to it, so `Prune` cannot take it and the bound climbs until it
+  takes everything. Measured at 250k triangles against the full CAD: the goBILDA kit (face-split
+  read) went from p90 30.8 mm (63 % of the surface over 3 mm off) to 0.45 mm (none over 3 mm), and
+  in ONE colour from p90 44 mm to the same 0.45; REV 0.19 → 0.17 mm; both twice as fast. Bodies under
+  64 triangles share one call per part. Smoke: blocks standing on a plate.
+- **At a shape cap of 0.2 % of the model's size, small bodies go before the bound climbs**
+  (`dropSmallBodies`): smallest first, never one over 8 % of the size. A floor of fasteners no
+  longer coarsens every other surface.
 - **Finish by colour** (`robotImport/finish.ts`): light neutral → metal 1 / rough 0.4, mid neutral
   → 0.5 / 0.45, dark → 0 / 0.6, saturated → 0 / 0.45. Every part was 0.05 / 0.55, which turned
   anodised aluminium to chalk. A stored mesh with the old pair is upgraded on load. The editor
