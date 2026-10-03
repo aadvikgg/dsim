@@ -1413,6 +1413,86 @@ async function main(): Promise<void> {
     }
 
     /**
+     * ---- AN OLDER BUILD'S SETTINGS SAVE KEEPS THE IMPORTED ROBOT (`POST /api/user/settings`) ----
+     * main and alpha rebuild the robot field by field and the route stored what it was sent, so
+     * one save from them (Free Drive on Modes) deleted the account's import on every device. The
+     * route's write is `saveSettingsFromClient`: a save carrying `caps: ['robotImport']` is stored
+     * as sent, one without is merged (`src/net/settingsKeep.ts`). Driven here against the real
+     * table, through the real coercer on both ends; the older build is what its `coerceSettings`
+     * was measured to send (the robot minus `imported` and DECODE's fixed-launcher fields, no
+     * `lastStandardSpec`).
+     */
+    {
+      const { coerceSettings, rememberStandardRobot, switchGame } = await import('../src/settings');
+      const { coerceSpec } = await import('../src/sim/spawn');
+      const IMP_D = { v: 1 as const, id: '0123456789abcdef', heightIn: 12, hull: [{ x: -7, y: -8 }, { x: 9, y: -8 }, { x: 9, y: 8 }, { x: -7, y: 8 }] };
+      const IMP_B = { ...IMP_D, id: 'fedcba9876543210', heightIn: 14 };
+      type Blob = Record<string, unknown> & { spec?: Record<string, unknown>; loadouts?: Record<string, Record<string, unknown>> };
+      const json = (x: unknown): Blob => JSON.parse(JSON.stringify(x));
+      let s = coerceSettings({ game: 'biobuzz' });
+      s = rememberStandardRobot(s, { ...s, spec: coerceSpec({ ...s.spec, imported: IMP_B }, undefined, 'biobuzz') });
+      s = switchGame(s, 'decode');
+      s = rememberStandardRobot(s, { ...s, spec: coerceSpec({ ...s.spec, launcher: 'fixed', hoodDeg: 70, imported: IMP_D }, undefined, 'decode') });
+      const fresh = json(s);
+      const strip = (spec: unknown): Record<string, unknown> => {
+        const o = { ...(spec as Record<string, unknown>) };
+        for (const k of ['imported', 'launcher', 'hoodDeg', 'flywheel']) delete o[k];
+        return o;
+      };
+      const older = (b: Blob): Blob => {
+        const o = json(b);
+        o.spec = strip(o.spec);
+        delete o.lastStandardSpec;
+        for (const g of Object.keys(o.loadouts ?? {})) {
+          o.loadouts![g].spec = strip(o.loadouts![g].spec);
+          delete o.loadouts![g].lastStandardSpec;
+        }
+        return o;
+      };
+      const read = async (u: string) => coerceSettings(await repo.getUserSettings(u));
+      // jsonb stores keys in its own order, so "as sent" is compared with the keys sorted
+      const canon = (x: unknown): string => JSON.stringify(x, (_k, v: unknown) =>
+        v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1))) : v);
+      await repo.ensureProfile('set-keep', 'Keeper');
+
+      await repo.saveSettingsFromClient('set-keep', fresh, ['robotImport']);
+      check('settings: a save from a build that keeps imports is stored as sent',
+        canon(await repo.getUserSettings('set-keep')) === canon(fresh));
+
+      await repo.saveSettingsFromClient('set-keep', older(fresh), undefined);
+      let back = await read('set-keep');
+      check('settings: an OLDER build\'s save of the same robot keeps the import, its fixed launcher and the last standard robot',
+        back.spec.imported?.id === IMP_D.id && back.spec.launcher === 'fixed' && !!back.lastStandardSpec, JSON.stringify(back.spec.imported?.id));
+      check('settings: ...and the archived game\'s import with its last standard robot',
+        switchGame(back, 'biobuzz').spec.imported?.id === IMP_B.id && !!switchGame(back, 'biobuzz').lastStandardSpec);
+
+      const sentPreset = { ...older(fresh), spec: { ...strip(fresh.spec), length: 14, driveRpm: 300 } };
+      const stored = await repo.saveSettingsFromClient('set-keep', sentPreset, []);
+      back = await read('set-keep');
+      check('settings: another robot picked on the older build is stored as picked (a deliberate switch is respected)',
+        !back.spec.imported && back.spec.length === 14 && stored.lastStandardSpec === undefined);
+      check('settings: ...while the other game\'s import is still kept', switchGame(back, 'biobuzz').spec.imported?.id === IMP_B.id);
+
+      // a NEW build that deliberately drops the import is stored as sent too: the merge is for older builds only
+      await repo.saveSettingsFromClient('set-keep', fresh, ['robotImport']);
+      const dropped = { ...fresh, spec: strip(fresh.spec), loadouts: { ...fresh.loadouts, biobuzz: { ...fresh.loadouts!.biobuzz, spec: strip(fresh.loadouts!.biobuzz.spec) } } };
+      await repo.saveSettingsFromClient('set-keep', dropped, ['robotImport']);
+      back = await read('set-keep');
+      check('settings: a new build\'s save without the import is never "repaired"',
+        !back.spec.imported && !switchGame(back, 'biobuzz').spec.imported);
+
+      // a first save (no stored blob) from an older build
+      await repo.ensureProfile('set-first', 'First');
+      await repo.saveSettingsFromClient('set-first', older(fresh), undefined);
+      check('settings: an older build\'s FIRST save is stored as sent', canon(await repo.getUserSettings('set-first')) === canon(older(fresh)));
+
+      const apiSrc = readFileSync(join(ROOT, 'server/api.ts'), 'utf8');
+      const route = apiSrc.slice(apiSrc.indexOf("url.pathname === '/api/user/settings'"));
+      check('settings: the route writes through saveSettingsFromClient with the body\'s caps (not saveUserSettings)',
+        /saveSettingsFromClient\(user\.userId, settings as Record<string, unknown>, caps\)/.test(route.slice(0, 2500)) && !/saveUserSettings\(/.test(route.slice(0, 2500)));
+    }
+
+    /**
      * THE PRE-RULING ROW. Written with raw SQL on purpose: `submitRecord` refuses it now, and
      * the rows that matter are the ones already in the table from before the ruling. Its score
      * is HIGHER than the same player's 3D run, which is the shape that breaks a naive fix —

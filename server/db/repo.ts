@@ -27,6 +27,7 @@ import {
 } from '../../src/net/protocol';
 import { scrubSpecNames } from '../moderation';
 import { isImportedSpec } from '../../src/net/imported';
+import { keepImportsFromOlderClient, keepsImports } from '../../src/net/settingsKeep';
 
 /** every board/period is keyed by game; old callers/rows default to DECODE. */
 type Game = GameId;
@@ -787,6 +788,26 @@ export async function saveUserSettings(userId: string, settings: unknown): Promi
     userId,
     JSON.stringify(settings),
   ]);
+}
+
+/**
+ * `POST /api/user/settings`'s write: the blob as sent from a build that keeps imported robots
+ * (`caps` names `SETTINGS_KEEPS_IMPORTS`), else merged with the stored one so an OLDER build's save
+ * cannot strip the account's imported robot (`keepImportsFromOlderClient`, `src/net/settingsKeep.ts`
+ * has the rules). The read and the write are one transaction with the row locked, so two saves
+ * cannot interleave between them. Returns what was stored. The profile row is ensured by the caller.
+ */
+export async function saveSettingsFromClient(userId: string, settings: Record<string, unknown>, caps: unknown): Promise<Record<string, unknown>> {
+  if (keepsImports(caps)) {
+    await saveUserSettings(userId, settings);
+    return settings;
+  }
+  return tx(async (query) => {
+    const rows = await query<{ settings: unknown }>(`select settings from profiles where user_id = $1 for update`, [userId]);
+    const kept = keepImportsFromOlderClient(rows[0]?.settings ?? null, settings);
+    await query(`update profiles set settings = $2, updated_at = now() where user_id = $1`, [userId, JSON.stringify(kept)]);
+    return kept;
+  });
 }
 
 // ---------------------------------------------- supporter entitlements ------

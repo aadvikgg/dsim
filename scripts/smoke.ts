@@ -392,6 +392,7 @@ import {
 } from '../src/net/imported';
 import { SERVER_CAPS } from '../src/net/protocol';
 import { rememberStandardRobot, sameBuild, standardRobotChoices, standardRobotFor } from '../src/settings';
+import { SETTINGS_KEEPS_IMPORTS, keepImportsFromOlderClient, keepsImports, sameButDropped } from '../src/net/settingsKeep';
 import { pendingPracticeUploads, savePracticeRun } from '../src/net/practiceRuns';
 import { pendingLanUploads, saveLanRunLocal } from '../src/net/lanRuns';
 import { sanitizeReplay } from '../src/net/sanitize';
@@ -29521,6 +29522,103 @@ const dumperSetup = (): RobotSetup => {
       standardRobotChoices({ ...imported, lastStandardSpec: std, savedRobots: [impSpec, saved] }).every((r) => !isImportedSpec(r)));
     check('imports/settings: ...without listing the same build twice', standardRobotChoices({ ...imported, lastStandardSpec: std, savedRobots: [{ ...std }, saved] }).length === 2 && sameBuild(std, { ...std }));
   }
+}
+
+// ---- AN OLDER BUILD'S SETTINGS SAVE KEEPS THE ACCOUNT'S IMPORTED ROBOT (`src/net/settingsKeep.ts`) ----
+// main and alpha rebuild the robot field by field and `/api/user/settings` stored what it was sent,
+// so one save from them deleted the import everywhere. The server now merges a cap-less save. The
+// older build is simulated by what its `coerceSettings` was MEASURED to send back (2026-10-02, the
+// real main and alpha coercers on a blob from this branch): the robot minus `imported` (and minus
+// DECODE's `launcher`/`hoodDeg`/`flywheel`), no `lastStandardSpec` anywhere.
+{
+  const IMP_D = { v: 1 as const, id: '0123456789abcdef', heightIn: 12, hull: [{ x: -7, y: -8 }, { x: 9, y: -8 }, { x: 9, y: 8 }, { x: -7, y: 8 }] };
+  const IMP_B = { ...IMP_D, id: 'fedcba9876543210', heightIn: 14 };
+  type Blob = Record<string, unknown> & { spec?: Record<string, unknown>; loadouts?: Record<string, Record<string, unknown>> };
+  const json = (x: unknown): Blob => JSON.parse(JSON.stringify(x));
+  /** a blob this branch writes: BIOBUZZ archived with an import, DECODE active with one (a fixed launcher) */
+  const fresh = (): Blob => {
+    let s = coerceSettings({ game: 'biobuzz' });
+    s = rememberStandardRobot(s, { ...s, spec: coerceSpec({ ...s.spec, imported: IMP_B }, undefined, 'biobuzz') });
+    s = switchGame(s, 'decode');
+    s = rememberStandardRobot(s, { ...s, spec: coerceSpec({ ...s.spec, launcher: 'fixed', hoodDeg: 70, imported: IMP_D }, undefined, 'decode') });
+    return json(s);
+  };
+  const strip = (spec: unknown): Record<string, unknown> => {
+    const o = { ...(spec as Record<string, unknown>) };
+    for (const k of ['imported', 'launcher', 'hoodDeg', 'flywheel']) delete o[k];
+    return o;
+  };
+  /** what an older build sends back for `b` */
+  const older = (b: Blob): Blob => {
+    const o = json(b);
+    o.spec = strip(o.spec);
+    delete o.lastStandardSpec;
+    for (const g of Object.keys(o.loadouts ?? {})) {
+      o.loadouts![g].spec = strip(o.loadouts![g].spec);
+      delete o.loadouts![g].lastStandardSpec;
+    }
+    return o;
+  };
+  const st = fresh();
+  check('settings keep: the blob this branch writes holds both imports and both standard robots (the premise)',
+    isImportedSpec(st.spec) && (st.spec as { launcher?: string }).launcher === 'fixed' && !!st.lastStandardSpec && isImportedSpec(st.loadouts?.biobuzz?.spec) && !!st.loadouts?.biobuzz?.lastStandardSpec);
+  check('settings keep: this build\'s settings save says it keeps imports (`caps` on the POST body)',
+    /body: JSON\.stringify\(\{ settings, caps: \[SETTINGS_KEEPS_IMPORTS\] \}\)/.test(readFileSync('src/net/api.ts', 'utf8')));
+  check('settings keep: only a save whose caps name the import cap is taken as sent',
+    keepsImports([SETTINGS_KEEPS_IMPORTS]) && keepsImports(['x', 'robotImport']) && !keepsImports(undefined) && !keepsImports([]) && !keepsImports('robotImport') && !keepsImports({ 0: 'robotImport' }));
+
+  const sent = older(st);
+  const before = JSON.stringify([st, sent]);
+  const kept = keepImportsFromOlderClient(st, sent) as Blob;
+  check('settings keep: an older build\'s save of the SAME robot keeps the stored one whole: the import, and the fixed launcher it dropped too',
+    JSON.stringify(kept.spec) === JSON.stringify(st.spec), JSON.stringify(kept.spec).slice(0, 120));
+  check('settings keep: ...and its last standard robot', JSON.stringify(kept.lastStandardSpec) === JSON.stringify(st.lastStandardSpec));
+  check('settings keep: ...and the archived game\'s import and its last standard robot',
+    JSON.stringify(kept.loadouts?.biobuzz?.spec) === JSON.stringify(st.loadouts?.biobuzz?.spec) && JSON.stringify(kept.loadouts?.biobuzz?.lastStandardSpec) === JSON.stringify(st.loadouts?.biobuzz?.lastStandardSpec));
+  check('settings keep: ...while everything else the older build sent stands (a toggle it changed is not reverted)',
+    keepImportsFromOlderClient(st, { ...sent, practiceDummies: !st.practiceDummies }).practiceDummies === !st.practiceDummies);
+  check('settings keep: neither argument is mutated', JSON.stringify([st, sent]) === before);
+  const back = coerceSettings(json(kept));
+  check('settings keep: the merged blob reads back through this branch\'s coerceSettings with both imports',
+    back.spec.imported?.id === IMP_D.id && back.spec.launcher === 'fixed' && !!back.lastStandardSpec && switchGame(back, 'biobuzz').spec.imported?.id === IMP_B.id);
+
+  // a deliberate change on the older build is respected
+  const preset = { ...older(st), spec: { ...strip(st.spec), length: 14, width: 15, driveRpm: 300 } };
+  const p = keepImportsFromOlderClient(st, preset) as Blob;
+  check('settings keep: another robot picked on the older build (a preset keeps the name) stays picked: no import, no stale standard robot',
+    !isImportedSpec(p.spec) && p.spec?.length === 14 && p.lastStandardSpec === undefined);
+  check('settings keep: ...and the OTHER game\'s import is still kept', isImportedSpec(p.loadouts?.biobuzz?.spec));
+  const slid = { ...older(st), spec: { ...strip(st.spec), driveRpm: (st.spec?.driveRpm as number) + 10 } };
+  check('settings keep: one slider moved on the older build is a change too', !isImportedSpec((keepImportsFromOlderClient(st, slid) as Blob).spec));
+  // the older build switched game: the DECODE import is archived in ITS loadouts now
+  const sw = json(switchGame(coerceSettings(older(st)), 'chain'));
+  const swKept = keepImportsFromOlderClient(st, sw) as Blob;
+  check('settings keep: an older build that switched game: the import is re-attached where it now lives (loadouts.decode)',
+    sw.game === 'chain' && !isImportedSpec(swKept.spec) && JSON.stringify(swKept.loadouts?.decode?.spec) === JSON.stringify(st.spec) && isImportedSpec(swKept.loadouts?.biobuzz?.spec));
+  // a game the older build did not send at all
+  const noBb = older(st);
+  delete noBb.loadouts!.biobuzz;
+  check('settings keep: a game the older build sent nothing for keeps its stored loadout with its import',
+    isImportedSpec((keepImportsFromOlderClient(st, noBb) as Blob).loadouts?.biobuzz?.spec));
+  // nothing to keep
+  const plain = json(coerceSettings({ game: 'decode' }));
+  const plainSent = older(plain);
+  check('settings keep: a store with no import changes nothing (the incoming blob is returned as is)', keepImportsFromOlderClient(plain, plainSent) === plainSent);
+  const inc = older(st);
+  check('settings keep: no stored blob (a first save) changes nothing', keepImportsFromOlderClient(null, inc) === inc && keepImportsFromOlderClient('junk', inc) === inc);
+  check('settings keep: sameButDropped refuses a robot that carries an import, one without a name or size, and a different value',
+    !sameButDropped(st.spec, st.spec) && !sameButDropped({ drivetrain: 'tank' }, st.spec) && !sameButDropped({ ...strip(st.spec), massLb: -1 }, st.spec) && sameButDropped(strip(st.spec), st.spec));
+  // ⚠️ the documented limit: an older build REWRITES a BIOBUZZ fixed launcher (it reads 'fixed' as a
+  // turret and re-derives the mass), so that save really did change the robot and is not undone
+  const bbFixed = (() => {
+    let s = coerceSettings({ game: 'biobuzz' });
+    const spec = coerceSpec({ ...s.spec, bbMech: { launcher: { kind: 'fixed', mount: 'front', hoodDeg: 77 }, lift: null }, imported: IMP_B }, undefined, 'biobuzz');
+    s = { ...s, spec };
+    return json(s);
+  })();
+  const rewritten = { ...older(bbFixed), spec: { ...strip(bbFixed.spec), bbMech: { launcher: { kind: 'turret', mount: 'front', hoodDeg: 77 }, lift: null } } };
+  check('settings keep: (limit) a BIOBUZZ fixed launcher an older build turned into a turret is a changed robot, and is not re-attached',
+    (bbFixed.spec?.bbMech as { launcher?: { kind?: string } }).launcher?.kind === 'fixed' && !isImportedSpec((keepImportsFromOlderClient(bbFixed, rewritten) as Blob).spec));
 }
 
 /**

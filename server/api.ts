@@ -78,7 +78,7 @@ import {
   exportAccount,
   listSeasonsCached,
   recordLeaderboard,
-  saveUserSettings,
+  saveSettingsFromClient,
   setHandle,
   setUsername,
   userMatchHistory,
@@ -135,7 +135,10 @@ const SITE_WRITE_EXEMPT = new Set(['/api/kofi/webhook', '/api/user/delete']);
  *   GET  /api/profile/<username>             — public profile by username (handle+id)
  *   GET  /api/profile/<username>/stats?season=<n> — one user's stats, by username
  *   GET  /api/user/settings                  — your synced settings (Bearer JWT)
- *   POST /api/user/settings {settings}       — save your settings (Bearer JWT)
+ *   POST /api/user/settings {settings, caps?} — save your settings (Bearer JWT); without
+ *                                              `caps: ['robotImport']` an older build's save is
+ *                                              merged so it keeps the imported robot
+ *                                              (`src/net/settingsKeep.ts`)
  *   GET  /api/user/privacy                   — your replay-visibility setting (Bearer JWT)
  *   POST /api/user/privacy {replaysPublic}   — set it (Bearer JWT)
  *   GET  /api/user/title                     — RETIRED (0049): always no title, nothing earned
@@ -982,21 +985,26 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse): Prom
       }
       // POST: save the whole settings blob
       let settings: unknown;
+      let caps: unknown;
       try {
         // 64 KB, not `readBody`'s 512 KB default. This blob is keybinds, toggles and a colour
         // or two — a few KB at the outside — and it is stored per account, so the default cap
         // let a signed-in client park half a megabyte of anything in Postgres under the name
         // "settings". The limit is the shape of the data, not the shape of the transport.
-        settings = JSON.parse(await readBody(req, 64 * 1024)).settings;
+        const body = JSON.parse(await readBody(req, 64 * 1024));
+        settings = body.settings;
+        caps = body.caps;
       } catch {
         return json(400, { error: 'bad request' }), true;
       }
-      if (typeof settings !== 'object' || settings === null) {
+      if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) {
         return json(400, { error: 'settings must be an object' }), true;
       }
       if (dbEnabled) {
         await ensureProfile(user.userId, user.handle);
-        await saveUserSettings(user.userId, settings);
+        // ⚠️ AN OLDER BUILD'S SAVE (no `caps`) DROPS THE IMPORTED ROBOT it cannot read; the stored
+        // one is carried over when the robot is otherwise the same (`src/net/settingsKeep.ts`)
+        await saveSettingsFromClient(user.userId, settings as Record<string, unknown>, caps);
       }
       return json(200, { ok: true }), true;
     }
