@@ -23,17 +23,17 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 | `.ds-import-body` | src/ui/importer.css:40 | 1 |
 | `.ds-import-canvas` | src/ui/importer.css:90 | 2 |
 | `.ds-import-canvas-host` | src/ui/importer.css:86 | 1 |
-| `.ds-import-checks` | src/ui/importer.css:329 | 1 |
+| `.ds-import-checks` | src/ui/importer.css:337 | 1 |
 | `.ds-import-drop` | src/ui/importer.css:140 | 3 |
 | `.ds-import-drop-acts` | src/ui/importer.css:156 | 1 |
 | `.ds-import-filerow` | src/ui/importer.css:164 | 1 |
 | `.ds-import-foot` | src/ui/importer.css:44 | 1 |
-| `.ds-import-handle` | src/ui/importer.css:254 | 1 |
+| `.ds-import-handle` | src/ui/importer.css:262 | 1 |
 | `.ds-import-hero-img` | src/ui/shell.css:4973 | 1 |
 | `.ds-import-in` | src/ui/importer.css:27 | 1 |
 | `.ds-import-map` | src/ui/importer.css:190 | 4 |
-| `.ds-import-map-front` | src/ui/importer.css:232 | 1 |
-| `.ds-import-map-status` | src/ui/importer.css:243 | 1 |
+| `.ds-import-map-front` | src/ui/importer.css:240 | 1 |
+| `.ds-import-map-status` | src/ui/importer.css:251 | 1 |
 | `.ds-import-map-wrap` | src/ui/importer.css:101 | 1 |
 | `.ds-import-preview` | src/ui/importer.css:37 | 4 |
 | `.ds-import-preview-empty` | src/ui/importer.css:96 | 1 |
@@ -463,7 +463,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 | class | declared | used |
 |---|---|---|
 | `.ds-head` | src/ui/shell.css:4235 | 15 |
-| `.ds-head-spacer` | src/ui/importer.css:368 | 12 |
+| `.ds-head-spacer` | src/ui/importer.css:376 | 12 |
 
 ## `ds-hint` — 2
 
@@ -700,7 +700,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-fields` | src/ui/shell.css:5072 | 19 |
+| `.ds-fields` | src/ui/shell.css:5072 | 21 |
 
 ## `ds-friends` — 1
 

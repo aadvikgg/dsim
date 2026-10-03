@@ -793,6 +793,49 @@ export function detectWheels(contactXY: ArrayLike<number>, edges: ArrayLike<numb
   };
 }
 
+/**
+ * THE FOUR LINES of a rectangle of wheels (FL FR BL BR, MODEL frame): the front and back axles
+ * (x) and the left and right sides (y). Each line is the mean of the two wheels on it, so a
+ * rectangle gives its own lines back exactly ((a + a) / 2 is a in floating point).
+ */
+export interface WheelLines {
+  front: number;
+  back: number;
+  left: number;
+  right: number;
+}
+
+export function wheelLines(w: readonly Vec2[]): WheelLines {
+  return { front: (w[0].x + w[1].x) / 2, back: (w[2].x + w[3].x) / 2, left: (w[0].y + w[2].y) / 2, right: (w[1].y + w[3].y) / 2 };
+}
+
+/** FL FR BL BR on the four lines */
+export function linesToWheels(l: WheelLines): Vec2[] {
+  return [
+    { x: l.front, y: l.left },
+    { x: l.front, y: l.right },
+    { x: l.back, y: l.left },
+    { x: l.back, y: l.right },
+  ];
+}
+
+/** the rectangle through four wheels' averaged lines (an exact rectangle comes back unchanged) */
+export const squareWheels = (w: readonly Vec2[]): Vec2[] => linesToWheels(wheelLines(w));
+
+/** detected wheels this close to a rectangle are lined up into one: each line's two wheels within it, inches */
+export const WHEEL_SQUARE_TOL_IN = 0.75;
+
+/** is each line's pair of wheels within `tol` of each other (0: an exact rectangle)? */
+export function isRectangle(w: readonly Vec2[], tol = 0): boolean {
+  return (
+    w.length === 4 &&
+    Math.abs(w[0].x - w[1].x) <= tol &&
+    Math.abs(w[2].x - w[3].x) <= tol &&
+    Math.abs(w[0].y - w[2].y) <= tol &&
+    Math.abs(w[1].y - w[3].y) <= tol
+  );
+}
+
 // ---- front -------------------------------------------------------------------------------
 
 /** the confidence at which the front is DETECTED rather than assumed (`FrontDetection`) */
@@ -1325,8 +1368,18 @@ export function finishMeasure(o: OrientedMeasure, setup: ImportSetup): ImportMea
   const maxVerts = Math.max(3, Math.min(MAX_HULL_VERTS, Math.floor(setup.hullMaxVerts) || MAX_HULL_VERTS));
   const { hull, deviation } = rawHull.length >= 3 ? finishHull(rawHull, maxVerts) : { hull: [] as Vec2[], deviation: 0 };
   const manual = Array.isArray(setup.wheels) && setup.wheels.length === 4 && setup.wheels.every((w) => Number.isFinite(w?.x) && Number.isFinite(w?.y));
-  const wheelsUsed = manual ? setup.wheels!.map((w) => ({ x: w.x, y: w.y })) : wheels.wheels;
-  const wheelSource: ImportMeasurement['wheelSource'] = manual ? 'manual' : wheels.wheels ? 'detected' : 'none';
+  // DETECTED wheels in a rectangle layout are lined up into one: always when the player picked
+  // `rect`, and when the layout is not set yet only if they are nearly one already (otherwise the
+  // editor opens them in `free`, as found). Placed wheels are never moved here. An exact rectangle
+  // comes back bit for bit, so a robot detected square measures as it did.
+  const det = wheels.wheels;
+  const square = !manual && !!det && setup.wheelLayout !== 'free' && (setup.wheelLayout === 'rect' || isRectangle(det, WHEEL_SQUARE_TOL_IN));
+  const squared = square && det ? squareWheels(det) : null;
+  const moved = !!squared && !isRectangle(det!);
+  const wheelsUsed = manual ? setup.wheels!.map((w) => ({ x: w.x, y: w.y })) : (squared ?? det);
+  const wheelSource: ImportMeasurement['wheelSource'] = manual ? 'manual' : det ? 'detected' : 'none';
+  // the note says so when the found wheels were moved; `o` itself is never written
+  const wheelInfo: WheelDetection = moved ? { ...wheels, note: `${wheels.note} Lined them up as a rectangle.` } : wheels;
   const origin = wheelsUsed
     ? {
         x: q64(wheelsUsed.reduce((s, w) => s + w.x, 0) / 4),
@@ -1381,7 +1434,7 @@ export function finishMeasure(o: OrientedMeasure, setup: ImportSetup): ImportMea
         message: few <= 1 ? 'Only one part of the robot touches the floor. Check the up axis, or drag the wheel markers onto the wheels.' : wheels.note,
       });
     } else if (wheelSource === 'detected' && /corner ones/.test(wheels.note)) {
-      checks.push({ code: 'wheels-picked', level: 'info', message: wheels.note });
+      checks.push({ code: 'wheels-picked', level: 'info', message: wheelInfo.note });
     }
     if (wheelsUsed && hull.length >= 3) {
       const off = wheelsUsed.filter((w) => insetDepth(w, hull) < -0.05).length;
@@ -1414,10 +1467,11 @@ export function finishMeasure(o: OrientedMeasure, setup: ImportSetup): ImportMea
     hull,
     hullRawVerts: rawHull.length,
     hullDeviation: deviation,
-    wheels,
+    wheels: wheelInfo,
     front,
     wheelsUsed,
     wheelSource,
+    ...(moved ? { wheelsSquared: true as const } : {}),
     origin,
     heightIn,
     bands,

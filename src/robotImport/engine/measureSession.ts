@@ -2,7 +2,7 @@
  * THE EDITOR'S MEASUREMENTS, CACHED IN TWO HALVES (`docs/area/robot-import.md`, "Measuring").
  *
  * `orientParts` (the heavy half) depends only on the model and the setup's units, up axis, yaw and
- * band switch; `finishMeasure` (the light half) on the wheels and the hull cap. So a `Measurer` keeps
+ * band switch; `finishMeasure` (the light half) on the wheels, their layout and the hull cap. So a `Measurer` keeps
  * one `OrientedMeasure` per orientation it has seen, with the model-frame parts built from it, and a
  * wheel drag, a drivetrain pick or a mechanism nudge re-runs only the light half (well under a
  * millisecond to a few). The model-frame arrays keep their identity while the orientation does,
@@ -37,7 +37,7 @@ interface Entry {
 }
 
 /** what `finishMeasure` reads that `orientKey` does not */
-const finishKey = (s: ImportSetup): string => JSON.stringify([s.wheels, s.hullMaxVerts]);
+const finishKey = (s: ImportSetup): string => JSON.stringify([s.wheels, s.hullMaxVerts, s.wheelLayout ?? null]);
 
 export class Measurer {
   private worker: Worker | null = null;

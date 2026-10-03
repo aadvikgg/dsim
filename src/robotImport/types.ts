@@ -87,6 +87,13 @@ export interface DriveSetup {
 // ---- the setup the editor re-opens with ----------------------------------------------------
 
 /**
+ * How the Model step moves the wheels. `rect`: the four sit on four lines (the front and back
+ * axles, the left and right sides), so moving one moves its axle and its side and the four stay an
+ * exact rectangle. `free`: each wheel on its own, for a robot whose wheels are not one.
+ */
+export type WheelLayout = 'rect' | 'free';
+
+/**
  * Everything needed to re-run normalisation and re-open the editor exactly as it was left.
  * `units`/`up` may be `'auto'`; a stored setup keeps `'auto'` so a re-import re-detects.
  */
@@ -101,6 +108,14 @@ export interface ImportSetup {
   /** wheel contacts the player placed, MODEL frame, FL FR BL BR. Null = detect. The UI clears
    *  them when units, up axis or yaw change, because the model frame moves with those. */
   wheels: Vec2[] | null;
+  /**
+   * The wheel layout the player picked (`WheelLayout`). Absent in setups from before it existed,
+   * and until the player moves a wheel or picks one: then it is `rect` when the wheels are a
+   * rectangle (placed ones exactly, detected ones within `WHEEL_SQUARE_TOL_IN`, which are then
+   * lined up) and `free` when they are not, so nothing placed by hand moves (`wheelLayoutOf`).
+   * In `rect`, detected wheels are lined up into a rectangle however far off they are.
+   */
+  wheelLayout?: WheelLayout;
   /** compute BIOBUZZ 3D height bands */
   bands: boolean;
   /** triangle budget after simplification, ≤ `MAX_TRIANGLES` */
@@ -189,9 +204,13 @@ export interface ImportMeasurement {
   wheels: WheelDetection;
   /** which way the geometry says the robot faces (measured in this orientation, given as a yaw) */
   front: FrontDetection;
-  /** wheels in force: the override, else detected, else null */
+  /** wheels in force: the override, else detected (lined up into a rectangle when the layout asks
+   *  for one, `squareWheels`), else null */
   wheelsUsed: Vec2[] | null;
   wheelSource: 'manual' | 'detected' | 'none';
+  /** the detected wheels were moved to line them up into a rectangle (absent when they were not,
+   *  an exact rectangle included) */
+  wheelsSquared?: true;
   /** the robot-local origin (wheelbase centre, else hull box centre), MODEL frame */
   origin: Vec2;
   heightIn: number;

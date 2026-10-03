@@ -11,7 +11,7 @@ import { defaultImportSetup, orientKey, transformParts } from '../geometry';
 import { deleteRobot, getRobot, listRobots, newRobotId, putRobot } from '../library';
 import { editSaveId, planShareAdd } from '../libraryIds';
 import { readShareFile, type SharePayload } from '../shareFile';
-import { STORED_MESH_TO_ROBOT, type ImportSetup, type LibraryRobot } from '../types';
+import { STORED_MESH_TO_ROBOT, type ImportSetup, type LibraryRobot, type WheelLayout } from '../types';
 import { defaultMechFor, mechHandlesFor, mechRobotToModel, validateMechFor } from './placement';
 import { invalidateImportedAssets, registerImportedAssets, unregisterImportedAssets } from '../../render/importedAssets';
 import { COPY } from './copy';
@@ -25,12 +25,16 @@ import {
   draftKey,
   frontAssumed,
   driveNumbers,
+  layoutPatch,
   moveWheel,
   rectangleWheels,
   reviewItems,
   reviewSummary,
+  setRectNumber,
   stepOf,
+  wheelLayoutOf,
   type EditorDoc,
+  type RectNumber,
   type ReviewItem,
   type StepIndex,
 } from './editorModel';
@@ -119,7 +123,6 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const [error, setError] = useState<DropError | null>(null);
   const [wheelDrag, setWheelDrag] = useState<Vec2[] | null>(null);
   const [selWheel, setSelWheel] = useState(0);
-  const [mirror, setMirror] = useState(true);
   const [selHandle, setSelHandle] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -200,7 +203,9 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         setPhase({ title: name, label: COPY.phase.measure });
         const cur = draftRef.current;
         const baseDoc = cur?.doc ?? freshDoc(settings, key, editId);
-        let setup: ImportSetup = { ...baseDoc.setup, units: 'auto', up: 'auto', yaw: 0, wheels: null, ...opts.setup };
+        // a new file is a new robot: everything about how it stands and where its wheels are is
+        // found again (the wheel layout too: its wheels decide it), unless the caller says otherwise
+        let setup: ImportSetup = { ...baseDoc.setup, units: 'auto', up: 'auto', yaw: 0, wheels: null, wheelLayout: undefined, ...opts.setup };
         // the first measurement in the measure worker; `normalise` then answers from its cache
         await e.prepareMeasure(prepared, setup);
         if (my !== gen.current) {
@@ -632,13 +637,24 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   // ---- wheels ----------------------------------------------------------------------------------
   const baseWheels = m ? (m.wheelsUsed ?? (m.hull.length >= 3 ? rectangleWheels(m.hull) : null)) : null;
   const shownWheels = wheelDrag ?? baseWheels;
+  const layout: WheelLayout = doc && m ? wheelLayoutOf(doc.setup, m.wheels.wheels) : 'rect';
+  // a placed wheel writes the layout it was placed in, so an unpicked layout never flips under it
+  const commitWheels = (next: Vec2[]): void => update((d) => ({ ...d, setup: { ...d.setup, wheels: next, wheelLayout: layout } }));
   const onWheel = (i: number, p: Vec2, final: boolean): void => {
     // not while a new orientation is measured: the wheels shown are in the frame it replaces
     if (!m || !baseWheels || measuring) return;
-    const next = moveWheel(baseWheels, i, p, mirror, m.hull);
+    const next = moveWheel(baseWheels, i, p, layout);
     if (!final) return setWheelDrag(next);
     setWheelDrag(null);
-    update((d) => ({ ...d, setup: { ...d.setup, wheels: next } }));
+    commitWheels(next);
+  };
+  const onRect = (key: RectNumber, v: number): void => {
+    if (!m || !baseWheels || measuring) return;
+    commitWheels(setRectNumber(baseWheels, key, v));
+  };
+  const onLayout = (next: WheelLayout): void => {
+    if (!m || measuring || next === layout) return;
+    update((d) => ({ ...d, setup: { ...d.setup, ...layoutPatch(d.setup, next) } }));
   };
 
   // ---- render ----------------------------------------------------------------------------------
@@ -793,7 +809,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
                 error={error}
                 wheels={shownWheels}
                 selectedWheel={selWheel}
-                mirror={mirror}
+                layout={layout}
                 onFiles={(f) => void onFiles(f)}
                 onCancel={() => {
                   gen.current++;
@@ -810,8 +826,9 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
                   }))
                 }
                 onWheel={onWheel}
+                onRect={onRect}
                 onSelectWheel={setSelWheel}
-                onMirror={setMirror}
+                onLayout={onLayout}
               />
             ) : step === 1 ? (
               <DrivetrainStep

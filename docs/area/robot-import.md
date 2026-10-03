@@ -95,7 +95,8 @@ touching `src/robotImport/**`.
   apart (one wheel, not two), and an intake roller's is one edge a robot-width long (one long
   contact, not two wheels). Clusters longer than 3.5 in are an intake or a skid. Four or more wheel
   clusters → the four corner ones (extremes of ±x ± y after normalising by the layout's extent);
-  fewer → a reason, and the rectangle default.
+  fewer → a reason, and the rectangle default. `detectWheels` reports them as found;
+  `finishMeasure` lines them up (below).
 - **Footprint hull**: monotone chain on every vertex's (x, y), reduced to ≤ 16 vertices by a
   MIN-MAX search (binary search on the tolerance; farthest-reach walks from every start), an inner
   approximation whose measured maximum deviation is reported. Greedy removal alone is a local
@@ -354,6 +355,29 @@ pattern, or `import` reads as a section name). Four steps: Model, Drivetrain, Me
   `geometry.ts` on the way out) and wraps lane 2's `mechHandles` / `defaultImportedMech` /
   `validateImportedMech` (all three from `src/games/importMechChecks.ts`). The mount pickers (`intakeMount` …) still decide WHICH edges exist;
   the map only places them. A player's placement is never moved by a later default.
+- **Wheels: two layouts** (`ImportSetup.wheelLayout`, `editorModel.ts`). RECTANGLE: the four
+  wheels sit on four lines (front and back axle, left and right side); a drag, a key, the pad or
+  a field moves the two lines through a wheel, so the four are always an exact rectangle, and the
+  lines stay 1 in apart. Its fields are Wheelbase, Track width, Centre forward and Centre left
+  (the wheels' centre from the footprint box centre), step 1/16 in; each sets exactly what was
+  typed (`setRectNumber`), size about the centre, centre with the size kept. FREE: one wheel at a
+  time, with its Forward and Left. A POINTER drag snaps onto a floor contact within 0.4 in, else
+  to the 1/16-in grid; keys stay 1/4 in and Shift 1/16 in. The old Mirror toggle is gone: the
+  Track width field changes the track about the wheels' own centre line.
+- **Lining up detected wheels** is the measurement's (`finishMeasure`), so every path (a units
+  change, Use detected wheels, a re-open) agrees: in `rect` any detected four become the
+  rectangle of their averaged lines; with no layout picked yet, only when each line's two wheels
+  are within 0.75 in (`WHEEL_SQUARE_TOL_IN`), and the note and the Wheels fact say so; `free`
+  never. Squaring an exact rectangle is the identity, so a robot detected square measures bit for
+  bit as before. Placed wheels are never moved by it.
+- **The layout persists with the setup**; absent (setups from before it, a new file) it is read by
+  `wheelLayoutOf`: a rectangle when the wheels are one (placed ones exactly, detected ones within
+  the tolerance), else free, so nothing placed by hand moves. A wheel placed writes the layout it
+  was placed in. Picking Rectangle lines placed wheels up on their averaged lines; picking Free
+  moves nothing placed (detected wheels then show as found). The measurer's light-half cache is
+  keyed by the layout too.
+- **`NumberField` commits only an edited value.** It shows the value rounded to its step and
+  snapped that on every blur, so a Tab through a wheel field moved the wheel.
 - **Re-opening a saved robot re-reads its STORED mesh**, not the source file (the library does
   not keep it), so the setup is units `m`, up `+y`, quarter turns 0, and the placements are the
   saved ones converted back to the model frame.
@@ -392,7 +416,8 @@ pattern, or `import` reads as a section name). Four steps: Model, Drivetrain, Me
   `npm run robot-import:fixtures`; each format uses a different unit and up axis on purpose.
 - The UI's DOM-free half is the `import UI …` checks in the same smoke block: the copy rules,
   the review list per game (an ordinary robot passes, a 0.5 in one blocks), the draft key, the
-  wheel mirror, and source pins on the test drive, the route order and the pad rail.
+  wheel layouts (`import UI wheels:` drags, typed numbers, snapping, lining up, old setups), and
+  source pins on the test drive, the route order and the pad rail.
 - `scripts/importshots.cjs` photographs every editor state at 1440×900, 1100×720 and 390×844 in
   both themes, in an OFFSCREEN Electron window, into `scratch/importshots/<sha>/` with an
   `index.html` sheet. `scripts/importpad.cjs` walks the editor by stubbed gamepad and then by

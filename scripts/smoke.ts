@@ -34971,7 +34971,7 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
 /**
  * THE IMPORTER UI'S DOM-FREE HALF (lane 4: `src/robotImport/ui/`). The copy keeps the house rules,
  * the review list blocks what `coerceImported` would refuse (and passes an ordinary robot), the
- * wheel mirror is a mirror, and the wiring the screens depend on is still there: the test drive's
+ * wheel layouts hold (the block after this one), and the wiring the screens depend on is still there: the test drive's
  * run settings, LB/RB scoped to the step rail, and no geometry or editor strings in the main chunk.
  */
 {
@@ -35005,7 +35005,7 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
   check('import UI copy: the up axis minus is U+2212, and a signed position reads as words', upLabel('-z') === '−Z' && where(-2, -3.25) === '2.0 in back, 3.3 in right' && where(1, 2, 3) === '1.0 in forward, 2.0 in left, 3.0 in high');
 }
 {
-  const { reviewItems, blocks, moveWheel, rectangleWheels, buildSpec, draftKey, baseName } = await import('../src/robotImport/ui/editorModel');
+  const { reviewItems, blocks, rectangleWheels, buildSpec, draftKey, baseName } = await import('../src/robotImport/ui/editorModel');
   const { defaultImportSetup } = await import('../src/robotImport/geometry');
   const { coerceSpec, DEFAULT_SPEC } = await import('../src/sim/spawn');
   const box = (l: number, w: number) => [
@@ -35033,12 +35033,190 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
   }
   check('import UI: the draft key names the game and the robot, a new import is `new`', draftKey('chain', null) === 'chain:new' && draftKey('biobuzz', 'abc') === 'biobuzz:abc');
   check('import UI: a robot is named after its file, cut to the name field’s 24', baseName('my_robot_v3.step') === 'my robot v3' && baseName('a'.repeat(40) + '.glb').length === 24);
+}
+
+/**
+ * THE WHEEL LAYOUTS (`editorModel.ts`, `finishMeasure`). In a RECTANGLE the four wheels sit on four
+ * lines, a moved wheel moves the two through it, and the four never stop being an exact rectangle;
+ * the four number fields set exactly what was typed; a pointer drag snaps to a floor contact or a
+ * 1/16-in grid; detected wheels nearly a rectangle are lined up into one and the rest open in FREE,
+ * which still moves one wheel; and a setup from before the layout existed opens as a rectangle.
+ */
+{
+  const em = await import('../src/robotImport/ui/editorModel');
+  const geo = await import('../src/robotImport/geometry');
+  const synth = await import('./robot-import/synthRobot');
+  const { COPY } = await import('../src/robotImport/ui/copy');
+  type V = { x: number; y: number };
+  const box = (l: number, w: number): V[] => [
+    { x: -l / 2, y: -w / 2 },
+    { x: l / 2, y: -w / 2 },
+    { x: l / 2, y: w / 2 },
+    { x: -l / 2, y: w / 2 },
+  ];
   const hull = box(16, 14);
-  const w0 = rectangleWheels(hull);
-  const moved = moveWheel(w0, 0, { x: 6, y: 5 }, true, hull);
-  check('import UI wheels: with Mirror on, front-left moves front-right to the mirror point', moved[0].x === 6 && moved[0].y === 5 && moved[1].x === 6 && moved[1].y === -5 && moved[2].x === w0[2].x);
-  const lone = moveWheel(w0, 3, { x: -6, y: -4 }, false, hull);
-  check('import UI wheels: with Mirror off, only the dragged wheel moves', lone[3].x === -6 && lone[2].x === w0[2].x && lone[2].y === w0[2].y);
+  const w0 = em.rectangleWheels(hull);
+  const same = (a: readonly V[], b: readonly V[]): boolean => a.length === b.length && a.every((p, i) => p.x === b[i].x && p.y === b[i].y);
+  const onLines = (w: readonly V[]): boolean => geo.isRectangle(w) && w[0].x > w[2].x && w[0].y > w[1].y;
+
+  // ---- a drag in a rectangle: the axle and the side through the wheel move, the other two stay ----
+  const fl = em.moveWheel(w0, 0, { x: 6.3, y: 5.2 }, 'rect');
+  check(
+    'import UI wheels: dragging front-left in a rectangle moves the front axle and the left side; front-right and back-left follow, back-right stays',
+    onLines(fl) && fl[0].x === geo.q64(6.3) && fl[0].y === geo.q64(5.2) && fl[1].x === fl[0].x && fl[2].y === fl[0].y && same([fl[3]], [w0[3]]) && fl[1].y === w0[1].y && fl[2].x === w0[2].x,
+    JSON.stringify(fl),
+  );
+  {
+    // every wheel, dragged anywhere a pointer, a key or a stick puts it, many times over
+    let w: V[] = w0;
+    let ok = true;
+    let s = 7;
+    const rnd = (): number => ((s = (s * 16807) % 2147483647) / 2147483647) * 20 - 10;
+    for (let k = 0; k < 400; k++) {
+      w = em.moveWheel(w, k % 4, { x: rnd(), y: rnd() }, 'rect');
+      if (!onLines(w) || w[0].x - w[2].x < em.WHEEL_MIN_SPAN_IN - 1e-12 || w[0].y - w[1].y < em.WHEEL_MIN_SPAN_IN - 1e-12) ok = false;
+    }
+    check('import UI wheels: 400 drags of every wheel in a rectangle leave four wheels on four shared lines, never crossed', ok, JSON.stringify(w));
+  }
+  const lone = em.moveWheel(w0, 3, { x: -6, y: -4 }, 'free');
+  check('import UI wheels: in the free layout only the dragged wheel moves', lone[3].x === -6 && lone[3].y === -4 && same(lone.slice(0, 3), w0.slice(0, 3)));
+  check(
+    'import UI wheels: in the free layout the forward and left fields set exactly what was typed',
+    em.moveWheel(w0, 1, { x: 4.4375, y: w0[1].y }, 'free')[1].x === 4.4375 && em.moveWheel(w0, 1, { x: w0[1].x, y: -6.0625 }, 'free')[1].y === -6.0625,
+  );
+
+  // ---- the four numbers: each sets exactly what was typed, from a placed or a DETECTED rectangle ----
+  {
+    // a detected rectangle's lines are cluster centres, decimals no binary fraction holds
+    const detected = geo.squareWheels([{ x: 5.6125, y: 6.0375 }, { x: 5.6375, y: -5.9625 }, { x: -5.4875, y: 6.0125 }, { x: -5.4625, y: -5.9875 }]);
+    const typed: [import('../src/robotImport/ui/editorModel').RectNumber, number][] = [
+      ['wheelbase', 11.0625],
+      ['track', 13.1875],
+      ['forward', 0.4375],
+      ['left', -0.3125],
+      ['wheelbase', 9.5],
+      ['forward', -1.25],
+    ];
+    const bad: string[] = [];
+    for (const start of [w0, detected, em.moveWheel(w0, 0, { x: 6.3, y: 5.2 }, 'rect')]) {
+      let w = start;
+      const want: Partial<Record<string, number>> = {};
+      for (const [k, [key, v]] of typed.entries()) {
+        const before = em.rectNumbers(w);
+        w = em.setRectNumber(w, key, v);
+        const n = em.rectNumbers(w);
+        want[key] = v;
+        if (!onLines(w) || n[key] !== v) bad.push(`${key} ${v} → ${n[key]}`);
+        // the number's partner (the size for a centre, the centre for a size) is kept exactly once
+        // the lines are on the grid: after the first edit of a detected rectangle
+        const partner = { wheelbase: 'forward', forward: 'wheelbase', track: 'left', left: 'track' }[key] as keyof typeof n;
+        if (!(start === detected && k === 0) && n[partner] !== before[partner]) bad.push(`${key} moved ${partner}`);
+      }
+      const end = em.rectNumbers(w);
+      for (const [k, v] of Object.entries(want)) if (end[k as keyof typeof end] !== v) bad.push(`at the end ${k} ${end[k as keyof typeof end]} ≠ ${v}`);
+    }
+    check('import UI wheels: wheelbase, track width and the centre forward and left each set exactly what was typed, and keep what was typed before', bad.length === 0, bad.join(' | '));
+  }
+
+  // ---- snapping (pointer drags only) ----
+  {
+    const contacts = [{ x: 5.675, y: 6.025 }, { x: -5.5, y: -6 }];
+    const onContact = em.snapWheel({ x: 5.4, y: 6.2 }, contacts);
+    const offContact = em.snapWheel({ x: 5.2, y: 6.4 }, contacts);
+    const g = (v: number): boolean => Number.isInteger(v * 16);
+    check(
+      'import UI wheels: a pointer drag within 0.4 in of a floor contact lands on it; further out it lands on the 1/16-in grid',
+      onContact.x === 5.675 && onContact.y === 6.025 && g(offContact.x) && g(offContact.y) && offContact.x === 5.1875 && offContact.y === 6.375,
+      `${JSON.stringify(onContact)} ${JSON.stringify(offContact)}`,
+    );
+    const closest = em.snapWheel({ x: 0.05, y: 0 }, [{ x: 0.35, y: 0 }, { x: -0.15, y: 0 }]);
+    check('import UI wheels: between two contacts in reach, the nearer wins', closest.x === -0.15);
+    const map = readFileSync('src/robotImport/ui/TopDownMap.tsx', 'utf8');
+    check(
+      'import UI wheels: the map snaps the POINTER drag only (keys and the pad step by their own 1/4 and 1/16 in), and the Model step snaps to the floor contacts',
+      /d\.last = constrain\(h, snap \? snap\(h\.key, p\) : p\)/.test(map) && (map.match(/snap\(/g) ?? []).length === 1 && /snap=\{\(_, p\) => snapWheel\(p, m\.wheels\.contacts\)\}/.test(readFileSync('src/robotImport/ui/ModelStep.tsx', 'utf8')),
+    );
+  }
+
+  // ---- detection: lined up when nearly a rectangle, as found (and free) when not ----
+  {
+    // the synthetic robot with one wheel moved off the rectangle by `dx`, `dy` (source frame)
+    const robot = (dx: number, dy: number) =>
+      synth.synthParts(
+        synth.synthRobot().map((p) => (p.name === 'wheel_5.5_5.5' ? synth.cylY('wheel_fl', [0.06, 0.06, 0.07], 5.5 + dx, synth.WHEEL_R, synth.WHEEL_R, 5.5 + dy - 0.75, 5.5 + dy + 0.75, 16) : p)),
+      );
+    const base = geo.defaultImportSetup();
+    const opts = { format: 'stl' as const, fileUnit: 'in' as const };
+    const meas = (dx: number, dy: number, setup = base) => geo.measureParts(robot(dx, dy), setup, opts).measurement;
+    const near = meas(0.3, 0.25);
+    const det = near.wheels.wheels!;
+    const avg = geo.squareWheels(det);
+    check(
+      'import UI wheels: detected wheels each within 0.75 in of a rectangle are LINED UP into the averaged one, and the note says so',
+      !!near.wheelsUsed && same(near.wheelsUsed, avg) && geo.isRectangle(near.wheelsUsed) && !geo.isRectangle(det) && near.wheelsSquared === true &&
+        near.wheelSource === 'detected' && /Lined them up as a rectangle\./.test(near.wheels.note) && em.wheelLayoutOf(base, det) === 'rect',
+      `${JSON.stringify(near.wheelsUsed)} ${near.wheels.note}`,
+    );
+    const far = meas(1.2, 0);
+    check(
+      'import UI wheels: detected wheels further off stay AS FOUND, and the editor opens them in the free layout',
+      !!far.wheelsUsed && same(far.wheelsUsed, far.wheels.wheels!) && !geo.isRectangle(far.wheelsUsed) && far.wheelsSquared === undefined && em.wheelLayoutOf(base, far.wheels.wheels) === 'free',
+      JSON.stringify(far.wheelsUsed),
+    );
+    const farRect = meas(1.2, 0, { ...base, wheelLayout: 'rect' });
+    const nearFree = meas(0.3, 0.25, { ...base, wheelLayout: 'free' });
+    check(
+      'import UI wheels: a picked layout stands: a rectangle lines up any detected four, free leaves even nearly square ones as found',
+      geo.isRectangle(farRect.wheelsUsed!) && farRect.wheelsSquared === true && same(nearFree.wheelsUsed!, det) && nearFree.wheelsSquared === undefined,
+    );
+    // a robot detected exactly square measures bit for bit as it did before layouts existed
+    const sq = synth.synthParts(synth.synthRobot(), synth.FRAMES.cadMm);
+    const m0 = geo.measureParts(sq, base, { format: 'stl' }).measurement;
+    const mFree = geo.measureParts(sq, { ...base, wheelLayout: 'free' }, { format: 'stl' }).measurement;
+    const mRect = geo.measureParts(sq, { ...base, wheelLayout: 'rect' }, { format: 'stl' }).measurement;
+    check(
+      'import UI wheels: ⚠️ wheels detected exactly square measure BIT FOR BIT the same in every layout (lining up an exact rectangle is the identity)',
+      JSON.stringify(m0) === JSON.stringify(mFree) && JSON.stringify(m0) === JSON.stringify(mRect) && m0.wheelsSquared === undefined && same(m0.wheelsUsed!, m0.wheels.wheels!),
+    );
+    check('import UI wheels: the Model step says which: 4 found, lined up, or not a rectangle', COPY.wheelsSquared !== COPY.wheelsFound && COPY.wheelsUneven !== COPY.wheelsFound);
+    // Home in a rectangle puts a wheel on the lined-up detection, in free on the wheel as found
+    check('import UI wheels: Home goes to the lined-up detection in a rectangle, to the wheel as found in free', same(em.wheelHomes(near, 'rect')!, avg) && same(em.wheelHomes(near, 'free')!, det));
+    // the measurer caches the light half by the layout too, or a layout pick would show the last one
+    const { Measurer } = await import('../src/robotImport/engine/measureSession');
+    const parts = robot(0.3, 0.25);
+    const ms = new Measurer({ name: 'fl.stl', format: 'stl', bytes: 0, fileUnit: 'in', parts, trisIn: geo.triangleCount(parts), notes: [], trisOut: geo.triangleCount(parts), simplifyError: 0 } as never);
+    const cachedRect = ms.normalise(base).measurement;
+    const cachedFree = ms.normalise({ ...base, wheelLayout: 'free' }).measurement;
+    check('import UI wheels: the cached light half is keyed by the layout (rect, then free, are two measurements)', cachedRect.wheelsSquared === true && cachedFree.wheelsSquared === undefined && same(cachedFree.wheelsUsed!, det));
+  }
+
+  // ---- old setups, and the layout pick ----
+  {
+    const old = geo.defaultImportSetup();
+    delete (old as { wheelLayout?: unknown }).wheelLayout;
+    const nearDet = [{ x: 5.6, y: 5.4 }, { x: 5.5, y: -5.5 }, { x: -5.5, y: 5.6 }, { x: -5.4, y: -5.5 }];
+    check(
+      'import UI wheels: a setup from before the layout existed opens as a RECTANGLE (detected wheels, wheels placed square, or none found)',
+      !('wheelLayout' in old) && em.wheelLayoutOf(old, nearDet) === 'rect' && em.wheelLayoutOf({ ...old, wheels: w0 }, null) === 'rect' && em.wheelLayoutOf(old, null) === 'rect',
+    );
+    check(
+      'import UI wheels: …but one whose wheels were placed by hand off a rectangle opens FREE, so nothing placed moves',
+      em.wheelLayoutOf({ ...old, wheels: em.moveWheel(w0, 0, { x: 6, y: 5 }, 'free') }, null) === 'free',
+    );
+    check('import UI wheels: an unknown layout in a shared file reads as unset', em.wheelLayoutOf({ ...old, wheelLayout: 'oval' as never }, nearDet) === 'rect');
+    check(
+      'import UI wheels: a number field left untouched commits nothing (it showed the value rounded to its step and snapped that on blur, so a Tab through a wheel field moved the wheel)',
+      /if \(raw === fmt\(value\)\) return;/.test(readFileSync('src/robotImport/ui/NumberField.tsx', 'utf8')),
+    );
+    const offRect = em.moveWheel(w0, 0, { x: 6.3, y: 5.2 }, 'free');
+    const toRect = em.layoutPatch({ wheels: offRect }, 'rect');
+    const toFree = em.layoutPatch({ wheels: offRect }, 'free');
+    check(
+      'import UI wheels: picking the rectangle lines placed wheels up on their averaged lines; picking free moves nothing',
+      toRect.wheelLayout === 'rect' && !!toRect.wheels && geo.isRectangle(toRect.wheels) && toFree.wheelLayout === 'free' && !('wheels' in toFree) &&
+        em.layoutPatch({ wheels: null }, 'rect').wheels === undefined,
+    );
+  }
 }
 {
   const gv = readFileSync('src/ui/GameView.tsx', 'utf8').replace(/\r\n/g, '\n');
