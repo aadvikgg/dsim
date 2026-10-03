@@ -1761,7 +1761,7 @@ export function groundRoll3d(world: World, engine: Engine3d, dt: number): void {
         // (`BbMechEnvelope.narrow`), whose 1.3-in top carried a balanced POLLEN indefinitely
         const st = other.shapeType();
         // ...and an IMPORTED robot's prism wide enough to carry the ball is a deck (`importTopIsBroad`)
-        if (st === RAPIER.ShapeType.ConvexPolyhedron && importTopIsBroad(other, b.r)) {
+        if (st === RAPIER.ShapeType.ConvexPolyhedron && importTopIsBroad(other, b.r ?? BB_POLLEN_R)) {
           touchingBroad = true;
         } else if (st === RAPIER.ShapeType.ConvexPolyhedron || st === RAPIER.ShapeType.Cylinder || st === RAPIER.ShapeType.RoundCuboid) {
           touchingNarrow = true;
