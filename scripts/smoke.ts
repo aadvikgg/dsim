@@ -27,8 +27,10 @@ import { childEnv as lanChildEnv } from '../electron/lanHost.cjs';
 import {
   parkQueue, takeQueue, dropQueue, updateQueue, peekQueue, subscribeQueue, elapsedLabel, elapsedSeconds,
 } from '../src/ui/queueKeeper';
-import type { LobbyPlayer } from '../src/net/protocol';
+import { RANKED_JOIN_GRACE_MS, type LobbyPlayer } from '../src/net/protocol';
 import { generateRoomCode, isValidRoomCode, normalizeRoomCode } from '../src/net/roomCode';
+import { isStagedRoomCode, stagedRoomCode } from '../server/matchTypes';
+import { STAGED_ANSWER_MS, STAGED_CONNECT_MS, stagedStartOverdue } from '../src/net/stagedStart';
 import {
   roomCodeForInstance,
   discordInstanceId,
@@ -10121,6 +10123,82 @@ function pushContest(A: Partial<RobotSpec>, B: Partial<RobotSpec>, seconds = 3):
     check(
       'ranked queue: a found match has its own screen, and it is checked before "searching"',
       mm.indexOf('if (found) {') > 0 && mm.indexOf('if (found) {') < mm.indexOf('if (searching) {'),
+    );
+  }
+
+  /**
+   * "MATCH FOUND" MUST END (2026-10-03, "stuck on loading into match"). That screen moves only on
+   * `strategyStart`, `matchStart` or `error`. Joining a staged code whose match was already over
+   * (a reconnect after the cancel, the reload path) made an EMPTY custom room on the server, which
+   * sends none of them, so the player waited until the socket was reaped. Reproduced against the
+   * real server (PGlite + local JWKS): the late joiner got `welcome, roster` and nothing else.
+   */
+  {
+    // the server half: only the matchmaker's codes are refused when their room is gone
+    for (const [mode, seq, tail] of [['1v1', 0, '0s84ac'], ['2v2', 41, 'zz9k01']] as const) {
+      const code = stagedRoomCode('ord', mode, seq, tail);
+      check(`match gone: a minted code is recognised (${code})`, isStagedRoomCode(code));
+    }
+    for (const code of ['bcdf23', 'play42', 'mm-1v1-3', 'iad-abc123', 'iad-1v1', 'iad-1v13abc', 'iad-3v31abcdef', 'iadd-1v11abcdef']) {
+      check(`match gone: "${code}" is not a matchmaker code`, !isStagedRoomCode(code));
+    }
+    const idx = readFileSync('server/index.ts', 'utf8').replace(/\r\n/g, '\n');
+    check(
+      'match gone: a created room with no staged row under a matchmaker code is refused, not opened empty',
+      /\} else if \(isStagedRoomCode\(code\)\) \{[\s\S]{0,1600}?code: 'match_gone'[\s\S]{0,300}?abandon\(\);\s*\n\s*return;/.test(idx),
+    );
+    check(
+      'match gone: a join that throws still answers an unseated socket',
+      /void joinRoom\(msg\)\.catch\(\(e\) => \{[\s\S]{0,400}?if \(!room && !closed\) send\(\{ t: 'error'/.test(idx),
+    );
+
+    // the client half: a staged room that never answers is given up on
+    const a = 1_000_000;
+    check('match gone: no join sent yet, inside the connect allowance → keep waiting', !stagedStartOverdue(a, null, a + STAGED_CONNECT_MS));
+    check('match gone: ...past it → give up', stagedStartOverdue(a, null, a + STAGED_CONNECT_MS + 1));
+    check('match gone: join sent, inside the answer window → keep waiting', !stagedStartOverdue(a, a + 30_000, a + 30_000 + STAGED_ANSWER_MS));
+    check('match gone: ...a late join is measured from the join, not the assignment', !stagedStartOverdue(a, a + 30_000, a + STAGED_CONNECT_MS + 1));
+    check('match gone: ...past the answer window → give up', stagedStartOverdue(a, a + 30_000, a + 30_000 + STAGED_ANSWER_MS + 1));
+    check(
+      'match gone: the answer window outlasts the room’s own join grace (a live room always answers first)',
+      STAGED_ANSWER_MS >= RANKED_JOIN_GRACE_MS + 10_000,
+    );
+    const lc = readFileSync('src/net/lobbyClient.ts', 'utf8').replace(/\r\n/g, '\n');
+    for (const t of ['matchStart', 'strategyStart', 'error']) {
+      check(
+        `match gone: the watch stops on ${t}`,
+        new RegExp(`m\\.t === '${t}'\\) \\{\\s*\\n\\s*this\\.stopStagedWatch\\(\\);`).test(lc),
+      );
+    }
+    check('match gone: ...and on dispose', /dispose\(\): void \{\s*\n\s*this\.stopStagedWatch\(\);/.test(lc));
+    check(
+      'match gone: giving up raises the CURRENT error handler (the screen, or the keeper when parked)',
+      /this\.dispose\(\);\s*\n\s*this\.handlers\.error\?\.\(STAGED_TIMEOUT_MESSAGE, 'match_gone'\);/.test(lc),
+    );
+    const mm = readFileSync('src/ui/Matchmaking.tsx', 'utf8').replace(/\r\n/g, '\n');
+    check(
+      'match gone: every assigned room socket is watched',
+      /lobby\.join\(room, playerInfoRef\.current\(\)\);[\s\S]{0,200}?lobby\.watchStagedStart\(\);/.test(mm),
+    );
+    check(
+      'match gone: a cancelled match retires its socket, so a reconnect cannot re-join the dead code',
+      /const strategyCancelled = \(msg: string\): void => \{[\s\S]{0,500}?lobby\?\.retire\(VERDICT_WAIT_MS\);/.test(mm),
+    );
+    // ...but not on the `error` itself: the room's `dodgeVerdict` arrives after it (probe:
+    // `welcome, error, dodgeVerdict`), and closing on the error lost "what it cost you"
+    check(
+      'match gone: a retired socket hears the verdict, and a reconnect closes it instead of re-joining',
+      /retire\(ms: number\): void \{\s*\n\s*this\.stopStagedWatch\(\);\s*\n\s*this\.transport\.onReopen\(\(\) => this\.dispose\(\)\);\s*\n\s*setTimeout\(\(\) => this\.dispose\(\), ms\);/.test(lc) &&
+        Number(/const VERDICT_WAIT_MS = ([\d_]+);/.exec(mm)?.[1].replace(/_/g, '') ?? 0) >= 5_000,
+    );
+    check(
+      'match gone: a parked room that errors forgets the way back and drops the socket',
+      /const parkedEnd = \(msg: string\): void => \{\s*\n\s*clearStagedMatch\(\);\s*\n\s*lobby\.dispose\(\);/.test(mm),
+    );
+    check(
+      'match gone: adopting a parked search that ended shows the error, not "Match found"',
+      /if \(p\.error && !p\.start\) \{\s*\n\s*strategyCancelled\(p\.error\);\s*\n\s*return true;/.test(mm) &&
+        mm.indexOf('if (p.error && !p.start) {') < mm.indexOf('setFound(p.found);'),
     );
   }
 

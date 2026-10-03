@@ -17,7 +17,7 @@
  * "physics broke"), so this is its own script.
  */
 import { Matchmaker, groupUnits, allianceOrder, type MatchmakerDeps, type QueueEntry } from '../server/matchmaking';
-import type { PendingMatch } from '../server/matchTypes';
+import { isStagedRoomCode, type PendingMatch } from '../server/matchTypes';
 import type { QueueMode, ServerMsg } from '../src/net/protocol';
 import { DEPLOY_REGIONS, RTT_UNKNOWN, bestHost, interRegionMs } from '../server/regions';
 import {
@@ -142,10 +142,13 @@ const namesOf = (m: PendingMatch | undefined): string =>
   check('open 1v1: two waiters pair', staged.length === 1);
   check('open 1v1: staged ranked', staged[0]?.ranked === true);
   check('open 1v1: one per alliance', new Set(staged[0]?.roster.map((r) => r.alliance)).size === 2);
+  // the join path refuses a dead room by this shape, so every minted code has to have it
+  check('open 1v1: the room code is a matchmaker code', isStagedRoomCode(staged[0]?.code ?? ''), staged[0]?.code);
 }
 {
   const { staged } = await pair(['a', 'b', 'c', 'd'].map((id) => entry(id, '2v2')));
   check('open 2v2: four waiters pair', staged.length === 1);
+  check('open 2v2: the room code is a matchmaker code', isStagedRoomCode(staged[0]?.code ?? ''), staged[0]?.code);
   check('open 2v2: two per alliance', staged[0]?.roster.filter((r) => r.alliance === 'red').length === 2);
 }
 {

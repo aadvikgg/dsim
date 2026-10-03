@@ -486,6 +486,21 @@ The old P2P lockstep/mesh/TURN/Supabase-lobby is DELETED. Full roadmap: `docs/ne
   on, so the record launcher offers the way back into that match instead of a dead card; the
   sentence stays self-sufficient and the launcher matches on it too, because most of the fleet
   predates the code.
+- ⚠️ **A MATCHMAKER CODE WITH NO ROOM AND NO STAGED ROW IS REFUSED, NOT OPENED** (`match_gone`,
+  2026-10-03, "stuck on loading into match"). `join` creates the room it names, which is right for
+  a custom code. For a matchmaker code (`isStagedRoomCode`, server/matchTypes.ts) whose match is
+  already over (cancelled at the grace, or its machine restarted) it made an empty custom room,
+  and the ranked "Match found" screen, which moves only on `strategyStart`, `matchStart` or
+  `error`, waited until the socket was reaped: 15 min on a satellite, never on iad. Reproduced
+  against the real server (PGlite harness): the late joiner got `welcome, roster` and nothing
+  else. A failed staged-row read is refused the same way, and a join that throws now answers an
+  unseated socket. The client half also covers older servers: `LobbyClient.watchStagedStart`
+  drops a room socket that has not answered `STAGED_ANSWER_MS` after its first join
+  (`STAGED_CONNECT_MS` after the assignment if no join went out; `src/net/stagedStart.ts` says why
+  those cannot cut off a live room), a cancel RETIRES the room socket (`LobbyClient.retire`: a
+  reconnect closes it instead of re-joining the dead code, and it stays 10 s because the room's
+  `dodgeVerdict` follows its `error`), and a parked search carrying an error is adopted as ended.
+  ⚠️ Server change: deploy it.
 - **`GET /health` REPORTS `x-build`** (`BUILD_REF`, else Fly's `FLY_MACHINE_VERSION`, else
   `dev`). The body is still exactly `ok` — the platform probe reads it. It exists because "is
   this bug in the code or in the running image" had no answer from outside: `/api/presence`'s

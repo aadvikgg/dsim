@@ -48,8 +48,30 @@ export interface PendingRosterEntry {
   party?: string;
 }
 
+/**
+ * THE ROOM CODE ONLY THE MATCHMAKER MINTS: `<host region>-<mode><seq><6 base36>`, e.g.
+ * `ord-1v13k2j9qz`. Minted and recognised here so the two cannot drift.
+ *
+ * The join path needs to recognise one, because `join` CREATES the room it names when there is
+ * none. That is right for a custom code and wrong for this one: a staged code with no live room
+ * and no `pending_matches` row is a match that is already over (cancelled at the join grace, or
+ * its machine restarted), and creating it made an EMPTY CUSTOM ROOM. A ranked client sitting in
+ * one gets a `welcome` and a roster and never a `strategyStart` or an `error`, so its "Match
+ * found" screen waited forever (2026-10-03, "stuck on loading into match"). See `joinRoom`.
+ */
+export function stagedRoomCode(hostRegion: string, mode: QueueMode, seq: number, tail: string): string {
+  return `${hostRegion}-${mode}${seq}${tail}`;
+}
+
+const STAGED_CODE = /^[a-z]{3}-(?:1v1|2v2)\d+[0-9a-z]{6}$/;
+
+/** is this the shape `stagedRoomCode` mints? (A custom code is bare: no region, no dash.) */
+export function isStagedRoomCode(code: string): boolean {
+  return STAGED_CODE.test(code);
+}
+
 export interface PendingMatch {
-  /** region-coded room code `<hostRegion>-<rand>` */
+  /** region-coded room code, `stagedRoomCode` */
   code: string;
   hostRegion: string;
   mode: QueueMode;
