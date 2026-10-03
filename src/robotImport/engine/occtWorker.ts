@@ -19,13 +19,13 @@ const ctx = self as unknown as {
 let occt: Promise<Occt> | null = null;
 
 ctx.onmessage = async (e: MessageEvent<OcctRequest>) => {
-  const { id, bytes, params } = e.data;
+  const { id, bytes, params, hint } = e.data;
   try {
     occt ??= occtimportjs({ locateFile: () => wasmUrl });
     const o = await occt;
     ctx.postMessage({ kind: 'reading', id });
     const res = o.ReadStepFile(bytes, params);
-    const out = stepToParts(res);
+    const out = stepToParts(res, hint);
     if (out.kind !== 'done') {
       ctx.postMessage({ kind: 'error', id, message: out.message });
       return;

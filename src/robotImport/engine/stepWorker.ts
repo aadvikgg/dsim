@@ -10,11 +10,13 @@
  *   `MIN_PART_MM` (screws, nuts, washers) are left out of these big files, with a note saying so.
  *
  * A whole read that comes back with faces and no triangles (occt out of heap) is read again in
- * pieces. Spawned by `stepReader.ts`; terminating it terminates the occt workers it made.
+ * pieces. Every read carries a colour hint (`colourHint`): occt finds no colour for a body of a
+ * multi-body part placed in an assembly, and the file says what it is. Spawned by `stepReader.ts`;
+ * terminating it terminates the occt workers it made.
  */
 import { EXPORT_HINT, ImportError, notStep, stepCutOff } from './importError';
-import { STEP_PARAMS, STEP_PIECE_PARAMS, type OcctRequest, type OcctResponse, type StepPart, type StepRequest, type StepResponse, type StepStage } from './stepConvert';
-import { STEP_PIECE_BYTES, StepSyntaxError, checkStepText, indexStep, pieceText, planPieces } from './stepSplit';
+import { STEP_PARAMS, STEP_PIECE_PARAMS, type OcctRequest, type OcctResponse, type StepColourHint, type StepPart, type StepRequest, type StepResponse, type StepStage } from './stepConvert';
+import { STEP_PIECE_BYTES, StepSyntaxError, checkStepText, colourHint, indexStep, pieceText, planPieces, wholeHint } from './stepSplit';
 import { zipEntryBytes } from './zip';
 
 /** files up to this are read whole (the importer's behaviour before pieces, kept bit for bit) */
@@ -66,11 +68,11 @@ class OcctReader {
     };
   }
 
-  read(bytes: Uint8Array, whole: boolean, onReading?: () => void): Promise<{ parts: StepPart[]; trisIn: number; faces: number }> {
+  read(bytes: Uint8Array, whole: boolean, hint: StepColourHint | null, onReading?: () => void): Promise<{ parts: StepPart[]; trisIn: number; faces: number }> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject, onReading });
-      this.worker.postMessage({ id, bytes, params: whole ? STEP_PARAMS : STEP_PIECE_PARAMS } satisfies OcctRequest, [bytes.buffer]);
+      this.worker.postMessage({ id, bytes, params: whole ? STEP_PARAMS : STEP_PIECE_PARAMS, ...(hint ? { hint } : {}) } satisfies OcctRequest, [bytes.buffer]);
     });
   }
 
@@ -119,7 +121,7 @@ async function readInPieces(bytes: Uint8Array, name: string): Promise<{ parts: S
           const k = next++;
           if (k >= plan.pieces.length) return;
           const text = pieceText(ix, plan, k);
-          const r = await reader.read(text, false, () => {
+          const r = await reader.read(text, false, colourHint(ix, plan, plan.pieces[k]), () => {
             if (!started) {
               started = true;
               progress('step-parse', doneBytes / total);
@@ -171,7 +173,7 @@ ctx.onmessage = async (e: MessageEvent<StepRequest>) => {
       let r;
       try {
         // the bytes are transferred; a copy stays here in case the whole read runs out of heap
-        r = await reader.read(bytes.slice(), true, () => progress('step-parse'));
+        r = await reader.read(bytes.slice(), true, wholeHint(bytes), () => progress('step-parse'));
       } catch (err) {
         if (err instanceof ImportError) throw err;
         throw new ImportError('step-failed', `Couldn’t read ${req.name} as STEP (${err instanceof Error ? err.message : 'unknown error'}). ${EXPORT_HINT}`);

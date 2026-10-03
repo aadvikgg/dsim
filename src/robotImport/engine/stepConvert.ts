@@ -50,8 +50,31 @@ export type StepResponse =
   | { kind: 'done'; parts: StepPart[]; trisIn: number; notes: string[] }
   | { kind: 'error'; code: ImportErrorCode | null; message: string };
 
+/**
+ * The colours occt cannot find itself. occt-import-js names and colours a mesh by looking its solid
+ * up in the document AT ITS PLACED LOCATION, and that lookup succeeds only when the solid is its
+ * part's whole shape. So every body of a MULTI-BODY part placed in an assembly comes back with no
+ * name and no colour, and so does every shell of a solid split into faces (`stepSplit.ts`), in a
+ * whole read as in pieces (measured: the fixture's 10-body part placed twice reads all grey; a
+ * third of goBILDA's BIOBUZZ bot by area). The reader knows each body's styled colour from the file,
+ * and occt meshes a part's bodies in its list order, solids first, then shells, once per placement.
+ */
+export interface StepLostBody {
+  /** the B-rep faces occt will report for it */
+  faces: number;
+  /** its own styled colour, linear; null when it has none */
+  color: [number, number, number] | null;
+}
+
+export interface StepColourHint {
+  /** per multi-body part in this read: its solids in list order, and (another run) its shells */
+  runs: StepLostBody[][];
+  /** the colour of any mesh still without one: a piece holding one split solid's faces and nothing else */
+  fill: [number, number, number] | null;
+}
+
 /** one occt worker's request (STEP text, transferred) and its answers */
-export type OcctRequest = { id: number; bytes: Uint8Array; params: OcctParams };
+export type OcctRequest = { id: number; bytes: Uint8Array; params: OcctParams; hint?: StepColourHint };
 export type OcctResponse =
   | { kind: 'reading'; id: number }
   | { kind: 'done'; id: number; parts: StepPart[]; trisIn: number; faces: number }
@@ -65,13 +88,88 @@ export type OcctResponse =
 const DEFAULT_LINEAR: [number, number, number] = [0.48, 0.5, 0.52];
 
 /**
+ * The colour of each mesh occt returned with no name and no colour, from the hint (null where it
+ * stays unknown). A stretch of such meshes is explained by runs whose face counts match, a mesh
+ * left over costing one; a mesh takes a colour only when every best explanation gives it the same
+ * one, so two parts with the same face counts and different colours leave it grey, not guessed.
+ */
+export function lostColours(meshes: OcctResult['meshes'], hint: StepColourHint): ([number, number, number] | null)[] {
+  const n = meshes.length;
+  const out: ([number, number, number] | null)[] = new Array(n).fill(null);
+  const lost = meshes.map((m) => !m.name && !m.color && !(m.brep_faces ?? []).some((f) => f.color));
+  const faces = meshes.map((m) => m.brep_faces?.length ?? 0);
+  const key = (c: [number, number, number] | null): string => (c ? c.join(',') : '');
+  for (let a = 0; a < n; ) {
+    if (!lost[a]) {
+      a++;
+      continue;
+    }
+    let b = a;
+    while (b < n && lost[b]) b++;
+    const L = b - a;
+    // runs matching at each position of the stretch
+    const at: StepLostBody[][][] = Array.from({ length: L }, () => []);
+    for (let j = 0; j < L; j++) {
+      for (const run of hint.runs) {
+        if (!run.length || j + run.length > L) continue;
+        let ok = true;
+        for (let k = 0; k < run.length && ok; k++) ok = faces[a + j + k] === run[k].faces;
+        if (ok) at[j].push(run);
+      }
+    }
+    // fewest meshes left over, from the front (f) and from the back (g)
+    const f = new Array<number>(L + 1).fill(Infinity);
+    const g = new Array<number>(L + 1).fill(Infinity);
+    f[0] = 0;
+    for (let j = 0; j < L; j++) {
+      f[j + 1] = Math.min(f[j + 1], f[j] + 1);
+      for (const run of at[j]) f[j + run.length] = Math.min(f[j + run.length], f[j]);
+    }
+    g[L] = 0;
+    for (let j = L - 1; j >= 0; j--) {
+      g[j] = g[j + 1] + 1;
+      for (const run of at[j]) g[j] = Math.min(g[j], g[j + run.length]);
+    }
+    // what every best explanation says each mesh is
+    const says: (Set<string> | null)[] = new Array(L).fill(null);
+    const say = (j: number, c: string): void => {
+      (says[j] ??= new Set()).add(c);
+    };
+    const colourOf = new Map<string, [number, number, number]>();
+    for (let j = 0; j < L; j++) {
+      if (f[j] + 1 + g[j + 1] === f[L]) say(j, '');
+      for (const run of at[j]) {
+        if (f[j] + g[j + run.length] !== f[L]) continue;
+        run.forEach((body, k) => {
+          const c = key(body.color);
+          if (body.color) colourOf.set(c, body.color);
+          say(j + k, c);
+        });
+      }
+    }
+    for (let j = 0; j < L; j++) {
+      const s = says[j];
+      if (s && s.size === 1) {
+        const c = colourOf.get([...s][0]);
+        if (c) out[a + j] = c;
+      }
+    }
+    a = b;
+  }
+  if (hint.fill) for (let i = 0; i < n; i++) if (lost[i] && !out[i]) out[i] = hint.fill;
+  return out;
+}
+
+/**
  * `faces` counts the B-rep faces occt reported. Faces with no triangles is how occt says it ran out
  * of heap: its mesher catches the failure per face and the read still "succeeds" (REV's 125 MB
- * starter bot: 118,734 faces, zero triangles).
+ * starter bot: 118,734 faces, zero triangles). `hint` gives back the colours occt cannot find
+ * (`StepColourHint`); a mesh occt named or coloured is never touched.
  */
-export function stepToParts(res: OcctResult): StepParts {
+export function stepToParts(res: OcctResult, hint?: StepColourHint | null): StepParts {
   if (!res || !res.success) return { kind: 'error', message: 'occt could not read the file' };
   const groups = new Map<string, { color: [number, number, number]; pos: number[]; idx: number[]; name: string; body: number[] }>();
+  const found = hint && (hint.runs.length || hint.fill) ? lostColours(res.meshes, hint) : null;
   let trisIn = 0;
   let faces = 0;
   for (let mi = 0; mi < res.meshes.length; mi++) {
@@ -81,7 +179,7 @@ export function stepToParts(res: OcctResult): StepParts {
     const nT = Math.floor(I.length / 3);
     trisIn += nT;
     faces += m.brep_faces?.length ?? 0;
-    const meshColor = m.color ?? DEFAULT_LINEAR;
+    const meshColor = m.color ?? found?.[mi] ?? DEFAULT_LINEAR;
     // triangle → colour, from the B-rep faces when they carry their own
     const triColor: ([number, number, number] | null)[] = new Array(nT).fill(null);
     for (const f of m.brep_faces ?? []) {
