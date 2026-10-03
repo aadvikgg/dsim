@@ -319,6 +319,9 @@ app.whenReady().then(async () => {
     })()`);
     const ok = got === 'saving' && (await until(`location.pathname.endsWith('/configure/robot') && ${IMPORTED_PANEL}`));
     log(`seed import: ${got}${ok ? ', saved' : ''}`);
+    // the save's writes (the library record, the synced settings) finish after the page has moved
+    // on; a reload straight away raced them and came back without the import
+    if (ok) await sleep(1500);
     if (!ok) say(`  (could not seed an imported robot: ${got === 'saving' ? 'Save did not land on the robot page' : got}; those surfaces were NOT audited)`);
     return ok;
   };
@@ -344,7 +347,7 @@ app.whenReady().then(async () => {
       if (seeded) {
         await win.loadURL(BASE + '/decode/configure/robot');
         await sleep(1400);
-        if (await until(IMPORTED_PANEL, 6000)) await auditHere(`[${theme}] /configure/robot (an imported robot)`, false);
+        if (await until(IMPORTED_PANEL, 12000)) await auditHere(`[${theme}] /configure/robot (an imported robot)`, false);
         else say(`  (the robot page did not show the imported robot in ${theme})`);
         await win.loadURL(BASE + '/decode/configure/robot');
         // the panel's Edit appears once the library has answered (IndexedDB, after the first paint)
