@@ -29,7 +29,8 @@ here first, then in code.
   mass below the sim's floor for this build, rpm outside the sim's range (clamped, said so).
 - **Test drive** from the editor (free drive with the robot, back to the editor on exit).
 - **Library** of imported robots per game on this device (IndexedDB): rename, duplicate, delete,
-  re-open in the editor, **export as one `.glb` file** that any glTF viewer opens and that carries
+  re-open in the editor, **export as one `.glb` file** that a glTF viewer opens (one that reads
+  `EXT_meshopt_compression` and `KHR_mesh_quantization`, since 2026-10-03) and that carries
   the DSIM setup in `asset.extras.dsim`; importing that file restores the robot with no wizard.
 - **In a match**: the owner sees their mesh (3D) or a top-down render of it (2D). Other players
   in a custom room see an extrusion of the footprint (3D) or its silhouette (2D) until the room's
@@ -148,7 +149,7 @@ interface LibraryRobot {
   id: string;            // = spec.imported.id
   game: GameId;
   spec: RobotSpec;       // the full spec, imported descriptor included
-  mesh: Blob;            // simplified, normalised GLB (≤ 4 MB, ≤ 150k triangles)
+  mesh: Blob;            // simplified, normalised GLB (≤ 4 MiB, ≤ 400k triangles; quantised + meshopt since 2026-10-03)
   top: Blob;             // top-down orthographic PNG, 512 px, transparent, robot-local frame
   thumb: Blob;           // 3/4 view PNG for cards, 192 px
   source: { name: string; format: string; bytes: number; trisIn: number; trisOut: number };

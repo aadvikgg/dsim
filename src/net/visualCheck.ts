@@ -73,7 +73,7 @@ const GLB_JSON = 0x4e4f534a;
 const GLB_BIN = 0x004e4942;
 const GLB_JSON_MAX = 256 * 1024;
 /** a relayed mesh's ceiling. It was the importer's `MAX_TRIANGLES` (now 400k for the compressed stored
- *  mesh); a relayed mesh is `liteMesh`'s float GLB under 1 MiB, which holds about 25k, so it stays */
+ *  mesh); a relayed mesh is `liteMesh`'s float GLB under 1 MiB, about 20k on a real robot, so it stays */
 export const VISUAL_MAX_TRIANGLES = 150_000;
 /** own-property lookups only: `componentType: "constructor"` must not find `Object` */
 const COMPONENT_BYTES = new Map<unknown, number>([[5120, 1], [5121, 1], [5122, 2], [5123, 2], [5125, 4], [5126, 4]]);
