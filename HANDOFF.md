@@ -1,3 +1,13 @@
+# HANDOFF — 2026-10-03c (robot import: moving parts, rectangle wheels)
+
+**State: on `alpha` (c8de6e3d); `dsim-alpha` DEPLOYED from it (health ok, one machine). Not on `main`.** `npm test` (5531), `build`, `server:check`, `uiaudit`, `docaudit`, `bundleaudit` pass (importer +7.8 KB and importerui +4.3 KB gzip, baselines raised with notes). Server change: the relay validator allows `_BODY`. GUI checked in the dev preview with `scripts/fixtures/robot-import/robot.glb`: four wheels found, a click on the roller picks it, Play runs, no console errors.
+
+- **Owner:** moving parts were not animated; an import with the ramp deployed said too big; wheels could not be lined up; rollers and axles did not spin.
+- **Moving parts** (`docs/area/robot-import.md` "Moving parts", `src/robotImport/motion.ts`, `ui/MotionPanel.tsx`): per-vertex body ids through every reader, weld and simplify; wheels found from the floor contacts on first measure; Pick parts takes a whole axle (or a plate's hardware); a ramp/arm the file shows deployed is measured folded, so it fits the 18-in start; Save rewrites it as folded (`motionAsStored`). The stored GLB has a node per moving part (`extras.dsim`), riders nested; `liteMesh` keeps the nodes; BIOBUZZ 3D turns them (`poseImportMotion`). 21 smoke checks (`moving parts:`).
+- **Wheels in a rectangle** (agent branch `robot-import-wheel-rect`, merged): Rectangle/Free layout, Wheelbase/Track/Centre fields at 1/16 in, drag snapping to contacts or the grid, Mirror removed, near-square detection squared. `NumberField` no longer commits on an untouched blur.
+- **In flight:** fixed-shooter auto-aim shake/cadence (agent worktree `agent-a8d3ed2ebb5225098`), imported-robot visual quality (read-only analysis), a survey of what an imported robot should let a player tune.
+- **Open:** moving parts animate in BIOBUZZ 3D only (DECODE/Chain are 2D). A turret's pivot is its bodies' box centre; a hinge the heuristic places wrong has no manual override yet.
+
 # HANDOFF — 2026-10-03b (2v2 is balanced on the 2v2 rating only)
 
 **State: on `main` (15798a41) and `alpha`; DEPLOYED 2026-10-03 to `dsim-alpha` and to PRODUCTION from `main` (2-minute announcement, all 8 machines on the new image).** `test:mm` (234), `npm test`, `dbtest`, `server:check`, `build`, `docaudit` pass. Server change, no migration.
