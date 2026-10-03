@@ -1,3 +1,13 @@
+# HANDOFF — 2026-10-03d (fixed-shooter aim, practice tuning for imports)
+
+**State: on `alpha` (28a05a93); `dsim-alpha` DEPLOYED from it (health ok, one machine). Not on `main`.** `npm test` (shared 3942 + BIOBUZZ), `build`, `server:check`, `dbtest`, `uiaudit`, `docaudit`, `bundleaudit` pass. GUI checked in the dev preview: the Practice tuning and Mechanism tuning panels, a tuned top speed reaching the stats.
+
+- **Owner:** "Fixed shooter auto aim is terrible. The robot shakes constantly while shooting and its cadence is really slow. For an imported robot, a lot more variables should be tunable since it is practice only."
+- **Aim fix** (agent branch `fixed-aim-smooth`, merged): `fixedAimTurn` (`src/sim/aimTurn.ts`) brakes onto the aim in both games; BIOBUZZ's lead dropped the chassis spin (the 30 Hz shake); DECODE leads only along the stick, a tank's forward yields to the turn, release tolerance from the goal opening; the feed clock no longer slips a tick (`flyFeedDue`). Cadence 4.68 → 5.00/s DECODE, 3.20 → 3.33/s BIOBUZZ. Docs: decode.md "Fixed shooters", biobuzz.md "THE FIXED LAUNCHER".
+- **Gated on `SIM_PATCH` 4**, no `SIM_VERSION` bump: a replay recorded before runs the `*_PRE4` rules. Smoke holds five fixed-launcher scenes under patch 3 to hashes measured on the code before the change (`scripts/fixed-pre4-scenes.ts`).
+- **Practice tuning** (`ImportedRobot.tune`, robot-import.md "Practice tuning"): top speed, accel, turn rate, aim turn rate, time between shots, spin-up, intake time, reload, turret slew, ramp swing; Drivetrain and Mechanisms steps, calculated values shown until typed over. Practice only: `Room.beginMatch` strips it everywhere; tuned replays are format 4; settings cap `importTune`.
+- **Open:** BIOBUZZ dumpers still overshoot 0.15–0.33 rad on a 69° turn (the agent measured, left alone). A holonomic robot pushing flush on the DECODE goal face off centre still cannot turn to aim. Imported-robot visual quality: analysis agent still running.
+
 # HANDOFF — 2026-10-03d (ranked "Match found · loading into the match" never ends)
 
 **State: on `alpha` (94d7b0bd); `dsim-alpha` DEPLOYED from it 2026-10-03 (health ok, one machine). NOT on `main`; production not deployed (client + server change, no migration).** `npm test` (3876 + 5531), `test:mm` (236), `test:workers` (149), `server:check`, `build`, `docaudit`, `uiaudit`, `bundleaudit` pass.
