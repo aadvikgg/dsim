@@ -334,9 +334,32 @@ the one arc, and the unchanged flight stage and `checkGoalEntry` decide the hit.
 - **Aim assist turns the chassis** while fire is held (`decodeFixedAimAssist`, a hook in
   `world.ts` before `updateRobot`, written into `rotate` AND the tank side drives — BIOBUZZ's stage
   2), lead-compensated over the arc's flight time; a held fire releases once within
-  `DECODE_FIXED_AIM_TOL`. **A driver's shot is not range-gated**: out of band it leaves and
+  `decodeFixedAimTol`. **A driver's shot is not range-gated**: out of band it leaves and
   misses. **Auto fire** (the player default, every auto path) releases only a shot the flight
   stage, run forward (`decodeShotEnters`), says would score.
+- ⚠️ **THE TURN IS A BRAKING PROFILE, NOT A P-GAIN** (`fixedAimTurn`, `src/sim/aimTurn.ts`, both
+  games; 2026-10-02, after "the robot shakes constantly while shooting and its cadence is really
+  slow"). Commanded spin `min(maxTurn, √(2a|e|), 15|e|)`, `a` half the chassis's braking authority
+  (`FIXED_AIM_DECEL_FRAC`, `FIXED_AIM_SETTLE_RATE`, `driveParams`). The old `clamp(4.5·e)` with a
+  dead band at the release tolerance parked the kit 0.045 rad off and crossed the aim on faster
+  chassis: TW (mecanum) 30° → −0.074, Cypher (swerve) 30° → −0.16, 90° → −0.32. Now nothing in the
+  drivetrain envelope crosses it, 10° to 172°, and each build ends within 0.02 rad (a swerve stops
+  0.015 off: its pods ignore a command under 2 % of top speed).
+- **The aim leads only the velocity along the driver's stick** (`decodeFixedLeadVel`). Pressed on
+  the goal face, a turning chassis pivots on a corner and its centre moves sideways at about
+  ω × the half-diagonal; leading that moved the aim against the turn (±0.1–0.18 rad every tick,
+  6 in along the face). The release still carries the real velocity.
+- **A tank's forward yields to the turn**, down to nothing at the release tolerance: its own push is
+  what the face's square-up holds flush. 6 in along the face it chattered 0.05↔0.12 rad every 3
+  ticks (4.03 shots/s); with the push kept on it stuck 0.28 rad off. Holonomic drives keep their
+  stick, so pressed flush off-centre they cannot turn (TW never fires 6 in along, before or after).
+- **The release tolerance is the opening's angle** at the muzzle (`decodeFixedAimTol`: half of
+  `GOAL_OPENING_RADIUS` sideways; 0.11 rad at 50 in, at most 0.25 close in). The flat 0.06 was that
+  offset seen from 8 ft.
+- **The cadence is the feed's** (`flyFeedDue`): `world.time` is a sum of 1/60 and sat a few ulps
+  short of `fireReadyAt` on the 12th tick, so most 0.20-s feeds took 13 ticks (4.68/s). Now 12,
+  5.00/s from in band. The wheel's recovery (−10 %, back over the 95.6 % minimum in 2 ticks) is never
+  the limit at inertia 0. Smoke: `fixed aim (DECODE)`.
 - **Presets** step on `RobotCommand.flyPreset` (bit 1024, debounced edge; Z / R3, the mode-toggle
   role shared with BIOBUZZ's Deploy ramp). DECODE only: BIOBUZZ's fixed launcher runs one setpoint.
 - **The kit card** (`ROBOT_PRESETS`, LAST so `DEFAULT_SPEC` still mirrors the first): tank 286,

@@ -8,7 +8,6 @@ import { robotSolids, type RobotSolids } from '../../sim/artifactSolids';
 import {
   BB_AIM_GAIN,
   BB_AIM_TOL,
-  BB_FIXED_AIM_TOL,
   BB_FLOWERS,
   BB_FLOWER_RETRIEVE_S,
   BB_FLOWER_UNLOCK_S,
@@ -63,6 +62,7 @@ import {
 } from './robot';
 import { type BiobuzzState, type ScoreTarget, type Vec3 } from './state';
 import { flyExitSpeed, flyStep } from '../../sim/flywheel';
+import { fixedAimTurn } from '../../sim/aimTurn';
 
 /**
  * BIOBUZZ GAMEPLAY TICK — POLLEN physics and the intake/launch loop.
@@ -1494,9 +1494,12 @@ function traceWrite(t: BbFlightTrace, x: number, y: number, z: number): void {
  * 2). A turret aims itself and never gets an override — steering the chassis for a turret
  * would fight the driver for no benefit.
  *
- * A P-controller on the heading error, dead-banded by `BB_AIM_TOL` so a robot already lined up
- * does not oscillate. It steers toward `bbAimTarget` — the nearer own cell, whichever way the
- * HIVE is tilted — exactly the cell stage 5b asks the dump to land in.
+ * A DUMPER: a P-controller on the heading error, dead-banded by `BB_AIM_TOL` so a robot already
+ * lined up does not oscillate. A FIXED launcher: the shared chassis-aim controller
+ * (`fixedAimTurn`, DECODE's fixed launcher uses the same one), which brakes onto the heading and
+ * holds it — its arc is not re-solved for where the robot points, so it has to stand ON the line,
+ * not somewhere inside a dead band. Both steer toward `bbAimTarget` — the nearer own cell,
+ * whichever way the HIVE is tilted — exactly the cell stage 5b asks the shot to land in.
  */
 export function bbAimAssist(
   world: World,
@@ -1508,9 +1511,8 @@ export function bbAimAssist(
   const want = bbAimHeading(r, bbAimTarget(world, r));
   if (want === null) return null; // turreted: the turret does this
   const err = wrapAngle(want - r.heading);
-  // a FIXED arc is not re-solved for where the robot points, so it holds a tighter line
-  const tol = bbLauncherOf(r.spec, BB_HOOD_DEFAULT_DEG).kind === 'fixed' ? BB_FIXED_AIM_TOL : BB_AIM_TOL;
-  if (Math.abs(err) < tol) return 0; // lined up — hold still rather than hunt
+  if (bbLauncherOf(r.spec, BB_HOOD_DEFAULT_DEG).kind === 'fixed') return fixedAimTurn(r, err);
+  if (Math.abs(err) < BB_AIM_TOL) return 0; // lined up — hold still rather than hunt
   return clamp(err * BB_AIM_GAIN, -1, 1);
 }
 

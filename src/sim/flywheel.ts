@@ -57,6 +57,13 @@ export function flyReady(r: RobotState): boolean {
   return (r.flyRpm ?? 0) >= flyFeedMin(r);
 }
 
+/** has a fixed shooter's feed time run out (`fireReadyAt`, set to `time + feedS` at each feed)?
+ * Within `FLY_FEED_TIME_EPS`, so a feed of a whole number of ticks takes exactly that many. Both
+ * games' fixed launchers read their feed clock through this. */
+export function flyFeedDue(r: RobotState, time: number): boolean {
+  return time + C.FLY_FEED_TIME_EPS >= r.fireReadyAt;
+}
+
 /** the exit speed this robot's wheel gives an artifact fed NOW, in/s */
 export function flyExitSpeed(r: RobotState): number {
   const f = r.spec.flywheel;

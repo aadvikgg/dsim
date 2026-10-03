@@ -3,9 +3,10 @@ import * as C from '../config';
 import { clamp, datan2, dcos, dsin, hyp, rot, wrapAngle } from '../math';
 import { classifierRect, goalCenter } from './field';
 import { checkGoalEntry } from './goal';
-import { collideBallRect, collideBallStatic, stepFlightBall } from './physics';
+import { collideBallRect, collideBallStatic, driveIntent, stepFlightBall } from './physics';
 import { decodeImportLaunchZ, decodeImportTurret } from './importedMech';
 import { flyExitSpeed, flyPlannedSpeed } from './flywheel';
+import { fixedAimTurn } from './aimTurn';
 
 /**
  * DECODE'S FIXED SHOOTER AND FIXED HOOD — the launcher that does not solve its own shot.
@@ -118,9 +119,9 @@ export function decodePlannedShot(r: RobotState, d: number): { speed: number; an
  * heading being solved for and a trip count that depended on a float comparison could differ
  * between a client's prediction and the server.
  */
-export function decodeFixedAim(r: RobotState): { yaw: number; heading: number; speed: number; angle: number } {
+export function decodeFixedAim(r: RobotState, vel: Vec2 = r.vel): { yaw: number; heading: number; speed: number; angle: number } {
   const g = goalCenter(r.alliance);
-  const wv = { x: r.vel.x * C.SHOT_ROBOT_VEL_INHERIT, y: r.vel.y * C.SHOT_ROBOT_VEL_INHERIT };
+  const wv = { x: vel.x * C.SHOT_ROBOT_VEL_INHERIT, y: vel.y * C.SHOT_ROBOT_VEL_INHERIT };
   const fixed = decodeFixedLauncher(r.spec);
   const face = fixed ? decodeFixedFacing(r.spec) : 0;
   let heading = r.heading;
@@ -217,21 +218,75 @@ export function decodeFixedShotScores(r: RobotState, dt: number): boolean {
 }
 
 /**
- * THE AIM HOOK — the rotate override a FIXED launcher gets while the driver holds fire with aim
- * assist on, or `null` to leave the command alone. A P-controller on the heading error, dead-banded
- * by `DECODE_FIXED_AIM_TOL` so a robot already lined up holds still — BIOBUZZ's `bbAimAssist`, and
- * Chain Reaction's `chainAimAssist` before it. Never for a robot on an auto path (the path owns the
- * pose) or a passive dummy.
+ * THE AIM HOOK — the command a FIXED launcher drives with while the driver holds fire with aim
+ * assist on, or `null` to leave the command alone. Never for a robot on an auto path (the path owns
+ * the pose) or a passive dummy.
+ *
+ * The turn is the shared chassis-aim controller (`fixedAimTurn`, BIOBUZZ's fixed launcher uses the
+ * same one), which brakes onto the aim heading and holds it, written into `rotate` AND the tank side
+ * drives (a tank turns only from those; BIOBUZZ's stage 2 does the same).
+ *
+ * A TANK'S FORWARD YIELDS TO THE TURN while the shot along the chassis would miss: the side drives
+ * turn first, and the driver's forward (their mean) gets what is left, scaled down to nothing as the
+ * error reaches the release tolerance. Pressed on the goal face off its centre, a tank's own push is
+ * what the wall square-up turns flush (`squareUpRobots`), against the aim: measured 6 in along the
+ * face, the robot held 0.28 rad off for good with the push left on, and with the old controller,
+ * whose saturated turn happened to zero the push, it chattered 0.05↔0.12 rad every three ticks.
+ * Holonomic drives keep their translation: the turn rides on top of it.
  */
-export function decodeFixedAimAssist(r: RobotState, cmd: RobotCommand, enabled: boolean): number | null {
+export function decodeFixedAimAssist(r: RobotState, cmd: RobotCommand, enabled: boolean): RobotCommand | null {
   if (!enabled || !cmd.fire || !r.aimAssist || r.autoPathActive || r.passive) return null;
   if (!decodeFixedLauncher(r.spec)) return null;
-  const err = wrapAngle(decodeFixedAim(r).heading - r.heading);
-  if (Math.abs(err) < C.DECODE_FIXED_AIM_TOL) return 0;
-  return clamp(err * C.DECODE_FIXED_AIM_GAIN, -1, 1);
+  const err = decodeFixedAimErr(r, cmd);
+  const aim = fixedAimTurn(r, err);
+  const fwd = ((cmd.leftDrive ?? 0) + (cmd.rightDrive ?? 0)) / 2;
+  const room = (1 - Math.abs(aim)) * clamp(1 - Math.abs(err) / decodeFixedAimTol(r), 0, 1);
+  const f = clamp(fwd, -room, room);
+  return { ...cmd, rotate: aim, leftDrive: f - aim, rightDrive: f + aim };
 }
 
-/** is a FIXED launcher's chassis on its aim heading (within `DECODE_FIXED_AIM_TOL`)? */
-export function decodeFixedOnTarget(r: RobotState): boolean {
-  return Math.abs(wrapAngle(decodeFixedAim(r).heading - r.heading)) < C.DECODE_FIXED_AIM_TOL;
+/**
+ * THE VELOCITY A FIXED LAUNCHER'S AIM LEADS FOR: the part of the chassis velocity along the way
+ * the driver is driving (`driveIntent`), none when they are not translating.
+ *
+ * ⚠️ NOT `r.vel` WHOLE. The aim is a heading to HOLD, and the chassis velocity that comes from
+ * TURNING ONTO it is not a velocity the shot will have once it is held. In free space a chassis
+ * turns about its centre and that part is zero; pressed on the goal face it pivots on a corner, and
+ * the centre moves sideways at ~ω × the half-diagonal. Led with `r.vel`, the aim then moved against
+ * the spin turning it there (0.085 s per rad/s on the kit at the face, over 1 per tick through the
+ * 15/s settle rate): measured 6 in along the face, the heading flipped ±0.1–0.18 rad every tick for
+ * a third of a second. The shot itself still inherits the real velocity (`decodeFixedRelease`), and
+ * auto fire's forward-run gate still sees it.
+ */
+export function decodeFixedLeadVel(r: RobotState, cmd: RobotCommand | undefined): Vec2 {
+  const want = driveIntent(r, cmd);
+  const n = hyp(want.x, want.y);
+  if (!(n > 1e-6)) return { x: 0, y: 0 };
+  const ux = want.x / n;
+  const uy = want.y / n;
+  const s = Math.max(0, r.vel.x * ux + r.vel.y * uy);
+  return { x: ux * s, y: uy * s };
+}
+
+/** a FIXED launcher's heading error, rad (aim heading − chassis heading), led for `cmd`'s driving */
+export function decodeFixedAimErr(r: RobotState, cmd: RobotCommand | undefined): number {
+  return wrapAngle(decodeFixedAim(r, decodeFixedLeadVel(r, cmd)).heading - r.heading);
+}
+
+/**
+ * HOW FAR OFF ITS AIM HEADING a FIXED launcher may release (rad): the angle, at the muzzle's
+ * distance from the goal centre, of `DECODE_FIXED_AIM_OPENING_FRAC` of the opening's radius —
+ * a shot that leaves this far off still lands that far inside the opening sideways. Capped at
+ * `DECODE_FIXED_AIM_TOL_MAX` point blank.
+ */
+export function decodeFixedAimTol(r: RobotState): number {
+  const g = goalCenter(r.alliance);
+  const m = muzzleAt(r, r.heading);
+  const d = Math.max(hyp(g.x - m.x, g.y - m.y), 1);
+  return Math.min(datan2(C.GOAL_OPENING_RADIUS * C.DECODE_FIXED_AIM_OPENING_FRAC, d), C.DECODE_FIXED_AIM_TOL_MAX);
+}
+
+/** is a FIXED launcher's chassis on its aim heading (within `decodeFixedAimTol`), driving `cmd`? */
+export function decodeFixedOnTarget(r: RobotState, cmd: RobotCommand | undefined): boolean {
+  return Math.abs(decodeFixedAimErr(r, cmd)) < decodeFixedAimTol(r);
 }

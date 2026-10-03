@@ -16,7 +16,7 @@ import {
   decodeFixedShotScores,
   decodeShotSpecial,
 } from './fixedShot';
-import { flyReady, flyShot, flyStep } from './flywheel';
+import { flyFeedDue, flyReady, flyShot, flyStep } from './flywheel';
 
 /** launch is legal when ANY part of the robot is inside a launch zone. Uses a
  * true OBB-vs-triangle overlap (not just corner containment): the launch wedge
@@ -757,8 +757,8 @@ function updateFixedShotActions(world: World, r: RobotState, cmd: RobotCommand, 
     r.flywheelSpin = target;
   }
 
-  // ---- fire
-  const canFire = enabled && r.hopper.length > 0 && world.time >= r.fireReadyAt && flyReady(r);
+  // ---- fire (the feed clock read through `flyFeedDue`, so a 0.20-s feed is 12 ticks, not 13)
+  const canFire = enabled && r.hopper.length > 0 && flyFeedDue(r, world.time) && flyReady(r);
   const zoneOk = world.mode === 'free' || robotInLaunchZone(r);
   if (!canFire || !zoneOk) {
     updateIntake(world, r, cmd);
@@ -767,7 +767,7 @@ function updateFixedShotActions(world: World, r: RobotState, cmd: RobotCommand, 
   let go = false;
   if (cmd.fire) {
     // the driver's call — and with aim assist turning a fixed launcher, once it is on target
-    go = !(fixed && r.aimAssist) || decodeFixedOnTarget(r);
+    go = !(fixed && r.aimAssist) || decodeFixedOnTarget(r, cmd);
   } else if (r.autoFire) {
     go = decodeFixedShotScores(r, dt);
   }

@@ -428,8 +428,8 @@ import {
 import type { ServerMsg, QueueMode } from '../src/net/protocol';
 import { dsin, dcos, dtan, datan2, hyp, rot, wrapAngle, clamp } from '../src/math';
 import { initPhysics } from '../src/sim/physicsEngine';
-import { DECODE_FIXED_AIM_TOL, DECODE_KIT_HOOD_DEG, FLY_EXIT_EFFICIENCY, FLY_FEED_MIN_FRAC, TURRET_OFFSET_FRAC } from '../src/config';
-import { decodeFixedAim, decodeFixedRelease } from '../src/sim/fixedShot';
+import { DECODE_KIT_HOOD_DEG, FLY_EXIT_EFFICIENCY, FLY_FEED_MIN_FRAC, TURRET_OFFSET_FRAC } from '../src/config';
+import { decodeFixedAim, decodeFixedAimErr, decodeFixedAimTol, decodeFixedRelease } from '../src/sim/fixedShot';
 import { coerceFlywheel, flyExitSpeedAt } from '../src/sim/flywheelSpec';
 import { flyReady, flySetpoint } from '../src/sim/flywheel';
 import { initPhysics3d } from '../src/games/biobuzz/sim3d/engine';
@@ -35732,7 +35732,7 @@ function fxShoot(
   const want = decodeFixedAim(r).heading;
   check(
     'fixed shooter: with aim assist, holding fire turns the CHASSIS (a tank, through its side drives) onto the goal, then it scores',
-    turned.scored === 3 && Math.abs(wrapAngle(want - turned.heading)) < DECODE_FIXED_AIM_TOL,
+    turned.scored === 3 && Math.abs(wrapAngle(want - turned.heading)) < 0.02,
     JSON.stringify({ s: turned.scored, err: wrapAngle(want - turned.heading), g }),
   );
   const held = fxShoot(fxKit(), 50, { assist: true, yawErr: 0.5, ticks: 6 });
@@ -35743,6 +35743,146 @@ function fxShoot(
     'fixed shooter: AUTO FIRE releases only a shot that would score — in band it empties the hopper into the goal, out of band it holds',
     auto.scored === 3 && autoOut.fired === 0,
     JSON.stringify({ in: [auto.fired, auto.scored], out: autoOut.fired }),
+  );
+}
+
+// ---- the aim settles and the feed runs at its own rate (2026-10-02, "the robot shakes constantly
+// while shooting and its cadence is really slow") -----------------------------------------------
+
+/** a held, aimed shot traced tick by tick: robot 0 placed as `fxShoot` places it (or, `press`, driven
+ * 1.5 s into the goal face from 30 in out, `along` inches along it, the forward then kept on), aim
+ * assist on, fire held, the hopper kept full. The heading error (`decodeFixedAimErr`), the spin and
+ * the tick of every feed. */
+function fxAimTrace(
+  spec: Partial<RobotSpec>,
+  o: { d?: number; yawErr?: number; ticks?: number; press?: { along: number } } = {},
+): { err: number[]; w: number[]; fires: number[] } {
+  const w = fxShoot(spec, o.d ?? 50, { assist: true, yawErr: o.yawErr ?? 0, ticks: 0 }).w;
+  const r = w.robots[0];
+  const fwd = o.press ? 0.4 : 0;
+  if (o.press) {
+    const g = goalCenter('blue');
+    const n = goalFaceNormal('blue');
+    r.pos = { x: g.x + n.x * 30 - n.y * o.press.along, y: g.y + n.y * 30 + n.x * o.press.along };
+    r.heading = Math.atan2(-n.y, -n.x);
+    r.turretHeading = r.heading;
+    for (let k = 0; k < 90; k++) step(w, 1 / 60, new Map([[0, { driveX: 0, driveY: fwd, rotate: 0, leftDrive: fwd, rightDrive: fwd, intake: false, fire: false }]]));
+  }
+  const c: RobotCommand = { driveX: 0, driveY: fwd, rotate: 0, leftDrive: fwd, rightDrive: fwd, intake: false, fire: true };
+  const out = { err: [] as number[], w: [] as number[], fires: [] as number[] };
+  for (let k = 0; k < (o.ticks ?? 150); k++) {
+    while (r.hopper.length < 3) r.hopper.push('green');
+    step(w, 1 / 60, new Map([[0, c]]));
+    out.err.push(decodeFixedAimErr(r, c));
+    out.w.push(r.angVel);
+    if (r.lastFireAt === w.time) out.fires.push(k);
+  }
+  return out;
+}
+/** how a heading-error trace settled: the overshoot past zero, how often the error changed side
+ * (ignoring a 0.003-rad noise floor), and the largest error and spin over the last half second */
+function fxSettle(t: { err: number[]; w: number[] }): { over: number; flips: number; endErr: number; endSpin: number } {
+  const s0 = Math.sign(t.err[0]);
+  let over = 0;
+  let flips = 0;
+  let side = 0;
+  for (const e of t.err) {
+    over = Math.max(over, -s0 * e);
+    if (Math.abs(e) <= 0.003) continue;
+    if (side !== 0 && Math.sign(e) !== side) flips++;
+    side = Math.sign(e);
+  }
+  const tail = (a: number[]): number => Math.max(...a.slice(-30).map(Math.abs));
+  return { over: Math.round(over * 1e4) / 1e4, flips, endErr: Math.round(tail(t.err) * 1e4) / 1e4, endSpin: Math.round(tail(t.w) * 1e3) / 1e3 };
+}
+/** the gaps between feeds, in ticks */
+function fxGaps(fires: number[]): number[] {
+  return fires.slice(1).map((t, i) => t - fires[i]);
+}
+/** the fixed launcher on other chassis: TW (mecanum), Cypher (swerve), and an IMPORTED mecanum */
+function fxFixedOn(base: Partial<RobotSpec>): RobotSpec {
+  return coerceSpec({ ...DEFAULT_SPEC, ...base, launcher: 'fixed', hoodDeg: fxKit().hoodDeg, flywheel: fxKit().flywheel } as RobotSpec);
+}
+function fxImportFixed(): RobotSpec {
+  const imp: ImportedRobot = {
+    v: 1,
+    id: '0123456789abcdef',
+    hull: [{ x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }, { x: -8, y: -8 }],
+    heightIn: 14,
+    mech: { shooter: { x: -2, y: 0, z: 12.5 }, intakes: [{ edge: 'front', from: -6, to: 6 }] },
+  };
+  return coerceSpec({ ...fxKit(), drivetrain: 'mecanum', driveRpm: 435, imported: imp } as RobotSpec);
+}
+{
+  // MEASURED BEFORE: a P-controller (4.5 × the error, a dead band at the 0.06-rad release
+  // tolerance). The kit tank parked 0.045 rad off — on the band's edge; TW turning 30° crossed to
+  // −0.074; Cypher (swerve) to −0.16, and 90° to −0.32, back and forth. Now: no crossing, and still.
+  const builds: [string, RobotSpec][] = [
+    ['kit tank', fxKit()],
+    ['TW mecanum', fxFixedOn(ROBOT_PRESETS[0])],
+    ['Cypher swerve', fxFixedOn(ROBOT_PRESETS[2])],
+    ['imported mecanum', fxImportFixed()],
+    ['heavy slow x-drive', fxFixedOn({ ...ROBOT_PRESETS[0], drivetrain: 'xdrive', driveRpm: 600, massLb: 42, length: 18, width: 18 })],
+  ];
+  const bad: string[] = [];
+  const seen: string[] = [];
+  for (const [name, spec] of builds) {
+    for (const deg of [10, 30, 90]) {
+      const s = fxSettle(fxAimTrace(spec, { yawErr: (deg * Math.PI) / 180, ticks: 180 }));
+      const ok = s.over <= 0.01 && s.flips === 0 && s.endErr < 0.02 && s.endSpin < 0.05;
+      (ok ? seen : bad).push(`${name} ${deg}°: ${JSON.stringify(s)}`);
+    }
+  }
+  check(
+    'fixed aim (DECODE): a held shot TURNS ONTO the goal and holds — no overshoot (≤ 0.01 rad), never crosses back, ends within 0.02 rad and still; tank, mecanum, swerve, x-drive, an import; 10°, 30°, 90° off',
+    bad.length === 0,
+    bad.length ? bad.join(' | ') : seen.slice(0, 3).join(' | '),
+  );
+}
+{
+  // the feed is the hardware's: 0.20 s = 12 ticks, from in band and on target. MEASURED BEFORE:
+  // mostly 13 (`world.time` a few ulps short of `fireReadyAt` on the twelfth tick), 4.68 a second.
+  const runs: [string, number[]][] = [
+    ['kit, on target', fxGaps(fxAimTrace(fxKit(), { ticks: 120 }).fires)],
+    ['kit, 30° off', fxGaps(fxAimTrace(fxKit(), { yawErr: 0.52, ticks: 120 }).fires)],
+    ['TW mecanum, 30° off', fxGaps(fxAimTrace(fxFixedOn(ROBOT_PRESETS[0]), { yawErr: 0.52, ticks: 120 }).fires)],
+    ['Cypher swerve, 30° off', fxGaps(fxAimTrace(fxFixedOn(ROBOT_PRESETS[2]), { yawErr: 0.52, ticks: 120 }).fires)],
+  ];
+  check(
+    'fixed aim (DECODE): from in band the feed runs at its own 0.20 s — every gap 12 ticks, 5 a second, once on target',
+    runs.every(([, g]) => g.length >= 7 && g.every((x) => x === 12)),
+    JSON.stringify(Object.fromEntries(runs)),
+  );
+}
+{
+  // PRESSED ON THE GOAL FACE off its centre, forward held — the kit's own way to shoot. MEASURED
+  // BEFORE: 6 in along, it chattered 0.05↔0.12 rad every three ticks and fed only on the ticks
+  // inside the tolerance (a gap of 15 ticks, 4.0 a second); −6 in, it crossed the aim 8 times and
+  // went 0.14 rad past it.
+  const a = fxAimTrace(fxKit(), { press: { along: 6 }, ticks: 150 });
+  const gaps = fxGaps(a.fires);
+  check(
+    'fixed aim (DECODE): a kit tank pushing on the goal face 6 in off centre turns off the face onto the goal and feeds every 12 ticks',
+    a.fires.length >= 8 && gaps.every((x) => x === 12),
+    JSON.stringify({ fires: a.fires, gaps }),
+  );
+  // (the face still nudges it now and then: the 2D square-up writes the heading, and a turning
+  // tank's corner on the face makes and breaks contact every ~20 ticks — a 0.01-rad kick it re-settles)
+  const b = fxSettle(fxAimTrace(fxKit(), { press: { along: -6 }, ticks: 150 }));
+  check('fixed aim (DECODE): …and 6 in the other way it settles against the face instead of shaking (≤ 2 crossings, < 0.06 rad past the aim)', b.flips <= 2 && b.over < 0.06, JSON.stringify(b));
+}
+{
+  // the release tolerance is the opening's angle at the muzzle's distance — and a shot released at
+  // its edge still goes in (assist off, so nothing turns it on)
+  const tolAt = (d: number): number => decodeFixedAimTol(fxShoot(fxKit(), d, { ticks: 0 }).w.robots[0]);
+  const far = tolAt(50);
+  const near = tolAt(18);
+  const farEdge = fxShoot(fxKit(), 50, { yawErr: far * 0.95 });
+  const nearEdge = fxShoot(fxKit(), 18, { yawErr: near * 0.95 });
+  check(
+    'fixed aim (DECODE): the release tolerance is half the opening’s angle at the muzzle (0.11 rad at 50 in, wider close in), and a shot released at its edge still scores',
+    Math.abs(far - Math.atan(5.5 / 50)) < 0.01 && near > far && farEdge.scored === 3 && nearEdge.scored === 3,
+    JSON.stringify({ far, near, farEdge: farEdge.scored, nearEdge: nearEdge.scored }),
   );
 }
 

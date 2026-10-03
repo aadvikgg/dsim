@@ -90,7 +90,7 @@ import {
   BB_FIXED_HOOD_MAX_DEG,
   BB_FIXED_HOOD_MIN_DEG,
 } from './config';
-import { flyExitSpeed, flyPlannedSpeed, flyReady, flyShot } from '../../sim/flywheel';
+import { flyExitSpeed, flyFeedDue, flyPlannedSpeed, flyReady, flyShot } from '../../sim/flywheel';
 
 /**
  * BIOBUZZ ROBOT GEOMETRY — the Lane B contract surface (`docs/biobuzz-contract.md` §4).
@@ -797,14 +797,24 @@ export function bbFixedRelease(r: RobotState, speed: number): { origin: Vec2; z:
 
 /**
  * THE CHASSIS HEADING THAT PUTS A FIXED LAUNCHER'S SHOT ON `target` — bearing from its own muzzle
- * (which moves with the heading being solved for), led by the muzzle's inherited velocity over
- * the arc's flight time at the PLANNED wheel speed. Four passes, always (`BB_TURRET_SOLVE_PASSES`'
- * rule: no float-dependent trip count). It aims; it cannot change how far the arc reaches.
+ * (which moves with the heading being solved for), led by the chassis's TRANSLATION over the arc's
+ * flight time at the PLANNED wheel speed. Four passes, always (`BB_TURRET_SOLVE_PASSES`' rule: no
+ * float-dependent trip count). It aims; it cannot change how far the arc reaches.
+ *
+ * ⚠️ NOT THE MUZZLE'S SPIN VELOCITY. This is a heading to HOLD, and a chassis holding a heading is
+ * not spinning. It used to lead with `bbPointVel` (translation plus ω × the muzzle's offset), so
+ * the aim moved by 0.047 s × ω on the kit robot, against the spin that was turning it there — a
+ * feedback on the chassis's own spin of −1.29 per tick under the old 27.5/s P loop. A tank turns
+ * hard enough to reverse its spin inside a tick, so it never settled: a ±1.27 rad/s, 30 Hz shake
+ * with the heading flipping 0.05–0.09 rad either side of the line (2D, the StarterBot), for as long
+ * as fire was held. A shot released WHILE spinning still carries the spin (`bbFixedRelease`), and
+ * the landing predicate still sees it.
  */
 export function bbFixedAimHeading(r: RobotState, target: ScoreTarget): number {
   const loc = bbFixedLocal(r.spec);
   const face = bbFixedFacing(r.spec);
   const vh = Math.max(flyPlannedSpeed(r) * dcos(bbFixedHood(r.spec)), 1);
+  const v = r.vel;
   let h = r.heading;
   let tx = target.pos.x;
   let ty = target.pos.y;
@@ -812,7 +822,6 @@ export function bbFixedAimHeading(r: RobotState, target: ScoreTarget): number {
     const o = rot({ x: loc.x, y: loc.y }, h);
     const ox = r.pos.x + o.x;
     const oy = r.pos.y + o.y;
-    const v = bbPointVel(r, { x: ox, y: oy });
     const t = hyp(target.pos.x - ox, target.pos.y - oy) / vh;
     tx = target.pos.x - v.x * t;
     ty = target.pos.y - v.y * t;
@@ -1010,7 +1019,7 @@ export function bbLaunch(world: World, r: RobotState, cmd: RobotCommand, enabled
     // (`flyReady`, the kit OpMode's own gate), at the speed the wheel is turning NOW — a shot fed
     // the moment it crosses the minimum leaves a little slow. The wheel gives some speed back
     // (`flyShot`) and the feeder's own time sets the next one; recovery is the ready gate.
-    if (r.fireReadyAt > world.time || !flyReady(r)) return;
+    if (!flyFeedDue(r, world.time) || !flyReady(r)) return;
     const colour = feed(0);
     if (colour === undefined) return;
     const rel = bbFixedRelease(r, flyExitSpeed(r));

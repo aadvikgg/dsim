@@ -17,8 +17,8 @@ import {
   bbMassLimits,
 } from '../../src/games/biobuzz/config';
 import { bbCarriesNectar, bbLauncherOf, bbSpansEdge } from '../../src/games/biobuzz/mechs';
-import { bbFixedBand, bbFixedShotEnters, bbPretendHive } from '../../src/games/biobuzz/play';
-import { bbFixedRelease, bbFootprint } from '../../src/games/biobuzz/robot';
+import { bbAimTarget, bbFixedBand, bbFixedShotEnters, bbPretendHive } from '../../src/games/biobuzz/play';
+import { bbAimHeading, bbFixedRelease, bbFootprint } from '../../src/games/biobuzz/robot';
 import { BB_STARTER_BOTS, bbSpecMatches } from '../../src/games/biobuzz/presets';
 import { BIOBUZZ_BOT } from '../../src/games/biobuzz/ai';
 import { flyExitSpeed } from '../../src/sim/flywheel';
@@ -161,6 +161,59 @@ function parkedShot(physics: '2d' | '3d', spec: Partial<RobotSpec>, d: number, o
     }
   }
   return { scored, fired: start - r.hopper.length, heading: r.heading };
+}
+
+/** a held, aimed shot traced tick by tick: robot 0 parked in the middle of its band on the north
+ * cell's mouth axis, `yawErr` off the aim heading, aim assist on, fire held, the hopper kept full
+ * (a held element cloned per feed). The heading error, the spin and the tick of every feed. */
+function aimTrace(physics: '2d' | '3d', spec: Partial<RobotSpec>, yawErr: number, ticks: number): { err: number[]; w: number[]; fires: number[] } {
+  const w = createBiobuzzWorld('match', 3, [setup(0, 'blue', spec)], undefined, physics);
+  w.match.phase = 'teleop';
+  w.match.phaseTimeLeft = 100;
+  const r = w.robots[0];
+  r.aimAssist = true;
+  const band = bbFixedBand(r.spec)!;
+  const t = hiveCellTarget('blue', 'north');
+  r.pos = { x: t.pos.x, y: t.pos.y + Math.round((band[0] + band[1]) / 2) };
+  r.heading = wrapAngle(bbAimHeading(r, bbAimTarget(w, r))! + yawErr);
+  r.turretHeading = r.heading;
+  const held = w.balls.find((b) => b.state.kind === 'held' && (b.state as { robot: number }).robot === r.id)!;
+  const heldState = JSON.stringify(held.state);
+  const cap = r.spec.ballStorage ?? 4;
+  let id = 100000;
+  const out = { err: [] as number[], w: [] as number[], fires: [] as number[] };
+  const cmds = new Map([[0, cmd({ fire: true })]]);
+  for (let k = 0; k < ticks; k++) {
+    while (r.hopper.length < cap) {
+      r.hopper.push(held.color);
+      w.balls.push({ ...held, id: id++, state: JSON.parse(heldState), pos: { ...r.pos }, vel: { x: 0, y: 0 } });
+    }
+    biobuzzStep(w, SIM_DT, cmds);
+    out.err.push(wrapAngle(bbAimHeading(r, bbAimTarget(w, r))! - r.heading));
+    out.w.push(r.angVel);
+    if (r.lastFireAt === w.time) out.fires.push(k);
+  }
+  return out;
+}
+/** how a heading-error trace settled — `smoke.ts`'s `fxSettle`: the overshoot past zero, how often
+ * the error changed side (above a 0.003-rad floor), and the largest error and spin in the last 0.5 s */
+function aimSettle(t: { err: number[]; w: number[] }): { over: number; flips: number; endErr: number; endSpin: number } {
+  const s0 = Math.sign(t.err[0]);
+  let over = 0;
+  let flips = 0;
+  let side = 0;
+  for (const e of t.err) {
+    over = Math.max(over, -s0 * e);
+    if (Math.abs(e) <= 0.003) continue;
+    if (side !== 0 && Math.sign(e) !== side) flips++;
+    side = Math.sign(e);
+  }
+  const tail = (a: number[]): number => Math.max(...a.slice(-30).map(Math.abs));
+  return { over: Math.round(over * 1e4) / 1e4, flips, endErr: Math.round(tail(t.err) * 1e4) / 1e4, endSpin: Math.round(tail(t.w) * 1e3) / 1e3 };
+}
+/** the gaps between feeds, in ticks */
+function aimGaps(fires: number[]): number[] {
+  return fires.slice(1).map((t, i) => t - fires[i]);
 }
 
 export function fixedChecks(check: Check): void {
@@ -356,6 +409,66 @@ export function fixedChecks(check: Check): void {
       'import: a fixed launcher releases from the placed lip, at its height, along heading + shooterYawDeg',
       Math.abs(rel.origin.x - (10 + lip.x)) < 1e-9 && Math.abs(rel.origin.y - (-20 + lip.y)) < 1e-9 && rel.z === 12 && Math.abs(wrapAngle(dir - (0.3 + Math.PI / 2))) < 1e-9,
       J({ rel, lip }),
+    );
+  }
+
+  // ---- the aim settles and the feed runs at its own rate (2026-10-02, "the robot shakes constantly
+  // while shooting and its cadence is really slow") -------------------------------------------------
+  {
+    // THE AIM IS A HEADING TO HOLD: it does not move with the chassis's own spin. MEASURED BEFORE: it
+    // led the muzzle's spin velocity too, 0.047 s per rad/s on the card — under the 27.5/s P loop a
+    // feedback of −1.29 a tick on its own spin, so the tank never settled (below).
+    const w = createBiobuzzWorld('match', 3, [setup(0, 'blue', BB_STARTER_BOTS[0])]);
+    const r = w.robots[0];
+    const t = hiveCellTarget('blue', 'north');
+    r.pos = { x: t.pos.x, y: t.pos.y + 44 };
+    r.heading = Math.PI / 2;
+    r.angVel = 0;
+    const still = bbAimHeading(r, bbAimTarget(w, r))!;
+    r.angVel = 3;
+    const spinning = bbAimHeading(r, bbAimTarget(w, r))!;
+    check('fixed aim: the heading a fixed launcher steers to does not move with the chassis’s own spin', Math.abs(wrapAngle(spinning - still)) < 1e-12, J({ still, spinning }));
+  }
+  {
+    // MEASURED BEFORE on the card, 2D, 10° off: a ±1.27 rad/s, 30-Hz shake, the heading 0.05–0.09 rad
+    // either side of the line every tick for as long as fire was held (236 crossings in 4 s). 3D
+    // overshot 0.10. A mecanum and a swerve back launcher crossed 2–4 times on the way in.
+    const MEC: Partial<RobotSpec> = { ...KIT, drivetrain: 'mecanum', driveRpm: 435, shooterMount: 'back', bbMech: { ...KIT.bbMech!, launcher: { kind: 'fixed', mount: 'back', hoodDeg: BB_FIXED_HOOD_DEFAULT_DEG } } };
+    const SWV: Partial<RobotSpec> = { ...MEC, drivetrain: 'swerve', driveRpm: 480 };
+    const runs: [string, Partial<RobotSpec>, '2d' | '3d'][] = [
+      ['card 2D', BB_STARTER_BOTS[0], '2d'],
+      ['card 3D', BB_STARTER_BOTS[0], '3d'],
+      ['mecanum back 2D', MEC, '2d'],
+      ['swerve back 2D', SWV, '2d'],
+      ['mecanum back 3D', MEC, '3d'],
+    ];
+    const bad: string[] = [];
+    const seen: string[] = [];
+    for (const [name, spec, physics] of runs) {
+      for (const deg of [10, 30]) {
+        const s = aimSettle(aimTrace(physics, spec, (deg * Math.PI) / 180, 150));
+        const ok = s.over <= 0.01 && s.flips === 0 && s.endErr < 0.02 && s.endSpin < 0.05;
+        (ok ? seen : bad).push(`${name} ${deg}°: ${J(s)}`);
+      }
+    }
+    check(
+      'fixed aim: a held shot TURNS ONTO the cell and holds — no overshoot (≤ 0.01 rad), never crosses back, ends within 0.02 rad and still; the card in 2D and 3D, mecanum, swerve',
+      bad.length === 0,
+      bad.length ? bad.join(' | ') : seen.slice(0, 3).join(' | '),
+    );
+  }
+  {
+    // the feed is the hardware's: 0.30 s = 18 ticks. MEASURED BEFORE: 18 or 19 (`world.time` a few
+    // ulps short of `fireReadyAt`), 3.2 a second over ten shots instead of 3.33.
+    const runs: [string, number[]][] = [
+      ['card 2D', aimGaps(aimTrace('2d', BB_STARTER_BOTS[0], 0, 200).fires)],
+      ['card 3D', aimGaps(aimTrace('3d', BB_STARTER_BOTS[0], 0, 200).fires)],
+      ['card 2D, 30° off', aimGaps(aimTrace('2d', BB_STARTER_BOTS[0], 0.52, 200).fires)],
+    ];
+    check(
+      'fixed aim: from in band the feed runs at its own 0.30 s — every gap 18 ticks, once on target',
+      runs.every(([, g]) => g.length >= 9 && g.every((x) => x === 18)),
+      J(Object.fromEntries(runs)),
     );
   }
 
