@@ -16,7 +16,7 @@ import { chainMassFloorBump } from '../../games/chain/config';
 import { DRIVETRAIN_LABELS } from '../../ui/labelData';
 import { bbox, buildDescriptor, q64 } from '../geometry';
 import { driveReadout, driveRpmFor, importedDriveFields } from '../drive';
-import type { ImportCheck, ImportMeasurement, ImportSetup, LengthUnit, LibrarySource, UpAxis } from '../types';
+import type { FrontDetection, ImportCheck, ImportMeasurement, ImportSetup, LengthUnit, LibrarySource, QuarterTurns, UpAxis } from '../types';
 import { validateMechFor } from './placement';
 import { COPY } from './copy';
 
@@ -35,8 +35,12 @@ export interface EditorDoc {
   editId: string | null;
   step: StepIndex;
   setup: ImportSetup;
-  /** what auto-detection chose when the file was read, for the "Detected: mm" hints */
-  detected: { units: LengthUnit; up: UpAxis } | null;
+  /**
+   * what auto-detection chose when the file was read, for the "Detected: mm" hints. `yaw` and
+   * `front` (absent in drafts from before front detection): the quarter turns the file was read at,
+   * and whether that front was found in the geometry or assumed to be the CAD front view.
+   */
+  detected: { units: LengthUnit; up: UpAxis; yaw?: QuarterTurns; front?: 'detected' | 'assumed'; cue?: FrontDetection['cue'] } | null;
   /** mechanism placements, MODEL frame */
   mech: ImportedMech | null;
   /** identity, mechanism fields and assists; the import fields are filled in by `buildSpec` */
@@ -44,6 +48,8 @@ export interface EditorDoc {
   source: LibrarySource | null;
   /** the model is a saved robot's stored mesh (re-open), not the file it came from */
   savedModel: boolean;
+  /** what reading the file left out or assumed, in the reader's words (Review shows them as notes) */
+  notes?: string[];
   /** created time of the library robot being edited */
   created: number | null;
   /** the source file's name, for the robot page's "Resume import" card */
@@ -165,7 +171,17 @@ const FIX: Partial<Record<ImportCheck['code'], { step: StepIndex; focus: string 
   'rpm-low': { step: 1, focus: 'ri-motor' },
   'rpm-high': { step: 1, focus: 'ri-motor' },
   'tank-rpm-clamped': { step: 1, focus: 'ri-tank' },
+  'front-assumed': { step: 0, focus: 'ri-front' },
 };
+
+/**
+ * The front was ASSUMED (no cue in the geometry was strong enough) and nobody has turned it since:
+ * the Review step says so, because a robot that drives backwards is the one mistake the import
+ * cannot see. A saved robot's stored mesh knows its front.
+ */
+export function frontAssumed(doc: Pick<EditorDoc, 'detected' | 'savedModel' | 'setup'> | null): boolean {
+  return !!doc && !doc.savedModel && doc.detected?.front === 'assumed' && doc.setup.yaw === (doc.detected.yaw ?? 0);
+}
 
 /** the step each check belongs to, for the step rail's counts */
 export function stepOf(item: ReviewItem): StepIndex {
@@ -176,9 +192,12 @@ export function stepOf(item: ReviewItem): StepIndex {
  * Every check, passes included, in step order. `block` disables Save, Test drive and Export.
  * A pass line stands in for a category with nothing to say, so the list says what was checked.
  */
-export function reviewItems(m: ImportMeasurement | null, built: Built | null, game: GameId): ReviewItem[] {
+export function reviewItems(m: ImportMeasurement | null, built: Built | null, game: GameId, assumedFront = false, notes: readonly string[] = []): ReviewItem[] {
   if (!m || !built) return [{ id: 'empty', level: 'block', text: COPY.dropTitle, fix: { step: 0, focus: 'ri-choose' } }];
   const items: ReviewItem[] = [];
+  if (assumedFront) items.push({ id: 'front-assumed', level: 'info', text: COPY.frontAssumedNote, fix: FIX['front-assumed'] });
+  // the reader's own notes (a large STEP's left-out fasteners, an .obj without its .mtl)
+  notes.forEach((text, i) => items.push({ id: `read-note-${i}`, level: 'info', text }));
   const codes = new Set(m.checks.map((c) => c.code));
   for (const c of m.checks) {
     if (c.code === 'mesh-simplified' || c.code === 'hull-simplified' || c.code === 'wheels-picked') continue;

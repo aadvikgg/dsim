@@ -63,7 +63,23 @@ export function ModelStep({
   }));
   const sel = wheels?.[selectedWheel] ?? null;
   const b0 = m.hull.length ? m.hull : [];
-  const turned = ((doc.setup.yaw % 4) * 90) % 360;
+  // turned from where the file was read: the detected front, or the CAD front when it was assumed
+  const base = doc.detected?.yaw ?? 0;
+  const turned = ((((doc.setup.yaw - base) % 4) + 4) % 4) * 90;
+  const assumed = doc.detected?.front === 'assumed';
+  const frontLabel = doc.savedModel
+    ? turned
+      ? COPY.frontTurned(turned)
+      : COPY.savedModel
+    : turned
+      ? assumed
+        ? COPY.frontTurnedAssumed(turned)
+        : COPY.frontTurned(turned)
+      : assumed
+        ? COPY.frontAssumed
+        : doc.detected?.cue
+          ? COPY.frontFound[doc.detected.cue]
+          : COPY.frontDetected;
   const turn = (by: 1 | 3): void => onSetup({ yaw: (((doc.setup.yaw + by) % 4) as QuarterTurns), wheels: null });
   return (
     <>
@@ -133,10 +149,10 @@ export function ModelStep({
           onPick={(a) => onSetup({ up: a, wheels: null })}
         />
       </div>
-      <div className="ds-field">
+      <div className="ds-field" id="ri-front">
         <span className="cap">
           {COPY.front}
-          <span>{turned ? COPY.frontTurned(turned) : doc.savedModel ? COPY.savedModel : COPY.frontDetected}</span>
+          <span>{frontLabel}</span>
         </span>
         <div className="ds-import-turns">
           <button type="button" className="ds-btn small" onClick={() => turn(1)}>

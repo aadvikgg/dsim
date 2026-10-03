@@ -199,8 +199,12 @@ function routeFor(file, buf) {
   // measurement build, where the loader is an entry of its own; in the app it is inlined.
   // `geometry-*.js` is the measurement code (`src/robotImport/geometry.ts`) once the editor and the
   // engine both import it: Rollup splits it into a chunk the two share, fetched with the engine.
-  if (/^(importerEngine|engineLoader|geometry)-[^/]*\.js$/.test(base)) return 'importer';
-  if (/^(stepWorker|stepReader)-[^/]*\.js$/.test(base) || /^occt-import-js[^/]*\.wasm$/.test(base)) return 'step';
+  // `fflate.module-*.js` is three's fflate, split out because the engine (the zip reader) and the
+  // main build's lazy `threeMf-*.js` share it: fetched with the engine
+  if (/^(importerEngine|engineLoader|geometry|fflate\.module)-[^/]*\.js$/.test(base)) return 'importer';
+  // `occtWorker-*.js` is the occt instance the STEP worker spawns (one per piece reader): Vite
+  // builds a worker made inside a worker as its own bundle too
+  if (/^(stepWorker|stepReader|occtWorker)-[^/]*\.js$/.test(base) || /^occt-import-js[^/]*\.wasm$/.test(base)) return 'step';
   // THE RELAY'S VALIDATORS, by FILENAME: `importVisualsClient.ts` reaches them by `import()`, so a
   // client that never uploads or receives an imported robot's look never fetches them
   if (/^visualCheck-[^/]*\.js$/.test(base)) return 'relay';
@@ -208,7 +212,10 @@ function routeFor(file, buf) {
   // as its own bundle, named after it. `meshoptDecoder-*.js` is the import worker's lazy chunk for a
   // meshopt-compressed glTF, behind a facade so it is not named like the main build's shared three
   // chunk (`meshopt_decoder.module-*.js`, routed `scene` by its marker).
-  if (/^(importWorker|measureWorker|meshoptDecoder)-[^/]*\.js$/.test(base)) return 'importworker';
+  // `threeMf-*.js` (three's 3MF loader, fflate's unzip and `miniDom.ts`) and `zip-*.js` (the zip
+  // reader) are the import worker's lazy chunks for a 3MF or a zip; the engine's main-thread fallback
+  // reaches `threeMf.ts` by the same `import()`, so the main build has one too, billed here as well
+  if (/^(importWorker|measureWorker|meshoptDecoder|threeMf|zip)-[^/]*\.js$/.test(base)) return 'importworker';
   // THE ROBOT LIBRARY (`src/robotImport/library.ts`, IndexedDB), by FILENAME: the renderers' asset
   // seam (`src/render/importedAssets.ts`) reaches it with a dynamic `import()` the first time an
   // imported robot is drawn, so it is its own small chunk rather than a cost in `main`.
@@ -615,18 +622,31 @@ const BASELINE = {
   // drives two workers (`importSession.ts`, `measureSession.ts` and their protocols, +2.6) and keeps
   // the main-thread fallback they replace (`parse.ts`, with the streamed STL reader, +1.2); the
   // measurement's split into an orientation half and a finish half is +0.2 in `geometry-*.js`.
-  importer: { gzip: 67.06 * 1000 },
+  // 2026-10-02 (real CAD): 67.06 -> 69.10, raised on purpose. `importerEngine-*.js` 56.42 (the zip
+  // directory reader and the zip/STEP routing, the glTF merge as it reads; three's 3MF loader left
+  // for the lazy `threeMf-*.js`, billed to `importworker`), `geometry-*.js` 9.61 (+1.1: front
+  // detection) and `fflate.module-*.js` 3.07, three's fflate, now split out because the lazy 3MF
+  // chunk shares it (it was inside the engine chunk before).
+  importer: { gzip: 69.1 * 1000 },
   // 2026-10-01: NEW (lane 9). `importWorker-*.js` 104.06 (three.js core, the GLB/glTF, STL, OBJ+MTL
   // and PLY loaders, meshopt's simplifier, the weld and the crease: the parse-to-prepared pipeline
   // that used to block the main thread for seconds; and GLTFExporter for the bake's mesh half),
   // `measureWorker-*.js` 6.50 (`geometry.ts`: the orientation half of a measurement) and
   // `meshoptDecoder-*.js` 7.26 (fetched only for a meshopt-compressed glTF). Fetched when a file is
   // dropped on the importer or a robot is saved, never otherwise.
-  importworker: { gzip: 117.82 * 1000 },
+  // 2026-10-02 (real CAD): 117.82 -> 139.68, raised on purpose. `importWorker-*.js` 107.31 (+3.25: the
+  // glTF merge as it reads, the consuming simplification, zip requests) and three LAZY chunks it adds:
+  // `threeMf-*.js` 7.96 (three's 3MF loader, fflate's unzip and `miniDom.ts`: 3MF moved off the main
+  // thread, fetched only for a 3MF), the main build's copy of it for the no-Worker fallback 7.91, and
+  // `zip-*.js` 1.56 (fetched only for a zip). A GLB or STL import fetches none of the three.
+  importworker: { gzip: 139.68 * 1000 },
   // 2026-10-01: NEW. `occt-import-js-*.wasm` 3110.91 (OpenCascade, 7.6 MB raw), `stepWorker-*.js`
   // 21.95 (the worker with occt's glue) and `stepReader-*.js` 0.42. Fetched only when a STEP file is
   // dropped; every other import, and every player who never imports a robot, pays nothing.
-  step: { gzip: 3133.28 * 1000 },
+  // 2026-10-02 (real CAD): 3133.28 -> 3144.41. occt's glue moved into `occtWorker-*.js` 22.02 (one per
+  // piece reader, spawned by the STEP worker); `stepWorker-*.js` 10.72 is now the file reader, the
+  // zip inflater, the STEP splitter and the pool; `stepReader-*.js` 0.76.
+  step: { gzip: 3144.41 * 1000 },
   // 2026-10-01: NEW (robot import, rendering lane). `library-*.js` 1.85: the device library behind
   // `importedAssets`' dynamic import; the rest of that lane is +5.60 in `main` (the 2D sprites'
   // import branches, the asset seam, FootprintSvg) and +2.86 in `scene` (`renderImported.ts`),

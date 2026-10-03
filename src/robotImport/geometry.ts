@@ -16,6 +16,7 @@ import {
   INCHES_PER_UNIT,
   LENGTH_UNITS,
   UP_AXES,
+  type FrontDetection,
   type ImportCheck,
   type ImportMeasurement,
   type ImportSetup,
@@ -792,6 +793,145 @@ export function detectWheels(contactXY: ArrayLike<number>, edges: ArrayLike<numb
   };
 }
 
+// ---- front -------------------------------------------------------------------------------
+
+/** the confidence at which the front is DETECTED rather than assumed (`FrontDetection`) */
+export const FRONT_MIN_CONFIDENCE = 0.6;
+/** how high an intake reaches, inches: the cue looks at geometry no higher than this */
+const FRONT_LOW_IN = 3;
+/** the outermost slab of that low geometry whose width coverage is measured, inches */
+const FRONT_EDGE_SLAB_IN = 1.5;
+/** the weights of the three votes: an intake is the strongest cue there is, mass the weakest */
+const FRONT_WEIGHTS = { intake: 1, wheels: 0.5, mass: 0.35 } as const;
+const COVER_BINS = 24;
+
+/** a vote in [−1, 1] from a signed measure: nothing inside `dead`, all of it at `dead + full` */
+const vote = (v: number, dead: number, full: number): number => Math.sign(v) * Math.min(1, Math.max(0, (Math.abs(v) - dead) / full));
+
+/**
+ * WHICH WAY THE ROBOT FACES, from its MODEL-frame geometry at yaw `yaw` (`FrontDetection` has the
+ * rules). Each cue votes along +x and +y (a negative vote is the other way):
+ *
+ * - INTAKE: geometry no higher than `FRONT_LOW_IN` reaches past the outermost wheel further at one
+ *   end than at the other (by more than ¾ in, all of the vote at 2¼ in), and its outermost
+ *   `FRONT_EDGE_SLAB_IN` covers most of the robot's width there. An intake roller does; a frame's
+ *   cross member reaches about as far at both ends.
+ * - WHEELS: the wheelbase centre sits back from the footprint's centre (½ in dead band), leaving
+ *   the long overhang at the front.
+ * - MASS: the surface area's centre sits toward the back (5 % of the half-length dead band).
+ *
+ * The strongest axis wins; the confidence is its weighted vote less the other axis's, so a robot
+ * whose cues point two ways, or nowhere, is assumed to face its CAD front.
+ */
+export function detectFront(modelParts: readonly MeshPart[], wheels: readonly Vec2[] | null, height: number, yaw: QuarterTurns): FrontDetection {
+  const none: FrontDetection = { yaw: 0, confidence: 0, detected: false, cue: null };
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  let y0 = Infinity;
+  let y1 = -Infinity;
+  let area = 0;
+  let ax = 0;
+  let ay = 0;
+  const zLow = Math.min(FRONT_LOW_IN, height * 0.25);
+  // low geometry's reach in the four directions: +x, −x, +y, −y
+  const reach = [-Infinity, -Infinity, -Infinity, -Infinity];
+  const each = (fn: (a: Float32Array, i0: number, i1: number, i2: number) => void): void => {
+    for (const p of modelParts) {
+      const a = p.positions;
+      const idx = p.indices;
+      const n = idx ? idx.length : a.length / 3;
+      for (let t = 0; t + 2 < n; t += 3) fn(a, idx ? idx[t] : t, idx ? idx[t + 1] : t + 1, idx ? idx[t + 2] : t + 2);
+    }
+  };
+  each((a, i, j, k) => {
+    const ix = 3 * i;
+    const jx = 3 * j;
+    const kx = 3 * k;
+    const ux = a[jx] - a[ix];
+    const uy = a[jx + 1] - a[ix + 1];
+    const uz = a[jx + 2] - a[ix + 2];
+    const vx = a[kx] - a[ix];
+    const vy = a[kx + 1] - a[ix + 1];
+    const vz = a[kx + 2] - a[ix + 2];
+    const s = 0.5 * Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+    if (!Number.isFinite(s)) return;
+    area += s;
+    ax += (s * (a[ix] + a[jx] + a[kx])) / 3;
+    ay += (s * (a[ix + 1] + a[jx + 1] + a[kx + 1])) / 3;
+    for (const q of [ix, jx, kx]) {
+      if (a[q] < x0) x0 = a[q];
+      if (a[q] > x1) x1 = a[q];
+      if (a[q + 1] < y0) y0 = a[q + 1];
+      if (a[q + 1] > y1) y1 = a[q + 1];
+    }
+    if (a[ix + 2] > zLow || a[jx + 2] > zLow || a[kx + 2] > zLow) return;
+    reach[0] = Math.max(reach[0], a[ix], a[jx], a[kx]);
+    reach[1] = Math.max(reach[1], -a[ix], -a[jx], -a[kx]);
+    reach[2] = Math.max(reach[2], a[ix + 1], a[jx + 1], a[kx + 1]);
+    reach[3] = Math.max(reach[3], -a[ix + 1], -a[jx + 1], -a[kx + 1]);
+  });
+  if (!(area > 0) || !(x1 > x0) || !(y1 > y0)) return none;
+  // how much of the width the outermost slab of low geometry covers, per direction
+  const cover = [new Uint8Array(COVER_BINS), new Uint8Array(COVER_BINS), new Uint8Array(COVER_BINS), new Uint8Array(COVER_BINS)];
+  const mark = (bins: Uint8Array, lo: number, hi: number, from: number, to: number): void => {
+    const w = (to - from) / COVER_BINS;
+    const b0 = Math.max(0, Math.floor((lo - from) / w));
+    const b1 = Math.min(COVER_BINS - 1, Math.floor((hi - from) / w));
+    for (let b = b0; b <= b1; b++) bins[b] = 1;
+  };
+  each((a, i, j, k) => {
+    const ix = 3 * i;
+    const jx = 3 * j;
+    const kx = 3 * k;
+    if (a[ix + 2] > zLow || a[jx + 2] > zLow || a[kx + 2] > zLow) return;
+    const xs = [a[ix], a[jx], a[kx]];
+    const ys = [a[ix + 1], a[jx + 1], a[kx + 1]];
+    const mxX = Math.max(...xs);
+    const mnX = Math.min(...xs);
+    const mxY = Math.max(...ys);
+    const mnY = Math.min(...ys);
+    if (mxX >= reach[0] - FRONT_EDGE_SLAB_IN) mark(cover[0], mnY, mxY, y0, y1);
+    if (-mnX >= reach[1] - FRONT_EDGE_SLAB_IN) mark(cover[1], mnY, mxY, y0, y1);
+    if (mxY >= reach[2] - FRONT_EDGE_SLAB_IN) mark(cover[2], mnX, mxX, x0, x1);
+    if (-mnY >= reach[3] - FRONT_EDGE_SLAB_IN) mark(cover[3], mnX, mxX, x0, x1);
+  });
+  const coverage = cover.map((b) => b.reduce((s, v) => s + v, 0) / COVER_BINS);
+  const fx = (x0 + x1) / 2;
+  const fy = (y0 + y1) / 2;
+  // [x, y] votes per cue
+  const intake = [0, 0];
+  const wheel = [0, 0];
+  if (wheels && wheels.length >= 4) {
+    const wx1 = Math.max(...wheels.map((w) => w.x));
+    const wx0 = Math.min(...wheels.map((w) => w.x));
+    const wy1 = Math.max(...wheels.map((w) => w.y));
+    const wy0 = Math.min(...wheels.map((w) => w.y));
+    // reach past the outermost wheel at each end, and the cover of the end that reaches further
+    const axis = (pos: number, neg: number, wPos: number, wNeg: number, cPos: number, cNeg: number): number => {
+      if (!Number.isFinite(pos) || !Number.isFinite(neg)) return 0;
+      const d = pos - wPos - (neg + wNeg);
+      const c = d > 0 ? cPos : cNeg;
+      return vote(d, 0.75, 1.5) * Math.min(1, Math.max(0, (c - 0.3) / 0.4));
+    };
+    intake[0] = axis(reach[0], reach[1], wx1, wx0, coverage[0], coverage[1]);
+    intake[1] = axis(reach[2], reach[3], wy1, wy0, coverage[2], coverage[3]);
+    wheel[0] = -vote((wx0 + wx1) / 2 - fx, 0.5, 1.5);
+    wheel[1] = -vote((wy0 + wy1) / 2 - fy, 0.5, 1.5);
+  }
+  const mass = [-vote((ax / area - fx) / ((x1 - x0) / 2), 0.05, 0.15), -vote((ay / area - fy) / ((y1 - y0) / 2), 0.05, 0.15)];
+  const S = [0, 1].map((k) => FRONT_WEIGHTS.intake * intake[k] + FRONT_WEIGHTS.wheels * wheel[k] + FRONT_WEIGHTS.mass * mass[k]);
+  const major = Math.abs(S[0]) >= Math.abs(S[1]) ? 0 : 1;
+  const confidence = Math.min(1, Math.max(0, Math.abs(S[major]) - Math.abs(S[1 - major])));
+  if (S[major] === 0) return none;
+  // the direction, as the turn that brings it to +x: +x 0, −y 1, −x 2, +y 3
+  const turn: QuarterTurns = major === 0 ? (S[0] > 0 ? 0 : 2) : S[1] > 0 ? 3 : 1;
+  const parts = { intake: FRONT_WEIGHTS.intake * intake[major], wheels: FRONT_WEIGHTS.wheels * wheel[major], mass: FRONT_WEIGHTS.mass * mass[major] };
+  const sign = Math.sign(S[major]);
+  const cue = (Object.keys(parts) as (keyof typeof parts)[]).reduce((best, k) => (parts[k] * sign > parts[best] * sign ? k : best), 'intake' as keyof typeof parts);
+  const detected = confidence >= FRONT_MIN_CONFIDENCE;
+  return { yaw: detected ? (((yaw + turn) % 4) as QuarterTurns) : 0, confidence: Math.round(confidence * 1000) / 1000, detected, cue: parts[cue] * sign > 0 ? cue : null };
+}
+
 // ---- height bands ------------------------------------------------------------------------
 
 /**
@@ -1005,6 +1145,8 @@ export interface OrientedMeasure {
   rawHull: Vec2[];
   /** what wheel detection found (a manual override is applied in `finishMeasure`) */
   wheels: WheelDetection;
+  /** which way the geometry says the robot faces (`detectFront`), as a yaw from the CAD front */
+  front: FrontDetection;
   /** bands in the MODEL frame, before the shift to the wheelbase centre; null = none or not asked */
   bandsModel: ImportedBand[] | null;
 }
@@ -1149,6 +1291,7 @@ export function orientParts(
     }
   }
   const bandsModel = setup.bands && !empty ? computeBands(modelParts, size.height) : null;
+  const front: FrontDetection = empty ? { yaw: 0, confidence: 0, detected: false, cue: null } : detectFront(modelParts, wheels.wheels, size.height, yaw);
   return {
     oriented: {
       units,
@@ -1163,6 +1306,7 @@ export function orientParts(
       size,
       rawHull,
       wheels,
+      front,
       bandsModel,
     },
     modelParts,
@@ -1176,7 +1320,7 @@ export function orientParts(
  * Reads `o` and never writes it, so one `OrientedMeasure` serves every later edit.
  */
 export function finishMeasure(o: OrientedMeasure, setup: ImportSetup): ImportMeasurement {
-  const { units, size, empty, rawHull, wheels, upMargin } = o;
+  const { units, size, empty, rawHull, wheels, upMargin, front } = o;
   const checks: ImportCheck[] = [];
   const maxVerts = Math.max(3, Math.min(MAX_HULL_VERTS, Math.floor(setup.hullMaxVerts) || MAX_HULL_VERTS));
   const { hull, deviation } = rawHull.length >= 3 ? finishHull(rawHull, maxVerts) : { hull: [] as Vec2[], deviation: 0 };
@@ -1271,6 +1415,7 @@ export function finishMeasure(o: OrientedMeasure, setup: ImportSetup): ImportMea
     hullRawVerts: rawHull.length,
     hullDeviation: deviation,
     wheels,
+    front,
     wheelsUsed,
     wheelSource,
     origin,

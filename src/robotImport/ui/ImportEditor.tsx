@@ -23,6 +23,7 @@ import {
   blocks,
   buildSpec,
   draftKey,
+  frontAssumed,
   driveNumbers,
   moveWheel,
   rectangleWheels,
@@ -179,34 +180,60 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         }
         return;
       }
+      let stepStart = 0;
       try {
         // read, weld and simplify in the import worker; the main thread only paints the progress
         const prepared = await e.importModel(files, {
           budget: draftRef.current?.doc.setup.triBudget ?? defaultImportSetup().triBudget,
           signal: abort.signal,
           onProgress: (p) => {
-            if (my === gen.current) setPhase({ title: name, label: progressLabel(p, name), frac: p.frac });
+            if (my !== gen.current) return;
+            // a big STEP reads for minutes: once a quarter of it is read, say how long is left (any
+            // earlier, the pieces still in flight make the guess run long: 4 min for a 70 s read)
+            if (p.stage === 'step-parse' && !stepStart) stepStart = performance.now();
+            const elapsed = stepStart ? (performance.now() - stepStart) / 1000 : 0;
+            const left = p.stage === 'step-parse' && p.frac && p.frac >= 0.25 && p.frac < 1 && elapsed >= 10 ? (elapsed * (1 - p.frac)) / p.frac : null;
+            setPhase({ title: name, label: left === null ? progressLabel(p, name) : COPY.phase.stepLeft(name, left), frac: p.frac });
           },
         });
         if (my !== gen.current) return;
         setPhase({ title: name, label: COPY.phase.measure });
         const cur = draftRef.current;
         const baseDoc = cur?.doc ?? freshDoc(settings, key, editId);
-        const setup: ImportSetup = { ...baseDoc.setup, units: 'auto', up: 'auto', yaw: 0, wheels: null, ...opts.setup };
+        let setup: ImportSetup = { ...baseDoc.setup, units: 'auto', up: 'auto', yaw: 0, wheels: null, ...opts.setup };
         // the first measurement in the measure worker; `normalise` then answers from its cache
         await e.prepareMeasure(prepared, setup);
         if (my !== gen.current) {
           e.releaseModel(prepared);
           return;
         }
-        const n = e.normalise(prepared, setup);
+        let n = e.normalise(prepared, setup);
+        // a front found in the geometry turns the robot to it, once, as the file is read. A saved
+        // robot's stored mesh knows its front, and a setup that names a yaw keeps it.
+        const front = n.measurement.front;
+        const findFront = !opts.savedModel && opts.setup?.yaw === undefined;
+        if (findFront && front.detected && front.yaw !== setup.yaw) {
+          setup = { ...setup, yaw: front.yaw };
+          await e.prepareMeasure(prepared, setup);
+          if (my !== gen.current) {
+            e.releaseModel(prepared);
+            return;
+          }
+          n = e.normalise(prepared, setup);
+        }
         const model = prepared;
         const spec = opts.spec ?? baseDoc.spec;
         const doc: EditorDoc = {
           ...baseDoc,
           step: 0,
           setup,
-          detected: { units: n.measurement.units, up: n.measurement.up },
+          detected: {
+            units: n.measurement.units,
+            up: n.measurement.up,
+            yaw: setup.yaw,
+            front: findFront ? (front.detected ? 'detected' : 'assumed') : undefined,
+            cue: findFront && front.detected ? front.cue : null,
+          },
           mech: null,
           // a NEW import is named after its file; an edit keeps its name
           spec: { ...spec, name: opts.spec?.name ?? (baseDoc.editId ? spec.name : baseName(model.name)) },
@@ -219,6 +246,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
           },
           sourceName: model.name,
           savedModel: !!opts.savedModel,
+          notes: model.notes.length ? model.notes : undefined,
           updated: Date.now(),
         };
         const replaced = draftRef.current?.model;
@@ -230,8 +258,10 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         console.warn('[import] read failed', err);
         setPhase(null);
         const msg = err instanceof Error && err.name === 'ImportError' ? err.message : `Couldn’t read ${name}. Export it again and retry.`;
-        const step = err instanceof Error && (err as { code?: string }).code === 'step-failed';
-        setError({ text: step ? COPY.stepReader : msg, extra: step ? { label: COPY.tryAgain, run: () => void readModel(files, opts) } : undefined });
+        // the reader that did not load (a dropped connection) is worth another go; a file it could
+        // not read is not, and its sentence already says what to export instead
+        const retry = err instanceof Error && (err as { code?: string }).code === 'step-reader';
+        setError({ text: msg, extra: retry ? { label: COPY.tryAgain, run: () => void readModel(files, opts) } : undefined });
       }
     },
     [ensureEngine, settings, key, editId, setDraft],
@@ -458,7 +488,9 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const m = normalised?.measurement ?? null;
   const built = useMemo(() => (doc && m ? buildSpec(doc, m) : null), [doc, m]);
   const defs = useMemo(() => (built ? mechHandlesFor(game, built.spec) : []), [built, game]);
-  const items = useMemo(() => reviewItems(m, built, game), [m, built, game]);
+  const assumedFront = frontAssumed(doc);
+  const readNotes = doc?.notes;
+  const items = useMemo(() => reviewItems(m, built, game, assumedFront, readNotes ?? []), [m, built, game, assumedFront, readNotes]);
   const mechChecks = useMemo(() => (built ? validateMechFor(built.spec, game) : []), [built, game]);
   const numbers = useMemo(() => (built ? driveNumbers(built, game) : null), [built, game]);
 

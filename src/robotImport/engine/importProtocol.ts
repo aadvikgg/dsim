@@ -7,6 +7,7 @@ import type { ModelFormat } from '../types';
 import type { ImportErrorCode } from './importError';
 import type { LoadStage, ParsedFiles } from './parse';
 import type { PreparedModel } from './prepare';
+import type { ZipPick } from './zip';
 
 /** what the import is doing; `simplify` carries the triangle count it started from */
 export type ImportStage = LoadStage | 'simplify' | 'measure';
@@ -22,7 +23,9 @@ export interface ImportProgress {
 export type ImportRequest =
   /** a format the worker reads itself: every dropped file (a .gltf's .bin, an .obj's .mtl) */
   | { kind: 'files'; files: File[]; primary: number; format: ModelFormat; budget: number }
-  /** parts read elsewhere (STEP in its own worker, 3MF on the main thread), not yet merged */
+  /** the model inside a dropped zip (the worker inflates it, and its .bin or .mtl, itself) */
+  | { kind: 'zip'; pick: ZipPick; budget: number }
+  /** parts read elsewhere (STEP in its own workers), not yet merged */
   | { kind: 'parts'; name: string; format: ModelFormat; parsed: ParsedFiles; budget: number }
   /** the bake's mesh half (`bakeMeshHere`): robot-local creased parts → the stored GLB */
   | { kind: 'bake'; parts: MeshPart[] };

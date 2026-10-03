@@ -22,11 +22,13 @@ touching `src/robotImport/**`.
   Every caller reaches the engine through `loadImporterEngine()` (`engineLoader.ts`), the one
   dynamic specifier. The RENDER lane (`scripts/smoke-biobuzz/render.ts`) fails a static import of
   `engine/` from outside it, a second specifier, or three.js anywhere but the two zones.
-- `engine/stepReader.ts` is reached by its own `import()` from `engine/load.ts` and runs occt in a
-  worker (`stepWorker.ts`), so the glue and its 7.6 MB wasm (a Vite `?url` asset) are fetched only
-  when a STEP file is dropped, and a 50 MB STEP does not freeze the page. occt-import-js is
-  LGPL-2.1, a devDependency like three (bundled, never installed on the server); it needs a credit
-  on the Contributors page.
+- `engine/stepReader.ts` is reached by its own `import()` from `engine/load.ts` and starts the STEP
+  worker (`stepWorker.ts`), which reads the dropped file itself and runs occt in workers of its own
+  (`occtWorker.ts`, a worker made inside a worker, which Vite bundles as its own chunk), so the glue
+  and its 7.6 MB wasm (a Vite `?url` asset) are fetched only when a STEP file is dropped, and a
+  420 MB STEP neither freezes the page nor passes through it. occt-import-js is LGPL-2.1, a
+  devDependency like three (bundled, never installed on the server); it needs a credit on the
+  Contributors page. See "Real CAD" below for what the STEP worker does with a big file.
 - Two lazy zones share three.js, so once both are reachable Rollup hoists three (with GLTFLoader,
   the meshopt decoder and BufferGeometryUtils) into a shared chunk named after one of its modules.
   `bundleaudit` bills it to `scene` by its `WebGLRenderer` marker and routes `renderScene-*.js`,
@@ -69,8 +71,24 @@ touching `src/robotImport/**`.
   six signed axes. A robot stands on its wheels, so the right "down" has (a) floor contacts that
   spread across the footprint, (b) a centre of mass inside the support polygon, and (c) almost no
   flat, downward-facing area at the very bottom. A robot on its side fails (b) and (c).
-- **Front**: no geometric cue is reliable, so the default is the CAD front view: −Y front when Z
-  is up, +Z front when Y is up. The UI's rotate control turns it in quarter turns.
+- **Front** (`detectFront`, `FrontDetection` in `types.ts`): the CAD front view (−Y front when Z is
+  up, +Z front when Y is up) unless the geometry says otherwise with confidence. Three cues vote
+  along the footprint's two axes, weighted 1 / 0.5 / 0.35: an INTAKE (geometry no higher than
+  3 in that reaches past the outermost wheel further at one end than the other, ¾ in dead band,
+  all of the vote at 2¼ in, scaled by how much of the robot's width its outermost 1.5 in covers),
+  the WHEELS set back from one end (wheelbase centre against footprint centre, ½ in dead band),
+  and the MASS (surface-area centre) toward the other end. The confidence is the strongest axis's
+  vote less the other axis's; at 0.6 and over the front is DETECTED and the editor turns the robot
+  to it as the file is read ("Detected from the intake"); under it the front is ASSUMED, the Model
+  step says "Assumed: the CAD front view", and Review carries a note (`front-assumed`, Fix → the
+  Turn buttons) until the player turns it. A saved robot's stored mesh, and a setup that names a
+  yaw, are never re-detected. Measured: the synthetic robot (4- and 6-wheel, facing either way) is
+  found in all 24 orientations; the stress robots in every orientation whose up axis is found;
+  goBILDA's BIOBUZZ starter bot (a front roller intake) in all 24, confidence 0.65; goBILDA's
+  DECODE and REV's DECODE starter bots (no intake, launcher at the front) are ASSUMED in all 24
+  (confidence 0.12, and 0.09–0.30) and their CAD front is their real one. Never wrongly detected
+  on any of them (measured on the stored meshes the editor saved, turned through all 24
+  orientations).
 - **Floor contacts → wheels**: vertices within 0.15 in of the floor (0.5 in if that finds fewer
   than four wheels), joined when within 1 in of each other OR when a mesh edge runs between them
   inside the slab. The edges matter: a cylinder's contact line is two cap vertices a wheel-width
@@ -121,9 +139,9 @@ before this rule, a 3.9 M-triangle STL froze the editor for one 3.6 s task and a
 
 | work | where |
 |---|---|
-| parse GLB, glTF, STL, OBJ+MTL, PLY; merge by colour; weld; simplify; crease | `importWorker.ts`, one per import, terminated when it answers |
-| STEP: occt | `stepWorker.ts`, then its parts go to the import worker for the rest |
-| 3MF: three's loader | **main thread** (it needs `DOMParser`, which no worker has); the rest in the import worker |
+| parse GLB, glTF, STL, OBJ+MTL, PLY, 3MF (and a zip holding one); merge by colour; weld; simplify; crease | `importWorker.ts`, one per import, terminated when it answers |
+| STEP (and a zip holding one): read, check, split, occt | `stepWorker.ts` and its `occtWorker.ts` pool, then the parts go to the import worker for the rest |
+| 3MF: three's loader | the import worker, with `miniDom.ts` as its `DOMParser` for the length of the parse (a worker has none); the main-thread fallback keeps the page's own |
 | a new orientation (units, up axis, turn) | `measureWorker.ts`, one per model in the editor, holding a copy of the prepared model |
 | the light half of a measurement, the model-frame arrays | main thread, from the worker's small `OrientedMeasure` (`toModelFrame` rebuilds the arrays bit for bit) |
 | the bake's GLB export and its refits | the import worker (`bakeMesh.ts`); the two pictures need WebGL and stay, with `compileAsync` first |
@@ -151,6 +169,16 @@ before this rule, a 3.9 M-triangle STL froze the editor for one 3.6 s task and a
   meshopt's working set for a 3.9 M-triangle part, in the import worker, returned when it is
   terminated. The main thread holds the prepared model (≤ 150k triangles) and up to six
   orientations of it; two models keep a measure worker (`KEEP_MODELS`), the oldest is released.
+- **A GLB is merged as it is read** (`mergedPartsFromObject`): the colours are grouped first, each
+  group's arrays allocated at their final size, every mesh instance written straight into its group,
+  and a geometry's arrays let go after its last instance; the file's bytes and the loader's buffer
+  views go out of scope before the merge starts. The import worker then hands its loaded parts to
+  the simplifier to CONSUME (`simplifyModel(…, { consume: true })`): each is released once welded.
+  Both are pinned to the old outputs bit for bit (`robot import (real CAD)`). Renderer peak, same
+  probe and machine, before → after: 80 MB flat GLB (3.85 M) 937 → 830 MB, 35 MB flat GLB 584 →
+  448 MB, 12 MB shared-mesh GLB (3.85 M) 811 → 627 MB, 184 MB STL 763 → 769 MB. What remains on the
+  80 MB file is three's GLTFLoader copying every buffer view out of the file while both are held,
+  and meshopt.
 
 Measured 2026-10-02 (`scripts/robot-import/stressprobe.cjs`, production build, offscreen Electron,
 software GL, Ryzen 9 7950X; the stress robots from `scripts/robot-import/stress.ts`):
@@ -175,7 +203,78 @@ or a drivetrain pick re-runs only the light half. A Save no longer blocks either
 the click waited behind the frozen page (up to the longest task, 3.6 s) and a STEP read ran to its
 end; now it is handled at once and the workers are terminated (the core is idle within 0.25–2 s,
 the time this Electron takes to stop even a bare busy-loop worker). Memory: the streamed STL reader
-cut the STL peaks by a quarter; a GLB's peak is about what it was (18 % higher on the 80 MB flat\none: the worker holds the buffers the main thread did), and a STEP's is occt's.
+cut the STL peaks by a quarter; a GLB's peak was about what it was (18 % higher on the 80 MB flat
+one: the worker held the buffers the main thread did) until the GLB was merged as it is read (the
+"Memory" bullet above: 937 → 830 MB on that file), and a STEP's is occt's.
+
+## Real CAD: big STEP files, zips, files cut off
+
+Measured on the vendors' own starter bots (REV's DUO DECODE bot, a 125 MB STEP; goBILDA's DECODE
+mecanum and BIOBUZZ bots, 390 and 420 MB STEP published as 58 and 66 MB zips; goBILDA's DECODE
+skid-steer STEP, published cut off). The files are not committed (goBILDA publishes no licence,
+REV's is CC BY-NC-SA); `scripts/robot-import/realcadprobe.cjs` drives the real editor with them.
+
+- ⚠️ **occt's heap stops at 2 GB, and running out does not fail.** occt-import-js 0.0.23 is built
+  with `getHeapMax` = 2 GB, and its STEP reader keeps the whole entity graph there: 23–48 bytes of
+  heap per byte of STEP text, measured. On REV's 125 MB file the heap hit 2 GB, 160,811 allocations
+  failed inside BRepMesh, each was caught per face, and `ReadStepFile` returned `success: true`
+  with 1,334 meshes, 118,734 faces and ZERO triangles. Deflection, units and parameters change
+  nothing. So: faces with no triangles is how a read says it ran out (`stepToParts` counts them).
+- **Up to 20 MB a STEP is read whole**, exactly as before (`STEP_PARAMS`, bounding-box ratio), in
+  one occt worker. A whole read that comes back with faces and no triangles is read again in pieces.
+- **Past 20 MB it is read in PIECES** (`stepSplit.ts`). One pass indexes every entity (its bytes,
+  its type, its references and whether each sits in a list): 0.45 s and 1.8 M entities for REV,
+  1.1 s and 4.1 M for goBILDA's 390 MB. A ROOT is every non-structural item of a shape
+  representation (a solid, a shell model, a curve set); the SKELETON is everything no root reaches
+  (products, occurrences, placements, colours: 1.3 and 1.5 MB). Each piece is a complete STEP file:
+  the header, the whole skeleton, and about `STEP_PIECE_BYTES` (12 MB) of roots, packed in file
+  order. A shape representation lists only its piece's roots, and a styled item on something left
+  out is left out with it (a presentation list just loses it). A root over half a piece is split
+  into its FACES (goBILDA's 99 MB gearbox body has 3,520): the solid and its shell come along as an
+  open shell listing the piece's faces (`openUp`), and each face gets a copy of the solid's style,
+  because occt heals a shell whose faces do not touch into new shells the colour no longer finds.
+- **Pieces mesh at an ABSOLUTE 0.5 mm and 0.5 rad** (`STEP_PIECE_PARAMS`): a bounding-box ratio is
+  per top-level shape, and a piece's is a share of the robot. Meshing is not the cost: 2 mm and 1 rad
+  cut a 24 MB piece's 29.3 s to 27.4 s. occt reads about 1 MB of STEP a second.
+- **A pool of occt workers** reads the pieces: a quarter of the cores, two on a 4 GB device, three at
+  most, each keeping its occt (and its heap's high-water mark) between pieces. Pieces were 24 MB at
+  first; 12 MB gave the same time and cut REV's renderer peak from 3.7 to 2.6 GB.
+- **Parts under 16 mm across are left out of a file read in pieces** (`MIN_PART_MM`): screws, nuts,
+  washers. A part's size is the box of the points ON it (B-rep vertices, B-spline control points, a
+  whole circle's centre ± radius), not of every point it names: a cylinder's placement can sit
+  metres along its axis, and REV's bot has 1,476 arcs of a 2.27 m circle on one 40 cm part. The
+  Review step says how many were left out (the reader's notes, `EditorDoc.notes`). Left out: REV
+  50 of 203 bodies (12.5 MB of 125), goBILDA DECODE 70 of 192 (14.1 MB), BIOBUZZ 73 of 302 (13.3 MB).
+- **Progress**: the bar follows the pieces (bytes read over bytes to read), and once a quarter is
+  read the line says how long is left ("Reading …, about 2 min left…"). Any earlier, the pieces still
+  in flight in the other workers make the guess run long: "4 min" 20 s into REV's 70 s read.
+- **The pieces' triangles are the whole read's.** `npm test` reads the fixture whole and in pieces
+  (by whole parts, and with every solid split into faces) and compares the triangles, colours
+  included; every piece re-indexes with no dangling reference.
+- **The STEP worker reads the FILE** (a `File` is posted, never its bytes), so a 420 MB STEP never
+  passes through the page. Caps: a STEP, or a STEP in a zip, up to 1 GB (`MAX_STEP_BYTES`); meshes
+  400 MB; a zip 1 GB.
+- **A zip is opened through its directory** (`zip.ts`: the end record and the central directory, with
+  ZIP64) on the main thread, a few KB from the file's tail, to see which model is inside (the same
+  priority as dropped files; a .gltf brings its .bin, an .obj its .mtl). The model is inflated where
+  it is read, in 4 MB slices of the compressed data into a buffer of its stated size: in the STEP
+  worker for a STEP (390 MB in 1.8 s), in the import worker for the rest.
+- **A file cut off is said before occt sees it** (`checkStepText`: a STEP opens with
+  `ISO-10303-21;` and ends with `END-ISO-10303-21;`): "Couldn’t read …: the file is cut off …".
+  Every STEP failure ends with `EXPORT_HINT`, the mesh export menu by menu for Onshape, Fusion,
+  SolidWorks and Inventor. `step-reader` (the reader did not load) is the only one with Try again.
+
+| starter bot (file) | read | longest main-thread task | renderer peak | triangles in → kept | footprint (L × W), height | wheels (corner four) | front |
+|---|---|---|---|---|---|---|---|
+| REV DUO DECODE (125 MB STEP) | 69 s | 0 ms | 2.6–2.7 GB | 2.31 M → 98.7k | 16.81 × 16.53 in, 15.31 in | ±5.67, ±7.1–7.5 in | assumed (CAD front = launcher) |
+| goBILDA DECODE mecanum (58 MB zip, 390 MB STEP) | 155 s | 0 ms | 2.7 GB | 6.24 M → 97.6k | 17.25 × 17.77 in, 17.80 in | ±4.70, ±8.15 in | assumed (CAD front = launcher) |
+| goBILDA BIOBUZZ (66 MB zip, 420 MB STEP) | 158.9 s | 0 ms | 2.48 GB | 5.66 M → 96.1k | 17.78 × 16.78 in, 12.02 in | ±5.72, ±7.8–7.9 in | detected from the intake |
+| goBILDA DECODE skid-steer (36 MB zip) | 1.1 s | 0 ms | 0.53 GB | the file is cut off, said so | | | |
+
+Units mm (declared), up +Z, four wheels found, Review clean on all three; each test-drives. Against
+what the vendors publish: REV's frame is 420 mm extrusions across (measured 420 mm wide) on 408 mm
+C-channels (427 mm long overall); goBILDA's DECODE bot has a shortened wheelbase on 104 mm mecanum
+wheels (239 mm measured); all three fit the 18 in cube.
 
 ## A fixed launcher's facing
 
@@ -308,3 +407,14 @@ pattern, or `import` reads as a section name). Four steps: Model, Drivetrain, Me
   memory, each Model-step edit, a preview zoom, Save, Cancel with the CPU after it), and
   `scripts/robot-import/stressbench.ts` times the engine's stages in Node and, with `--full`, the
   accuracy of measuring the simplified mesh against the full one.
+- **Real CAD**: the `robot import (real CAD)` smoke block holds what the vendors' starter bots showed
+  (see "Real CAD" above): pieces read to the whole read's triangles, complete pieces, the part sizes,
+  cut-off and non-STEP files, zips (deflated and stored, a model with its companions, none at all),
+  the 3MF small DOM against Chromium's DOMParser (hashes measured in `harness/main.ts`, which parses
+  the fixture and `threeMfSample.ts` with both), the glTF merge as it reads and the consumed
+  simplification against the old outputs bit for bit, the front in 24 orientations, and the editor's
+  Assumed note. `scripts/robot-import/realcadprobe.cjs --files <paths> --out <dir>` imports real
+  files through the production editor in an offscreen Electron window, one at a time (timeline,
+  long tasks, renderer and total memory, what the Model step says, pictures, Save and the saved
+  descriptor, the stored mesh, a test drive). It needs a STEP or zip on disk: the vendors' files are
+  never committed.

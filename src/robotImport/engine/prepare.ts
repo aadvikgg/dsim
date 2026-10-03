@@ -26,7 +26,15 @@ export function clampBudget(triBudget: number): number {
  * and uniform scale normalisation applies), then crease the normals. `triBudget` is clamped to
  * `MAX_TRIANGLES`.
  */
-export async function simplifyModel(model: LoadedModel, triBudget: number, onProgress?: (frac: number) => void): Promise<PreparedModel> {
-  const s = await simplifyParts(model.parts, clampBudget(triBudget), onProgress);
+export async function simplifyModel(
+  model: LoadedModel,
+  triBudget: number,
+  onProgress?: (frac: number) => void,
+  opts: { consume?: boolean } = {},
+): Promise<PreparedModel> {
+  // `consume`: the loaded parts are the caller's to give up (the import worker's, the main-thread
+  // fallback's); they are taken out of `model` and released one by one as they are welded
+  const parts = opts.consume ? model.parts.splice(0) : model.parts;
+  const s = await simplifyParts(parts, clampBudget(triBudget), onProgress, opts);
   return { ...model, parts: creaseParts(s.parts), trisOut: s.trisOut, simplifyError: s.error };
 }

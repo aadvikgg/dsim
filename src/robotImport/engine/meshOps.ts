@@ -197,19 +197,31 @@ const colourKey = (c: readonly number[], bits: number): number => {
  * calls. At most `maxParts` survive; past that the colours are bucketed more coarsely.
  */
 export function mergeByColour(parts: readonly MeshPart[], maxParts = 48): MeshPart[] {
+  return colourGroups(
+    parts.map((p) => p.color),
+    maxParts,
+  ).map((g) => concatParts(g.map((i) => parts[i])));
+}
+
+/**
+ * `mergeByColour`'s grouping on the colours alone: indices into `colors`, per group, in first-seen
+ * order, at the finest quantisation (6 bits a channel, down to 2) that leaves at most `maxParts`.
+ * The glTF reader groups by it BEFORE it reads a vertex, so it can write each part straight into its
+ * group (`parse.ts`, `mergedPartsFromObject`).
+ */
+export function colourGroups(colors: readonly (readonly number[])[], maxParts = 48): number[][] {
+  let groups = new Map<number, number[]>();
   for (const bits of [6, 5, 4, 3, 2]) {
-    const groups = new Map<number, MeshPart[]>();
-    for (const p of parts) {
-      const k = colourKey(p.color, bits);
+    groups = new Map<number, number[]>();
+    colors.forEach((c, i) => {
+      const k = colourKey(c, bits);
       let g = groups.get(k);
       if (!g) groups.set(k, (g = []));
-      g.push(p);
-    }
-    if (groups.size <= maxParts || bits === 2) {
-      return [...groups.values()].map((g) => concatParts(g));
-    }
+      g.push(i);
+    });
+    if (groups.size <= maxParts) break;
   }
-  return parts.slice();
+  return [...groups.values()];
 }
 
 /** one part from many: positions appended, indices offset, colour = area-weighted mean */
