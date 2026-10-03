@@ -14,9 +14,9 @@ import { IMPORT_MIN_SIDE } from '../../sim/imported';
 import { driveParams, massLimits, pushForce, rpmLimits } from '../../sim/drivetrain';
 import { chainMassFloorBump } from '../../games/chain/config';
 import { DRIVETRAIN_LABELS } from '../../ui/labelData';
-import { bbox, buildDescriptor, q64 } from '../geometry';
+import { bbox, buildDescriptor, isRectangle, linesToWheels, q64, squareWheels, WHEEL_SQUARE_TOL_IN, wheelLines, type WheelLines } from '../geometry';
 import { driveReadout, driveRpmFor, importedDriveFields } from '../drive';
-import type { FrontDetection, ImportCheck, ImportMeasurement, ImportSetup, LengthUnit, LibrarySource, QuarterTurns, UpAxis } from '../types';
+import type { FrontDetection, ImportCheck, ImportMeasurement, ImportSetup, LengthUnit, LibrarySource, QuarterTurns, UpAxis, WheelLayout } from '../types';
 import { validateMechFor } from './placement';
 import { COPY } from './copy';
 
@@ -247,7 +247,12 @@ export function suggestUnit(largestIn: number, current: LengthUnit): LengthUnit 
   return null;
 }
 
-// ---- wheels: the rectangle default and the mirror ----------------------------------------------
+// ---- wheels: the two layouts, the rectangle's numbers, snapping --------------------------------
+//
+// A RECTANGLE layout keeps the four wheels on four lines (`WheelLines`: the front and back axles,
+// the left and right sides). A wheel moved moves the two lines through it, so its axle partner and
+// its side partner follow and the four never stop being an exact rectangle. A FREE layout moves one
+// wheel at a time, for a robot whose wheels are not a rectangle. Everything is in the MODEL frame.
 
 /** FL FR BL BR, MODEL frame, 1.5 in inside the footprint's box */
 export function rectangleWheels(hull: readonly Vec2[]): Vec2[] {
@@ -261,19 +266,119 @@ export function rectangleWheels(hull: readonly Vec2[]): Vec2[] {
   ];
 }
 
-/** FL↔FR, BL↔BR */
-export const MIRROR_OF = [1, 0, 3, 2] as const;
+/**
+ * The layout the Model step works in. A picked one stands. Unpicked (`wheelLayout` absent: a new
+ * import, or a setup from before layouts), it is a rectangle when the wheels are one: placed wheels
+ * exactly, so nothing placed by hand moves, and detected wheels within `WHEEL_SQUARE_TOL_IN`, which
+ * the measurement then lines up (`finishMeasure`). Otherwise free, with the wheels as they are.
+ */
+export function wheelLayoutOf(setup: Pick<ImportSetup, 'wheelLayout' | 'wheels'>, detected: readonly Vec2[] | null): WheelLayout {
+  if (setup.wheelLayout === 'rect' || setup.wheelLayout === 'free') return setup.wheelLayout;
+  if (setup.wheels) return isRectangle(setup.wheels) ? 'rect' : 'free';
+  return !detected || isRectangle(detected, WHEEL_SQUARE_TOL_IN) ? 'rect' : 'free';
+}
 
-/** move wheel `i` to `p`; with `mirror`, its partner goes to the mirror point across the box centre */
-export function moveWheel(wheels: readonly Vec2[], i: number, p: Vec2, mirror: boolean, hull: readonly Vec2[]): Vec2[] {
-  const out = wheels.map((w) => ({ x: w.x, y: w.y }));
-  out[i] = { x: q64(p.x), y: q64(p.y) };
-  if (mirror) {
-    const b = bbox(hull);
-    const cy = (b.minY + b.maxY) / 2;
-    out[MIRROR_OF[i]] = { x: q64(p.x), y: q64(2 * cy - p.y) };
+/** where Home puts the wheels: the detected ones (lined up, in a rectangle), else the rectangle default */
+export function wheelHomes(m: Pick<ImportMeasurement, 'wheels' | 'hull'>, layout: WheelLayout): Vec2[] | null {
+  const det = m.wheels.wheels;
+  if (det) return layout === 'rect' ? squareWheels(det) : det.map((w) => ({ x: w.x, y: w.y }));
+  return m.hull.length >= 3 ? rectangleWheels(m.hull) : null;
+}
+
+/** the closest a rectangle's axles (or sides) come to each other, inches: the lines never cross */
+export const WHEEL_MIN_SPAN_IN = 1;
+
+/**
+ * A line as the rectangle edits start from it: kept when it is on a fine binary grid (anything placed
+ * or typed here is, and halving it a few times keeps it there), so a number typed earlier stays
+ * exactly what was typed; else on the 1/64 grid (a detected wheel's centre is a decimal no short
+ * binary fraction holds).
+ */
+const tidy = (v: number): number => (Number.isInteger(v * 2 ** 20) ? v : q64(v));
+
+function linesOf(wheels: readonly Vec2[]): WheelLines {
+  const l = wheelLines(wheels);
+  return { front: tidy(l.front), back: tidy(l.back), left: tidy(l.left), right: tidy(l.right) };
+}
+
+/**
+ * Move wheel `i` to `p` (quantised to 1/64 in). RECTANGLE: its axle and its side go to `p`, the other
+ * two lines stay, and the lines keep `WHEEL_MIN_SPAN_IN` apart. FREE: that wheel alone.
+ */
+export function moveWheel(wheels: readonly Vec2[], i: number, p: Vec2, layout: WheelLayout): Vec2[] {
+  const x = q64(p.x);
+  const y = q64(p.y);
+  if (layout === 'free') {
+    const out = wheels.map((w) => ({ x: w.x, y: w.y }));
+    out[i] = { x, y };
+    return out;
   }
-  return out;
+  const l = linesOf(wheels);
+  if (i < 2) l.front = Math.max(x, l.back + WHEEL_MIN_SPAN_IN);
+  else l.back = Math.min(x, l.front - WHEEL_MIN_SPAN_IN);
+  if (i % 2 === 0) l.left = Math.max(y, l.right + WHEEL_MIN_SPAN_IN);
+  else l.right = Math.min(y, l.left - WHEEL_MIN_SPAN_IN);
+  return linesToWheels(l);
+}
+
+/** the rectangle's four numbers: its size, and where its centre sits from the footprint's centre */
+export type RectNumber = 'wheelbase' | 'track' | 'forward' | 'left';
+
+export function rectNumbers(wheels: readonly Vec2[]): Record<RectNumber, number> {
+  const l = wheelLines(wheels);
+  return { wheelbase: l.front - l.back, track: l.left - l.right, forward: (l.front + l.back) / 2, left: (l.left + l.right) / 2 };
+}
+
+/**
+ * The rectangle with one of its numbers set to exactly `v`: the wheelbase or the track about the
+ * rectangle's centre, the centre with its size kept. Every result is a small binary fraction, so
+ * reading the number back gives `v` bit for bit.
+ */
+export function setRectNumber(wheels: readonly Vec2[], key: RectNumber, v: number): Vec2[] {
+  const l = linesOf(wheels);
+  if (key === 'wheelbase' || key === 'forward') {
+    const c = key === 'forward' ? v : (l.front + l.back) / 2;
+    const h = key === 'wheelbase' ? v / 2 : (l.front - l.back) / 2;
+    l.front = c + h;
+    l.back = c - h;
+  } else {
+    const c = key === 'left' ? v : (l.left + l.right) / 2;
+    const h = key === 'track' ? v / 2 : (l.left - l.right) / 2;
+    l.left = c + h;
+    l.right = c - h;
+  }
+  return linesToWheels(l);
+}
+
+/**
+ * What the layout pick writes. Into a rectangle, wheels placed by hand are lined up on their
+ * averaged lines (detected ones are lined up by the measurement); into free, nothing placed moves,
+ * and detected wheels show as they were found.
+ */
+export function layoutPatch(setup: Pick<ImportSetup, 'wheels'>, layout: WheelLayout): Pick<ImportSetup, 'wheelLayout'> & Partial<Pick<ImportSetup, 'wheels'>> {
+  if (layout === 'rect' && setup.wheels) return { wheelLayout: 'rect', wheels: linesToWheels(linesOf(setup.wheels)) };
+  return { wheelLayout: layout };
+}
+
+/** a wheel dragged by the pointer lands on a floor contact this close, inches */
+export const WHEEL_SNAP_CONTACT_IN = 0.4;
+/** and otherwise on this grid, inches */
+export const WHEEL_SNAP_GRID_IN = 1 / 16;
+
+/** where a pointer drag puts a wheel: the nearest floor contact within reach, else the grid */
+export function snapWheel(p: Vec2, contacts: readonly Vec2[]): Vec2 {
+  let best: Vec2 | null = null;
+  let bd = WHEEL_SNAP_CONTACT_IN;
+  for (const c of contacts) {
+    const d = Math.hypot(c.x - p.x, c.y - p.y);
+    if (d <= bd) {
+      bd = d;
+      best = c;
+    }
+  }
+  if (best) return { x: best.x, y: best.y };
+  const g = (v: number): number => Math.round(v / WHEEL_SNAP_GRID_IN) * WHEEL_SNAP_GRID_IN;
+  return { x: g(p.x), y: g(p.y) };
 }
 
 /** an intake span's lateral range on its edge (y for front/back, x for left/right) */

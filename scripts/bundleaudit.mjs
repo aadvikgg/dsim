@@ -673,7 +673,9 @@ const BASELINE = {
   // `main` as a `GameSimModule` slot and are reached only by the editor. Then +0.53 (lane 9): the
   // editor's two-half measuring (the pending state, the Measuring… notice) and Cancel stopping the
   // import's workers.
-  importerui: { gzip: 24.71 * 1000 },
+  // 2026-10-02: 24.71 -> 28.96, raised on purpose. `ImportEditor-*.js` 26.16: the Moving parts panel
+  // and its picking (+3.3) and the rectangle wheel layout with its four fields and snapping (+0.9).
+  importerui: { gzip: 28.96 * 1000 },
   other: { gzip: 1 * 1000 },
 };
 

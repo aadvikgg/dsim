@@ -15,6 +15,7 @@ import { padIsActive, useHandleGrab } from './useHandleGrab';
  * The drawing is an SVG in field inches; the HANDLES are real buttons laid over it by percent, so
  * the keyboard, the screen reader and the controller all reach them as ordinary controls:
  *  · pointer: drag, the drawing follows, the move commits on release (StartPositionEditor's rule);
+ *    `snap` (the wheels: onto a floor contact, else a 1/16-in grid) applies to the pointer only;
  *  · keyboard: arrows move 1/4 in, Shift+arrows 1/16 in, each press commits; Home puts it back
  *    where the import put it (`onHome`);
  *  · controller: A grabs (`useHandleGrab`), the D-pad or the left stick moves, A drops, B cancels.
@@ -47,6 +48,7 @@ export function TopDownMap({
   handles,
   spans = [],
   contacts = [],
+  frame,
   origin,
   selected,
   ariaLabel,
@@ -55,11 +57,14 @@ export function TopDownMap({
   onSelect,
   onMove,
   onHome,
+  snap,
 }: {
   hull: readonly Vec2[];
   handles: readonly MapHandle[];
   spans?: readonly MapSpan[];
   contacts?: readonly Vec2[];
+  /** a closed outline through these points, drawn thin: the rectangle the wheels sit on */
+  frame?: readonly Vec2[] | null;
   origin?: Vec2 | null;
   selected: string | null;
   ariaLabel: string;
@@ -71,6 +76,8 @@ export function TopDownMap({
   onMove?: (key: string, p: Vec2, final: boolean) => void;
   /** Home on a handle: put it back where the import placed it */
   onHome?: (key: string) => void;
+  /** where a POINTER drag puts a handle (keys and the pad move by their own steps) */
+  snap?: (key: string, p: Vec2) => Vec2;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const drag = useRef<{ key: string; moved: boolean; last: Vec2 } | null>(null);
@@ -128,7 +135,7 @@ export function TopDownMap({
     const p = toModel(e.clientX, e.clientY);
     if (!p) return;
     d.moved = true;
-    d.last = constrain(h, p);
+    d.last = constrain(h, snap ? snap(h.key, p) : p);
     onMove?.(h.key, d.last, false);
   };
   const onUp = (e: PointerEvent<HTMLButtonElement>): void => {
@@ -194,6 +201,7 @@ export function TopDownMap({
           {contacts.map((c, i) => (
             <circle key={i} className="contact" cx={-c.y} cy={-c.x} r={0.35} />
           ))}
+          {frame && frame.length >= 3 ? <polygon className="frame" points={frame.map((p) => `${-p.y},${-p.x}`).join(' ')} /> : null}
           {spans.map((s) => (
             <line key={s.key} className={`span${s.bad ? ' bad' : ''}`} x1={-s.a.y} y1={-s.a.x} x2={-s.b.y} y2={-s.b.x} />
           ))}

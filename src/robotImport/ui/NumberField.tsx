@@ -35,6 +35,9 @@ export function NumberField({
   useEffect(() => setText(fmt(value)), [value]); // eslint-disable-line react-hooks/exhaustive-deps
   // reads the FIELD, not the state: a blur can arrive in the same task as the last keystroke
   const commit = (raw: string): void => {
+    // untouched, it commits nothing: the text is the value rounded for show, and snapping THAT to
+    // the step moved a wheel at 4.796875 to 4.8125 for a Tab through the field
+    if (raw === fmt(value)) return;
     const v = Number(raw);
     if (!Number.isFinite(v) || raw.trim() === '') {
       setText(fmt(value));

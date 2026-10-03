@@ -1,16 +1,19 @@
 import { useRef } from 'react';
 import type { Vec2 } from '../../types';
-import { OptRow, ToggleRow } from '../../ui/OptRow';
-import type { ImportMeasurement, ImportSetup, LengthUnit, QuarterTurns, UpAxis } from '../types';
+import { OptRow } from '../../ui/OptRow';
+import { isRectangle, WHEEL_SQUARE_TOL_IN } from '../geometry';
+import type { ImportMeasurement, ImportSetup, LengthUnit, QuarterTurns, UpAxis, WheelLayout } from '../types';
 import { LENGTH_UNITS, UP_AXES } from '../types';
 import { COPY, FORMAT_LABEL, UNIT_LABEL, sizeLabel, upLabel } from './copy';
 import { ACCEPT, DropZone, type DropError, type Phase } from './DropZone';
-import { rectangleWheels, type EditorDoc } from './editorModel';
+import { rectNumbers, snapWheel, WHEEL_MIN_SPAN_IN, wheelHomes, type EditorDoc, type RectNumber } from './editorModel';
 import { NumberField } from './NumberField';
 import { TopDownMap, type MapHandle } from './TopDownMap';
 
 const fmt = (v: number): string => (Math.round(v * 10) / 10).toFixed(1);
 const ROBOT_MAX = 18;
+/** the wheel number fields' step, inches: every value on it is typed exactly */
+const WHEEL_STEP = 1 / 16;
 
 export function ModelStep({
   doc,
@@ -19,13 +22,14 @@ export function ModelStep({
   error,
   wheels,
   selectedWheel,
-  mirror,
+  layout,
   onFiles,
   onCancel,
   onSetup,
   onWheel,
+  onRect,
   onSelectWheel,
-  onMirror,
+  onLayout,
 }: {
   doc: EditorDoc;
   m: ImportMeasurement | null;
@@ -34,13 +38,16 @@ export function ModelStep({
   /** FL FR BL BR, MODEL frame, with any drag in flight applied */
   wheels: Vec2[] | null;
   selectedWheel: number;
-  mirror: boolean;
+  /** how the wheels move (`wheelLayoutOf`) */
+  layout: WheelLayout;
   onFiles: (files: File[]) => void;
   onCancel: () => void;
   onSetup: (patch: Partial<ImportSetup>) => void;
   onWheel: (i: number, p: Vec2, final: boolean) => void;
+  /** one of the rectangle's numbers, typed */
+  onRect: (key: RectNumber, v: number) => void;
   onSelectWheel: (i: number) => void;
-  onMirror: (on: boolean) => void;
+  onLayout: (layout: WheelLayout) => void;
 }) {
   const replace = useRef<HTMLInputElement>(null);
   if (!m || phase || error) {
@@ -62,6 +69,21 @@ export function ModelStep({
     shape: 'wheel',
   }));
   const sel = wheels?.[selectedWheel] ?? null;
+  const rect = layout === 'rect' && wheels ? rectNumbers(wheels) : null;
+  const det = m.wheels.wheels;
+  const wheelFact =
+    m.wheelSource === 'manual'
+      ? COPY.wheelsManual
+      : m.wheelSource === 'none' || !det
+        ? COPY.wheelsNone
+        : m.wheelsSquared
+          ? COPY.wheelsSquared
+          : isRectangle(det, WHEEL_SQUARE_TOL_IN)
+            ? COPY.wheelsFound
+            : COPY.wheelsUneven;
+  const wheelField = (key: RectNumber, label: string, min: number, max: number): JSX.Element => (
+    <NumberField label={label} unit="in" value={rect![key]} min={min} max={max} step={WHEEL_STEP} onCommit={(v) => onRect(key, v)} />
+  );
   const b0 = m.hull.length ? m.hull : [];
   // turned from where the file was read: the detected front, or the CAD front when it was assumed
   const base = doc.detected?.yaw ?? 0;
@@ -121,9 +143,7 @@ export function ModelStep({
           {(s?.trisIn ?? m.trisIn).toLocaleString('en-US')} → {(s?.trisOut ?? m.trisIn).toLocaleString('en-US')}
         </dd>
         <dt>{COPY.wheels}</dt>
-        <dd>
-          {m.wheelSource === 'manual' ? COPY.wheelsManual : m.wheelSource === 'detected' ? COPY.wheelsFound : COPY.wheelsNone}
-        </dd>
+        <dd>{wheelFact}</dd>
       </dl>
 
       <div id="ri-units">
@@ -170,6 +190,8 @@ export function ModelStep({
           hull={b0}
           handles={handles}
           contacts={m.wheels.contacts}
+          // FL FR BR BL: round the rectangle, not across it
+          frame={rect && wheels ? [wheels[0], wheels[1], wheels[3], wheels[2]] : null}
           origin={m.origin}
           selected={`w${selectedWheel}`}
           ariaLabel={COPY.footprintAria}
@@ -178,12 +200,34 @@ export function ModelStep({
           onMove={(k, p, final) => onWheel(Number(k.slice(1)), p, final)}
           onHome={(k) => {
             const i = Number(k.slice(1));
-            const home = (m.wheels.wheels ?? rectangleWheels(m.hull))[i];
+            const home = wheelHomes(m, layout)?.[i];
             if (home) onWheel(i, home, true);
           }}
+          snap={(_, p) => snapWheel(p, m.wheels.contacts)}
         />
-        <ToggleRow label={COPY.mirror} value={mirror} onPick={onMirror} />
-        {sel ? (
+        <OptRow<WheelLayout>
+          label={COPY.wheelLayout}
+          value={layout}
+          cols="two"
+          mini
+          options={[
+            { v: 'rect', t: COPY.layoutRect },
+            { v: 'free', t: COPY.layoutFree },
+          ]}
+          onPick={onLayout}
+        />
+        {rect ? (
+          <>
+            <div className="ds-fields">
+              {wheelField('wheelbase', COPY.wheelbase, WHEEL_MIN_SPAN_IN, 24)}
+              {wheelField('track', COPY.track, WHEEL_MIN_SPAN_IN, 24)}
+            </div>
+            <div className="ds-fields">
+              {wheelField('forward', COPY.centreForward, -12, 12)}
+              {wheelField('left', COPY.centreLeft, -12, 12)}
+            </div>
+          </>
+        ) : sel ? (
           <div className="ds-fields">
             <NumberField
               label={COPY.forward}
@@ -191,7 +235,7 @@ export function ModelStep({
               value={sel.x}
               min={-12}
               max={12}
-              step={0.25}
+              step={WHEEL_STEP}
               onCommit={(x) => onWheel(selectedWheel, { x, y: sel.y }, true)}
             />
             <NumberField
@@ -200,7 +244,7 @@ export function ModelStep({
               value={sel.y}
               min={-12}
               max={12}
-              step={0.25}
+              step={WHEEL_STEP}
               onCommit={(y) => onWheel(selectedWheel, { x: sel.x, y }, true)}
             />
           </div>

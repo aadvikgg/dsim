@@ -261,6 +261,14 @@
 .ds-import-map .contact {
   fill: var(--ds-mut);
 }
+/* the rectangle the wheels sit on (the Model step's rectangle layout): its four lines, under the
+   handles, thin enough not to read as an edge of the robot */
+.ds-import-map .frame {
+  fill: none;
+  stroke: var(--ds-mut);
+  stroke-width: 0.08;
+  stroke-dasharray: 0.4 0.3;
+}
 .ds-import-map .span {
   stroke: var(--ds-accent);
   stroke-width: 0.6;
