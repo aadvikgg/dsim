@@ -113,7 +113,9 @@ export function FlywheelRows({
       {fly && (
         <div className="ds-fields">
           {fly.rpm.map((r, i) => (
-            <label className="ds-field" key={i}>
+            // ONE setpoint takes the row: "Flywheel speed" and "2411 rpm · 191 in/s" side by side
+            // need ~260 px, and in the importer's column a third of the row is less, so both wrapped
+            <label className={fly.rpm.length === 1 ? 'ds-field wide' : 'ds-field'} key={i}>
               <span className="cap">
                 {fly.mode === 'presets' ? `Speed ${i + 1}` : 'Flywheel speed'}{' '}
                 <span className="val">

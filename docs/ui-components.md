@@ -23,17 +23,17 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 | `.ds-import-body` | src/ui/importer.css:40 | 1 |
 | `.ds-import-canvas` | src/ui/importer.css:90 | 2 |
 | `.ds-import-canvas-host` | src/ui/importer.css:86 | 1 |
-| `.ds-import-checks` | src/ui/importer.css:330 | 1 |
+| `.ds-import-checks` | src/ui/importer.css:329 | 1 |
 | `.ds-import-drop` | src/ui/importer.css:140 | 3 |
 | `.ds-import-drop-acts` | src/ui/importer.css:156 | 1 |
 | `.ds-import-filerow` | src/ui/importer.css:164 | 1 |
 | `.ds-import-foot` | src/ui/importer.css:44 | 1 |
-| `.ds-import-handle` | src/ui/importer.css:255 | 1 |
+| `.ds-import-handle` | src/ui/importer.css:254 | 1 |
 | `.ds-import-hero-img` | src/ui/shell.css:4966 | 1 |
 | `.ds-import-in` | src/ui/importer.css:27 | 1 |
 | `.ds-import-map` | src/ui/importer.css:190 | 4 |
-| `.ds-import-map-front` | src/ui/importer.css:230 | 1 |
-| `.ds-import-map-status` | src/ui/importer.css:244 | 1 |
+| `.ds-import-map-front` | src/ui/importer.css:232 | 1 |
+| `.ds-import-map-status` | src/ui/importer.css:243 | 1 |
 | `.ds-import-map-wrap` | src/ui/importer.css:101 | 1 |
 | `.ds-import-preview` | src/ui/importer.css:37 | 4 |
 | `.ds-import-preview-empty` | src/ui/importer.css:96 | 1 |
@@ -448,7 +448,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-field` | src/ui/shell.css:2206 | 84 |
+| `.ds-field` | src/ui/shell.css:2206 | 85 |
 | `.ds-field-row` | src/ui/shell.css:2095 | 8 |
 
 ## `ds-fold` — 2
@@ -463,13 +463,13 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 | class | declared | used |
 |---|---|---|
 | `.ds-head` | src/ui/shell.css:4228 | 15 |
-| `.ds-head-spacer` | src/ui/importer.css:369 | 12 |
+| `.ds-head-spacer` | src/ui/importer.css:368 | 12 |
 
 ## `ds-hint` — 2
 
 | class | declared | used |
 |---|---|---|
-| `.ds-hint` | src/ui/shell.css:2131 | 196 |
+| `.ds-hint` | src/ui/shell.css:2131 | 197 |
 | `.ds-hint-caption` | src/ui/shell.css:4197 | 1 |
 
 ## `ds-homestats` — 2
@@ -539,7 +539,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-sub` | src/ui/shell.css:1763 | 27 |
+| `.ds-sub` | src/ui/shell.css:1763 | 28 |
 | `.ds-sub-row` | src/ui/shell.css:1788 | 3 |
 
 ## `ds-table` — 2
@@ -622,7 +622,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-btn` | src/ui/shell.css:653 | 266 |
+| `.ds-btn` | src/ui/shell.css:653 | 267 |
 
 ## `ds-checkline` — 1
 
