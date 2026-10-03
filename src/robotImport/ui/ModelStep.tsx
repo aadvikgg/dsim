@@ -1,9 +1,9 @@
 import { useRef } from 'react';
 import type { Vec2 } from '../../types';
 import { OptRow } from '../../ui/OptRow';
-import { isRectangle, WHEEL_SQUARE_TOL_IN } from '../geometry';
+import { DEFAULT_TRI_BUDGET, isRectangle, WHEEL_SQUARE_TOL_IN } from '../geometry';
 import type { ImportMeasurement, ImportSetup, LengthUnit, QuarterTurns, UpAxis, WheelLayout } from '../types';
-import { LENGTH_UNITS, UP_AXES } from '../types';
+import { LENGTH_UNITS, MAX_TRIANGLES, UP_AXES } from '../types';
 import { COPY, FORMAT_LABEL, UNIT_LABEL, sizeLabel, upLabel } from './copy';
 import { ACCEPT, DropZone, type DropError, type Phase } from './DropZone';
 import { rectNumbers, snapWheel, WHEEL_MIN_SPAN_IN, wheelHomes, type EditorDoc, type RectNumber } from './editorModel';
@@ -30,6 +30,8 @@ export function ModelStep({
   onRect,
   onSelectWheel,
   onLayout,
+  onDetail,
+  canReread,
 }: {
   doc: EditorDoc;
   m: ImportMeasurement | null;
@@ -48,6 +50,10 @@ export function ModelStep({
   onRect: (key: RectNumber, v: number) => void;
   onSelectWheel: (i: number) => void;
   onLayout: (layout: WheelLayout) => void;
+  /** the triangle budget the file is read at (`ImportSetup.triBudget`) */
+  onDetail: (budget: number) => void;
+  /** the dropped files are still in memory, so a new detail can re-read them */
+  canReread: boolean;
 }) {
   const replace = useRef<HTMLInputElement>(null);
   if (!m || phase || error) {
@@ -145,6 +151,21 @@ export function ModelStep({
         <dt>{COPY.wheels}</dt>
         <dd>{wheelFact}</dd>
       </dl>
+
+      <div id="ri-detail">
+        <OptRow<number>
+          label={COPY.detail}
+          hint={doc.savedModel ? COPY.detailSaved : canReread ? undefined : COPY.detailFile}
+          value={doc.setup.triBudget >= MAX_TRIANGLES ? MAX_TRIANGLES : DEFAULT_TRI_BUDGET}
+          cols="two"
+          disabled={doc.savedModel}
+          options={[
+            { v: DEFAULT_TRI_BUDGET, t: COPY.detailStandard, d: COPY.detailTris(DEFAULT_TRI_BUDGET) },
+            { v: MAX_TRIANGLES, t: COPY.detailMax, d: COPY.detailMaxNote(MAX_TRIANGLES) },
+          ]}
+          onPick={onDetail}
+        />
+      </div>
 
       <div id="ri-units">
         <OptRow<LengthUnit>

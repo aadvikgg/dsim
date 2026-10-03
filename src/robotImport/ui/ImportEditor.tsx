@@ -130,6 +130,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const [wheelDrag, setWheelDrag] = useState<Vec2[] | null>(null);
   const [selWheel, setSelWheel] = useState(0);
   const [selHandle, setSelHandle] = useState<string | null>(null);
+  /** the files the model was read from, while the editor is open: a new detail re-reads them */
+  const sourceFiles = useRef<File[] | null>(null);
   /** the moving part being picked in the preview, or null; and whether the preview runs them */
   const [activeMotion, setActiveMotion] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -268,6 +270,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         if (replaced && replaced !== prepared) e.releaseModel(replaced as PreparedModel);
         setActiveMotion(null);
         setPlaying(false);
+        sourceFiles.current = opts.savedModel ? null : files;
         setDraft({ doc, model: prepared, modelStored: false, baked: null });
         setPhase(null);
       } catch (err) {
@@ -679,6 +682,22 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
     update((d) => ({ ...d, setup: { ...d.setup, ...layoutPatch(d.setup, next) } }));
   };
 
+  // ---- detail: the triangle budget the file is read at -----------------------------------------
+  // A new detail re-reads the files still in memory, keeping everything set so far: the bodies are
+  // the file's own, so the moving parts still name the same ones, and the placements go back once
+  // the new model is measured. Without the files (a reload, a saved robot) it applies next read.
+  const onDetail = (budget: number): void => {
+    if (!doc || doc.savedModel || budget === doc.setup.triBudget) return;
+    const files = sourceFiles.current;
+    const setup = { ...doc.setup, triBudget: budget };
+    update((d) => ({ ...d, setup: { ...d.setup, triBudget: budget } }));
+    if (!files) return;
+    const keepMech = doc.mech;
+    void readModel(files, { setup, spec: doc.spec }).then(() => {
+      if (keepMech) update((d) => ({ ...d, mech: keepMech }));
+    });
+  };
+
   // ---- moving parts ----------------------------------------------------------------------------
   const motion = doc?.setup.motion;
   const findWheels = (): MotionGroup[] =>
@@ -930,6 +949,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
                 onRect={onRect}
                 onSelectWheel={setSelWheel}
                 onLayout={onLayout}
+                onDetail={onDetail}
+                canReread={!!sourceFiles.current}
               />
             ) : step === 1 ? (
               <DrivetrainStep

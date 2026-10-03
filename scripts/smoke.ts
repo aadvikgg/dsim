@@ -37203,5 +37203,25 @@ function fxImportFixed(): RobotSpec {
   }
 }
 
+/**
+ * THE DETAIL CHOICE (Model step): Standard reads a file at `DEFAULT_TRI_BUDGET`, Maximum at
+ * `MAX_TRIANGLES`, and a new choice re-reads the files still in memory with the setup as it is
+ * (bodies, moving parts, tuning) and the placements put back. A saved robot (no CAD file) cannot.
+ */
+{
+  const { DEFAULT_TRI_BUDGET } = await import('../src/robotImport/geometry');
+  const { MAX_TRIANGLES } = await import('../src/robotImport/types');
+  const { clampBudget } = await import('../src/robotImport/engine/prepare');
+  const ed = readFileSync('src/robotImport/ui/ImportEditor.tsx', 'utf8').replace(/\r\n/g, '\n');
+  const ms = readFileSync('src/robotImport/ui/ModelStep.tsx', 'utf8').replace(/\r\n/g, '\n');
+  check('detail: the two choices are the default budget and the cap, and the reader takes both as they are', DEFAULT_TRI_BUDGET === 250_000 && MAX_TRIANGLES === 400_000 && clampBudget(DEFAULT_TRI_BUDGET) === DEFAULT_TRI_BUDGET && clampBudget(MAX_TRIANGLES) === MAX_TRIANGLES);
+  check(
+    'detail: a new choice re-reads the files in memory with the whole setup and puts the placements back; a saved robot is greyed (source pins)',
+    /sourceFiles\.current = opts\.savedModel \? null : files;/.test(ed) &&
+      /void readModel\(files, \{ setup, spec: doc\.spec \}\)\.then\(\(\) => \{\s*if \(keepMech\) update/.test(ed) &&
+      /disabled=\{doc\.savedModel\}/.test(ms) && /onPick=\{onDetail\}/.test(ms),
+  );
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

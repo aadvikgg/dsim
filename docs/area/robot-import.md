@@ -395,6 +395,10 @@ sampled, offscreen renders under the match's lighting):
 - **At a shape cap of 0.2 % of the model's size, small bodies go before the bound climbs**
   (`dropSmallBodies`): smallest first, never one over 8 % of the size. A floor of fasteners no
   longer coarsens every other surface.
+- **Detail** (Model step): Standard reads at `DEFAULT_TRI_BUDGET` (250k), Maximum at `MAX_TRIANGLES`
+  (400k). A new choice re-reads the dropped files, which the editor keeps in memory while it is open,
+  with the setup as it is and the placements put back; after a reload, or for a saved robot (its
+  stored mesh is already simplified), it applies the next time a CAD file is read.
 - **Finish by colour** (`robotImport/finish.ts`): light neutral → metal 1 / rough 0.4, mid neutral
   → 0.5 / 0.45, dark → 0 / 0.6, saturated → 0 / 0.45. Every part was 0.05 / 0.55, which turned
   anodised aluminium to chalk. A stored mesh with the old pair is upgraded on load. The editor
