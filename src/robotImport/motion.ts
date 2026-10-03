@@ -10,7 +10,7 @@
  */
 import type { DrivetrainType, Vec2 } from '../types';
 import type { MeshPart } from './geometry';
-import { DEFAULT_DEPLOY_DEG, HINGE_ROLES, SPIN_ROLES, type MotionGroup, type MotionPart, type MotionRole } from './types';
+import { DEFAULT_DEPLOY_DEG, HINGE_ROLES, JOINT_DEFAULT_AMOUNT, JOINT_ROLES, SPIN_ROLES, type MotionGroup, type MotionPart, type MotionRole } from './types';
 
 type V3 = [number, number, number];
 
@@ -26,6 +26,7 @@ const norm = (a: V3): V3 => {
 
 export const isSpin = (r: MotionRole): boolean => SPIN_ROLES.includes(r);
 export const isHinge = (r: MotionRole): boolean => HINGE_ROLES.includes(r);
+export const isJoint = (r: MotionRole): boolean => JOINT_ROLES.includes(r);
 
 // ---- per-body statistics ------------------------------------------------------------------------
 
@@ -297,8 +298,55 @@ export function coaxialBodies(parts: readonly MeshPart[], seed: number, role: Mo
     const rr = Math.hypot(r[0] - axis[0] * along, r[1] - axis[1] * along, r[2] - axis[2] * along);
     if (rr > (worst.get(b) ?? 0)) worst.set(b, rr);
   });
+  const near = [...cand].filter((b) => (worst.get(b) ?? 0) <= reach);
+  if (wheel) {
+    // a wheel: what lies wholly inside its own cylinder (the screws through it are off its axle),
+    // and of that what turns with it: no motor, no bearing block, no shield, no frame screw beside it
+    const inCyl = new Set<number>();
+    for (const b of st.ids) {
+      const c = boxCentre(setMoments(st, [b]));
+      const d = sub(c, pivot);
+      const al = dot(d, axis);
+      if (Math.abs(al) <= WHEEL_HALF_WIDTH_IN && Math.hypot(d[0] - axis[0] * al, d[1] - axis[1] * al, d[2] - axis[2] * al) <= fit.radius + 0.35) inCyl.add(b);
+    }
+    const bad = new Set<number>();
+    eachVertex(parts, inCyl, (x, y, z, b) => {
+      if (bad.has(b)) return;
+      const r = sub([x, y, z], pivot);
+      const al = dot(r, axis);
+      if (Math.abs(al) > WHEEL_HALF_WIDTH_IN || Math.hypot(r[0] - axis[0] * al, r[1] - axis[1] * al, r[2] - axis[2] * al) > fit.radius + 0.35) bad.add(b);
+    });
+    const inside = new Set([...inCyl].filter((b) => !bad.has(b)));
+    inside.add(seed);
+    const keep = turnsWithWheel(axleFits(parts, st, inside, pivot, axis), fit.radius, axis);
+    keep.add(seed);
+    return [...keep].sort((a, b) => a - b);
+  }
+  const fits = axleFits(parts, st, new Set([seed, ...near]), pivot, axis);
+  // A ROLLER'S OR A FLYWHEEL'S AXLE (2026-10-03, owner: "the auto-detector combines a static channel
+  // and a gear into one component"): a body larger than a fastener turns with it only when it is ROUND
+  // about it (a channel the shaft runs along is centred on it too), and a motor-sized cylinder past
+  // the end of everything else on the axle is the motor driving it, which does not turn
+  const round = near.filter((b) => fits.get(b)!.ext < FASTENER_IN || roundAboutAxle(fits.get(b)!));
+  const motorLike = (b: number): boolean => {
+    const f = fits.get(b)!;
+    const d = 2 * Math.max(f.w1, f.w2);
+    return f.ext >= FASTENER_IN && f.hi - f.lo >= 1.5 * d && d >= 0.9 && d <= 2.6;
+  };
+  let glo = fits.get(seed)!.lo;
+  let ghi = fits.get(seed)!.hi;
+  for (const b of round) {
+    if (motorLike(b)) continue;
+    glo = Math.min(glo, fits.get(b)!.lo);
+    ghi = Math.max(ghi, fits.get(b)!.hi);
+  }
   const out = [seed];
-  for (const b of cand) if ((worst.get(b) ?? 0) <= reach) out.push(b);
+  for (const b of round) {
+    const f = fits.get(b)!;
+    const half = (f.hi - f.lo) / 2;
+    if (motorLike(b) && (f.hi > ghi + half || f.lo < glo - half)) continue;
+    out.push(b);
+  }
   return out.sort((a, b) => a - b);
 }
 
@@ -306,13 +354,148 @@ export function coaxialBodies(parts: readonly MeshPart[], seed: number, role: Mo
 
 /** half a drive wheel's width along its axle, at most, inches (a 104 mm mecanum is 1.8 in wide) */
 const WHEEL_HALF_WIDTH_IN = 1.4;
+/** a body whose box centre is this close to an axle is ON it (a hub, a spacer, a clamp screw), inches */
+const ON_AXLE_IN = 0.35;
+/** how far a part on the axle may stand out of the wheel's own width and still turn with it, inches
+ *  (a hub through the bore does; a motor, a bearing block or a collar inside the frame does not) */
+const HUB_PROUD_IN = 0.6;
+/** a body smaller than this (its box's longest side) may be a fastener, inches */
+const FASTENER_IN = 1.2;
+
+interface AxleFit {
+  /** its points' span along the axle */
+  lo: number;
+  hi: number;
+  /** the largest distance of its points from the axle */
+  rMax: number;
+  /** its box centre's distance from the axle */
+  off: number;
+  /** its box's longest side */
+  ext: number;
+  /** its own long direction (the largest principal axis) */
+  dir: V3;
+  /** the unit direction from the axle to its box centre (zero when on it) */
+  radial: V3;
+  /** its half widths across the axle, in two directions square to it and each other */
+  w1: number;
+  w2: number;
+}
+
+/** where each of `bodies` sits about the axle through `centre` along unit `axis` */
+function axleFits(parts: readonly MeshPart[], st: BodyStats, bodies: ReadonlySet<number>, centre: V3, axis: V3): Map<number, AxleFit> {
+  const out = new Map<number, AxleFit>();
+  for (const b of bodies) {
+    const mo = setMoments(st, [b]);
+    const d = sub(boxCentre(mo), centre);
+    const al = dot(d, axis);
+    const rv = sub(d, scale(axis, al));
+    const off = Math.hypot(rv[0], rv[1], rv[2]);
+    out.set(b, {
+      lo: Infinity,
+      hi: -Infinity,
+      rMax: 0,
+      off,
+      ext: Math.max(mo.max[0] - mo.min[0], mo.max[1] - mo.min[1], mo.max[2] - mo.min[2]),
+      dir: eigenSym3(mo.cov).vectors[0],
+      radial: off > 1e-6 ? scale(rv, 1 / off) : [0, 0, 0],
+      w1: 0,
+      w2: 0,
+    });
+  }
+  const e1 = norm(Math.abs(axis[2]) < 0.9 ? cross(axis, [0, 0, 1]) : cross(axis, [1, 0, 0]));
+  const e2 = cross(axis, e1);
+  const span = new Map<number, number[]>();
+  eachVertex(parts, bodies, (x, y, z, b) => {
+    const f = out.get(b)!;
+    const r = sub([x, y, z], centre);
+    const along = dot(r, axis);
+    const rr = Math.hypot(r[0] - axis[0] * along, r[1] - axis[1] * along, r[2] - axis[2] * along);
+    if (along < f.lo) f.lo = along;
+    if (along > f.hi) f.hi = along;
+    if (rr > f.rMax) f.rMax = rr;
+    let sp = span.get(b);
+    if (!sp) span.set(b, (sp = [Infinity, -Infinity, Infinity, -Infinity]));
+    const u = dot(r, e1);
+    const v = dot(r, e2);
+    if (u < sp[0]) sp[0] = u;
+    if (u > sp[1]) sp[1] = u;
+    if (v < sp[2]) sp[2] = v;
+    if (v > sp[3]) sp[3] = v;
+  });
+  for (const [b, sp] of span) {
+    const f = out.get(b)!;
+    f.w1 = (sp[1] - sp[0]) / 2;
+    f.w2 = (sp[3] - sp[2]) / 2;
+  }
+  return out;
+}
+
+/** is a body ROUND about the axle: as wide one way across it as the other, with no corner past the
+ *  circle (a gear, a hub, a shaft, a roller pass; a channel or a plate the shaft runs through fails) */
+function roundAboutAxle(f: AxleFit): boolean {
+  const w = Math.max(f.w1, f.w2);
+  if (!(w > 1e-6)) return false;
+  const ratio = f.w1 / Math.max(f.w2, 1e-9);
+  return ratio >= 0.8 && ratio <= 1.25 && f.rMax <= 1.12 * w;
+}
 
 /**
- * THE DRIVE WHEELS: for each wheel contact (MODEL frame, FL FR BL BR), every body that lies wholly
- * inside the wheel's own cylinder — its axle square to the robot (radial for an X-drive), at the
- * wheel's radius above the floor, a wheel's width along it. That is the tread, the hub and a
- * mecanum's rollers, and never a frame plate (which runs past the cylinder). A corner with nothing
- * there is left out.
+ * WHAT OF `fits` TURNS WITH A WHEEL of radius `R` about unit `axis` (2026-10-03, owner: "the motor
+ * or the motor cover/shield spins with the wheel sometimes"; measured on goBILDA's kit, frame screws
+ * beside the axle came along too). The wheel's own WIDTH is the along-axle span of its ring: the
+ * bodies centred on the axle that reach past 0.6 R (the tyre, a rim, a mecanum's side plates). Then:
+ *  · a body ON the axle (a hub, a spacer, a clamp screw) must touch that width and stand out of it by
+ *    no more than `HUB_PROUD_IN`: a motor, a bearing block, a collar inside the frame do not turn;
+ *  · a body OFF the axle must lie within the width, and a small one lying square to the axle must be
+ *    TANGENTIAL to it (an omni wheel's roller), not pointing toward the axle (a frame screw beside it).
+ *    A mecanum's rollers lie at 45° to the axle, so they are never "square" to it.
+ * With no outer ring found, every body passes (the cylinder test alone, as before).
+ */
+export function turnsWithWheel(fits: ReadonlyMap<number, AxleFit>, R: number, axis: V3): Set<number> {
+  // the ring: big bodies CENTRED on the axle (a tyre, a rim, a mecanum's side plates). Off the axle a
+  // body can reach 0.6 R and be a frame screw beside the wheel (measured), so only when nothing
+  // centred is that big does the off-axle ring count
+  // ...and of those, the ones near the largest such radius: a shield or a pulley beside the wheel is
+  // centred and big too, and must not widen it
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const centred of [true, false]) {
+    let top = 0;
+    for (const f of fits.values()) if (f.rMax >= 0.6 * R && (!centred || f.off <= ON_AXLE_IN)) top = Math.max(top, f.rMax);
+    for (const f of fits.values()) {
+      if (f.rMax >= Math.max(0.6 * R, 0.85 * top) && (!centred || f.off <= ON_AXLE_IN)) {
+        lo = Math.min(lo, f.lo);
+        hi = Math.max(hi, f.hi);
+      }
+    }
+    if (hi > lo) break;
+  }
+  const keep = new Set<number>();
+  if (!(hi > lo)) {
+    for (const b of fits.keys()) keep.add(b);
+    return keep;
+  }
+  const margin = 0.15;
+  const square = Math.cos((70 * Math.PI) / 180);
+  for (const [b, f] of fits) {
+    if (f.off <= ON_AXLE_IN) {
+      if (f.hi < lo || f.lo > hi) continue; // beside the wheel (a shield, a bearing), not in it
+      if (f.lo < lo - HUB_PROUD_IN || f.hi > hi + HUB_PROUD_IN) continue; // a motor, a long collar
+      keep.add(b);
+      continue;
+    }
+    if (f.lo < lo - margin || f.hi > hi + margin) continue;
+    if (f.ext < FASTENER_IN && Math.abs(dot(f.dir, axis)) < square && Math.abs(dot(f.dir, f.radial)) > 0.4) continue;
+    keep.add(b);
+  }
+  return keep;
+}
+
+/**
+ * THE DRIVE WHEELS: for each wheel contact (MODEL frame, FL FR BL BR), the bodies wholly inside the
+ * wheel's own cylinder (its axle square to the robot, radial for an X-drive, at the wheel's radius
+ * above the floor, a wheel's width along it: never a frame plate, which runs past it), and of those
+ * the ones that turn with it (`turnsWithWheel`). A corner with nothing there is left out.
  */
 export function findWheelGroups(parts: readonly MeshPart[], wheels: readonly Vec2[], drivetrain: DrivetrainType, wheelDiaIn: number): MotionGroup[] {
   const st = bodyStats(parts);
@@ -340,10 +523,11 @@ export function findWheelGroups(parts: readonly MeshPart[], wheels: readonly Vec
       const rr = Math.hypot(r[0] - axis[0] * along, r[1] - axis[1] * along, r[2] - axis[2] * along);
       if (rr > R + 0.35 || Math.abs(along) > WHEEL_HALF_WIDTH_IN) bad.add(b);
     });
-    const bodies = [...cand].filter((b) => !bad.has(b)).sort((a, b) => a - b);
+    const inside = new Set([...cand].filter((b) => !bad.has(b)));
+    const bodies = [...turnsWithWheel(axleFits(parts, st, inside, centre, axis), R, axis)].sort((a, b) => a - b);
     if (!bodies.length) return;
     for (const b of bodies) taken.add(b);
-    out.push({ role: 'wheel', bodies, corner });
+    out.push({ role: 'wheel', bodies, corner, found: true });
   });
   return out;
 }
@@ -388,38 +572,166 @@ export function findRollerGroups(
     const across = along === 1 ? 0 : 1;
     const outward = span.edge === 'front' || span.edge === 'left' ? 1 : -1;
     const edgeAt = outward > 0 ? hi[across] : lo[across];
-    const axis: V3 = along === 1 ? [0, 1, 0] : [1, 0, 0];
-    // the candidates by their boxes: near the edge, low, within the span, round about the edge's
-    // direction (equal spread across it)
-    const cand = new Map<number, { c: number[]; h1: number; h2: number; r: number }>();
-    for (const b of st.ids) {
-      if (used.has(b)) continue;
-      const c = [0, 1, 2].map((k) => (st.min[3 * b + k] + st.max[3 * b + k]) / 2);
-      if ((edgeAt - c[across]) * outward > ROLLER_DEPTH_IN || c[2] > ROLLER_TOP_IN) continue;
-      if (c[along] < Math.min(span.from, span.to) - 1 || c[along] > Math.max(span.from, span.to) + 1) continue;
-      const h1 = (st.max[3 * b + across] - st.min[3 * b + across]) / 2;
-      const h2 = (st.max[3 * b + 2] - st.min[3 * b + 2]) / 2;
-      if (h1 < 0.05 || h2 < 0.05 || h1 / h2 < 0.85 || h1 / h2 > 1.18) continue;
-      cand.set(b, { c, h1, h2, r: 0 });
-    }
-    // and no corner past the circle: ONE pass over the model for every candidate (a pass each was
-    // 0.2 s at 250k triangles on goBILDA's BIOBUZZ kit, 2026-10-03)
-    eachVertex(parts, new Set(cand.keys()), (x, y, z, b) => {
-      const k = cand.get(b)!;
-      const d = Math.hypot((along === 1 ? x : y) - k.c[across], z - k.c[2]);
-      if (d > k.r) k.r = d;
-    });
-    for (const [b, k] of cand) {
-      if (used.has(b)) continue;
-      if (k.r > 1.12 * Math.max(k.h1, k.h2)) continue;
-      const bodies = coaxialBodies(parts, b, 'roller').filter((x) => !used.has(x));
-      const whole = fitRound(parts, bodies, axis);
-      if (!whole || whole.radius < ROLLER_R_MIN_IN || whole.radius > ROLLER_R_MAX_IN) continue;
-      for (const x of bodies) used.add(x);
-      out.push({ role: 'roller', bodies });
+    // two ways a roller stands at a mouth: its axle ALONG the edge (a sweeper, a roller bar), or
+    // UPRIGHT (side rollers, which pull an element in from beside it). Each is judged round in the
+    // plane square to its axle.
+    const orients: { axis: V3; d1: number; d2: number }[] = [
+      { axis: along === 1 ? [0, 1, 0] : [1, 0, 0], d1: across, d2: 2 },
+      { axis: [0, 0, 1], d1: 0, d2: 1 },
+    ];
+    for (const o of orients) {
+      // the candidates by their boxes: near the edge, low, within the span, round about the axle's
+      // direction (equal spread across it)
+      const cand = new Map<number, { c: number[]; h1: number; h2: number; r: number }>();
+      for (const b of st.ids) {
+        if (used.has(b)) continue;
+        const c = [0, 1, 2].map((k) => (st.min[3 * b + k] + st.max[3 * b + k]) / 2);
+        if ((edgeAt - c[across]) * outward > ROLLER_DEPTH_IN || c[2] > ROLLER_TOP_IN) continue;
+        if (c[along] < Math.min(span.from, span.to) - 1 || c[along] > Math.max(span.from, span.to) + 1) continue;
+        const h1 = (st.max[3 * b + o.d1] - st.min[3 * b + o.d1]) / 2;
+        const h2 = (st.max[3 * b + o.d2] - st.min[3 * b + o.d2]) / 2;
+        if (h1 < 0.05 || h2 < 0.05 || h1 / h2 < 0.85 || h1 / h2 > 1.18) continue;
+        cand.set(b, { c, h1, h2, r: 0 });
+      }
+      // and no corner past the circle: ONE pass over the model for every candidate (a pass each was
+      // 0.2 s at 250k triangles on goBILDA's BIOBUZZ kit, 2026-10-03)
+      eachVertex(parts, new Set(cand.keys()), (x, y, z, b) => {
+        const k = cand.get(b)!;
+        const p = [x, y, z];
+        const d = Math.hypot(p[o.d1] - k.c[o.d1], p[o.d2] - k.c[o.d2]);
+        if (d > k.r) k.r = d;
+      });
+      for (const [b, k] of cand) {
+        if (used.has(b)) continue;
+        if (k.r > 1.12 * Math.max(k.h1, k.h2)) continue;
+        const bodies = coaxialBodies(parts, b, 'roller').filter((x) => !used.has(x));
+        const whole = fitRound(parts, bodies, o.axis);
+        if (!whole || whole.radius < ROLLER_R_MIN_IN || whole.radius > ROLLER_R_MAX_IN) continue;
+        for (const x of bodies) used.add(x);
+        out.push({ role: 'roller', bodies, found: true });
+      }
     }
   }
   return out;
+}
+
+// ---- flywheels, a turret and a deployed ramp, from the placements ---------------------------------
+
+/** a flywheel's centre is within this of the launcher's placed point, inches */
+const FLYWHEEL_REACH_IN = 5;
+/** a flywheel's radius, inches */
+const FLYWHEEL_R_MIN_IN = 0.6;
+const FLYWHEEL_R_MAX_IN = 2.6;
+
+/**
+ * THE FLYWHEELS: round DISCS (thinner along their axle than across) with a level axle, centred within
+ * `FLYWHEEL_REACH_IN` of the launcher's placed point (`at`, MODEL frame: a fixed launcher's lip, a
+ * turret's axis at its release height), each grown to its axle (`coaxialBodies`). The two largest
+ * axles at most (a double wheel). Bodies in `taken` are never used. A suggestion.
+ */
+export function findFlywheelGroups(parts: readonly MeshPart[], at: V3, taken: ReadonlySet<number>): MotionGroup[] {
+  const st = bodyStats(parts);
+  const used = new Set(taken);
+  const cands: { b: number; r: number }[] = [];
+  for (const b of st.ids) {
+    if (used.has(b)) continue;
+    const mo = setMoments(st, [b]);
+    const c = boxCentre(mo);
+    if (Math.hypot(c[0] - at[0], c[1] - at[1], c[2] - at[2]) > FLYWHEEL_REACH_IN) continue;
+    const ext = [0, 1, 2].map((k) => mo.max[k] - mo.min[k]);
+    const big = Math.max(...ext);
+    if (big < 2 * FLYWHEEL_R_MIN_IN || big > 2 * FLYWHEEL_R_MAX_IN) continue;
+    const fit = fitRound(parts, [b]);
+    if (!fit || Math.abs(fit.axis[2]) > 0.3) continue; // a level axle
+    // a disc: thinner along the axle than across, and round across it
+    const along = Math.abs(fit.axis[0]) * ext[0] + Math.abs(fit.axis[1]) * ext[1] + Math.abs(fit.axis[2]) * ext[2];
+    if (along > fit.radius * 1.2) continue;
+    const f = axleFits(parts, st, new Set([b]), fit.pivot, fit.axis).get(b)!;
+    if (!roundAboutAxle(f) || fit.radius < FLYWHEEL_R_MIN_IN) continue;
+    cands.push({ b, r: fit.radius });
+  }
+  cands.sort((a, b) => b.r - a.r || a.b - b.b);
+  const out: MotionGroup[] = [];
+  for (const { b } of cands) {
+    if (used.has(b) || out.length >= 2) continue;
+    const bodies = coaxialBodies(parts, b, 'flywheel').filter((x) => !used.has(x));
+    for (const x of bodies) used.add(x);
+    out.push({ role: 'flywheel', bodies, found: true });
+  }
+  return out;
+}
+
+/**
+ * THE TURRET: the largest round body with an UPRIGHT axis whose axis passes within 1.5 in of the
+ * launcher's placed point (`at`, its x and y) below its release height (a bearing ring, a lazy-susan
+ * plate, 1.5 to 6 in across its radius), and everything standing on it: bodies whose box lies within
+ * the ring's radius plus 3 in of that axis and starts no lower than the ring's own bottom. A
+ * suggestion; null when no such ring is there.
+ */
+export function findTurretGroup(parts: readonly MeshPart[], at: V3, taken: ReadonlySet<number>): MotionGroup | null {
+  const st = bodyStats(parts);
+  let ring: { b: number; c: V3; r: number; z0: number } | null = null;
+  for (const b of st.ids) {
+    if (taken.has(b)) continue;
+    const mo = setMoments(st, [b]);
+    const c = boxCentre(mo);
+    if (Math.hypot(c[0] - at[0], c[1] - at[1]) > 1.5 || mo.max[2] > at[2]) continue;
+    const wx = (mo.max[0] - mo.min[0]) / 2;
+    const wy = (mo.max[1] - mo.min[1]) / 2;
+    const h = mo.max[2] - mo.min[2];
+    const r = Math.max(wx, wy);
+    if (r < 1.5 || r > 6 || h > r || wx / Math.max(wy, 1e-9) < 0.85 || wx / Math.max(wy, 1e-9) > 1.18) continue;
+    const f = axleFits(parts, st, new Set([b]), [c[0], c[1], 0], [0, 0, 1]).get(b)!;
+    if (!roundAboutAxle(f)) continue;
+    if (!ring || r > ring.r) ring = { b, c, r, z0: mo.min[2] };
+  }
+  if (!ring) return null;
+  const reach = ring.r + 3;
+  const bodies: number[] = [];
+  for (const b of st.ids) {
+    if (taken.has(b)) continue;
+    if (st.min[3 * b + 2] < ring.z0 - 0.05) continue;
+    let far = 0;
+    for (const x of [st.min[3 * b], st.max[3 * b]]) for (const y of [st.min[3 * b + 1], st.max[3 * b + 1]]) far = Math.max(far, Math.hypot(x - ring.c[0], y - ring.c[1]));
+    if (far > reach) continue;
+    bodies.push(b);
+  }
+  return bodies.length ? { role: 'turret', bodies: bodies.sort((a, b) => a - b), found: true } : null;
+}
+
+/**
+ * A RAMP (or any part) THE FILE SHOWS DEPLOYED, from an intake edge: when the model runs past 18 in
+ * outward from its far edge, every body whose box reaches past that line, and the smaller ones mounted
+ * on them (`mountedBodies`). The owner's case: a robot imported with its ramp down "says it is too
+ * big". `role` is `ramp` on a build with BIOBUZZ's ramp intake, else `fold`. Null when the model fits.
+ */
+export function findDeployedGroup(
+  parts: readonly MeshPart[],
+  intakes: readonly { edge: 'front' | 'back' | 'left' | 'right' }[],
+  role: 'ramp' | 'fold',
+  taken: ReadonlySet<number>,
+  maxIn = 18,
+): MotionGroup | null {
+  const st = bodyStats(parts);
+  if (!st.ids.length) return null;
+  const lo = [Infinity, Infinity];
+  const hi = [-Infinity, -Infinity];
+  for (const b of st.ids) for (let k = 0; k < 2; k++) {
+    lo[k] = Math.min(lo[k], st.min[3 * b + k]);
+    hi[k] = Math.max(hi[k], st.max[3 * b + k]);
+  }
+  for (const { edge } of intakes) {
+    const k = edge === 'front' || edge === 'back' ? 0 : 1;
+    const outward = edge === 'front' || edge === 'left' ? 1 : -1;
+    if (hi[k] - lo[k] <= maxIn + 0.05) continue;
+    const line = outward > 0 ? lo[k] + maxIn : hi[k] - maxIn;
+    const past = st.ids.filter((b) => !taken.has(b) && (outward > 0 ? st.max[3 * b + k] > line : st.min[3 * b + k] < line));
+    if (!past.length) continue;
+    const bodies = new Set(past);
+    for (const b of past) for (const x of mountedBodies(parts, b)) if (!taken.has(x)) bodies.add(x);
+    return { role, bodies: [...bodies].sort((a, b) => a - b), found: true };
+  }
+  return null;
 }
 
 // ---- folding: a ramp the file shows deployed ------------------------------------------------------
@@ -651,7 +963,11 @@ export function deriveMotion(modelParts: readonly MeshPart[], motion: readonly M
   const out: MotionPart[] = [];
   const index = new Map<number, number>(); // setup index → output index
   const rideOn = new Map<number, number>(); // setup index → carrier setup index
-  for (const p of plans) for (const r of p.riders) rideOn.set(r, p.group);
+  // a part the player put on another (an arm on a slide) rides it, whatever the geometry says
+  motion.forEach((g, gi) => {
+    if (g.rideOn !== undefined && Number.isInteger(g.rideOn) && g.rideOn !== gi && motion[g.rideOn]?.bodies.length) rideOn.set(gi, g.rideOn);
+  });
+  for (const p of plans) for (const r of p.riders) if (!rideOn.has(r)) rideOn.set(r, p.group);
   // turrets carry what is inside them (a flywheel on a turret)
   motion.forEach((g, gi) => {
     if (g.role !== 'turret' || !g.bodies.length) return;
@@ -666,7 +982,10 @@ export function deriveMotion(modelParts: readonly MeshPart[], motion: readonly M
     const bodies = g.bodies.filter((b) => b < st.n.length && st.n[b] > 0);
     if (!bodies.length) return;
     let part: MotionPart | null = null;
-    if (isHinge(g.role)) {
+    if (isJoint(g.role)) {
+      part = jointPart(modelParts, st, g, gi, bodies);
+      if (!part) return;
+    } else if (isHinge(g.role)) {
       const plan = plans.find((p) => p.group === gi);
       if (!plan) return;
       part = { role: g.role, bodies, pivot: add(plan.hinge, t), axis: plan.axis, radius: 0, deploy: plan.deploy, parent: -1, group: gi };
@@ -690,13 +1009,105 @@ export function deriveMotion(modelParts: readonly MeshPart[], motion: readonly M
     index.set(gi, out.length);
     out.push(part);
   });
-  // parents, once every part has its index
+  // parents, once every part has its index; a chain that comes back on itself is cut where it closes
   for (const [gi, carrier] of rideOn) {
     const i = index.get(gi);
     const c = index.get(carrier);
     if (i !== undefined && c !== undefined) out[i].parent = c;
   }
+  out.forEach((p, i) => {
+    let at = p.parent;
+    for (let n = 0; at >= 0 && n <= out.length; n++) {
+      if (at === i) {
+        p.parent = -1;
+        break;
+      }
+      at = out[at].parent;
+    }
+  });
+  // gearing: a part that follows another moves as it does, times the ratio (never itself, never a
+  // loop: a follow that comes back round is dropped)
+  motion.forEach((g, gi) => {
+    const i = index.get(gi);
+    const f = g.follows;
+    if (i === undefined || !f || !Number.isFinite(f.ratio)) return;
+    const j = index.get(f.group);
+    if (j === undefined || j === i) return;
+    out[i].follows = { index: j, ratio: Math.max(-100, Math.min(100, f.ratio)) };
+  });
+  out.forEach((p, i) => {
+    let at = p.follows?.index;
+    for (let n = 0; at !== undefined && n <= out.length; n++) {
+      if (at === i) {
+        delete p.follows;
+        break;
+      }
+      at = out[at].follows?.index;
+    }
+  });
   return out;
+}
+
+/** a robot axis as a unit vector (MODEL frame: +x front, +y left, +z up) */
+const ROBOT_AXIS: Readonly<Record<'forward' | 'left' | 'up', V3>> = { forward: [1, 0, 0], left: [0, 1, 0], up: [0, 0, 1] };
+
+/**
+ * A GENERIC JOINT as measured (`spin`, `swing`, `slide`). Its direction is a robot axis, or the picked
+ * body's own: its round axle (`fitRound`) for a spin or a swing, its long side for a slide. Where it
+ * turns about: a spin, its own axle through its bodies (`fitRound` along that direction); a swing, the
+ * picked body's axle when there is one, else the end of the swinging part nearer the robot's middle
+ * (an arm pivots at its root); a slide does not turn, and sits at its box's centre.
+ */
+function jointPart(modelParts: readonly MeshPart[], st: BodyStats, g: MotionGroup, gi: number, bodies: number[]): MotionPart | null {
+  const role = g.role as 'spin' | 'swing' | 'slide';
+  const amount = g.amount !== undefined && Number.isFinite(g.amount) && g.amount >= 0 ? g.amount : JOINT_DEFAULT_AMOUNT[role];
+  const drive = g.drive ?? (role === 'spin' ? 'always' : 'intake');
+  const ab = g.axis === 'part' && g.axisBody !== undefined && g.axisBody < st.n.length && st.n[g.axisBody] > 0 ? g.axisBody : null;
+  const mo = setMoments(st, bodies);
+  let axis: V3 | null = g.axis && g.axis !== 'part' ? ROBOT_AXIS[g.axis] : null;
+  let pivot: V3 | null = null;
+  if (ab !== null) {
+    if (role === 'slide') {
+      const v = eigenSym3(setMoments(st, [ab]).cov).vectors[0];
+      const k = Math.abs(v[0]) >= Math.abs(v[1]) && Math.abs(v[0]) >= Math.abs(v[2]) ? 0 : Math.abs(v[1]) >= Math.abs(v[2]) ? 1 : 2;
+      axis = snapAxis(v[k] < 0 ? scale(v, -1) : v);
+    } else {
+      const f = fitRound(modelParts, [ab]);
+      if (f) {
+        axis = f.axis;
+        if (role === 'swing') pivot = f.pivot;
+      }
+    }
+  }
+  if (role === 'spin') {
+    const f = fitRound(modelParts, bodies, axis ?? undefined);
+    if (!f) return null;
+    return { role, bodies, pivot: f.pivot, axis: axis ?? f.axis, radius: f.radius, deploy: 0, parent: -1, group: gi, drive, amount };
+  }
+  if (role === 'slide') {
+    return { role, bodies, pivot: boxCentre(mo), axis: axis ?? [0, 0, 1], radius: 0, deploy: 0, parent: -1, group: gi, drive, amount };
+  }
+  // a swing: the hinge line
+  const ax = axis ?? ROBOT_AXIS.left;
+  if (!pivot) {
+    // its long direction square to the hinge, and of its two ends the one nearer the robot's middle
+    const v = eigenSym3(mo.cov).vectors;
+    let d = v.map((w) => sub(w, scale(ax, dot(w, ax)))).reduce((best, w) => (Math.hypot(w[0], w[1], w[2]) > Math.hypot(best[0], best[1], best[2]) ? w : best));
+    const dl = Math.hypot(d[0], d[1], d[2]);
+    d = dl > 1e-6 ? scale(d, 1 / dl) : ([1, 0, 0] as V3);
+    const c = boxCentre(mo);
+    let lo = Infinity;
+    let hi = -Infinity;
+    eachVertex(modelParts, new Set(bodies), (x, y, z) => {
+      const t = dot(sub([x, y, z], c), d);
+      if (t < lo) lo = t;
+      if (t > hi) hi = t;
+    });
+    const a = add(c, scale(d, lo));
+    const b = add(c, scale(d, hi));
+    pivot = Math.hypot(a[0], a[1]) <= Math.hypot(b[0], b[1]) ? a : b;
+  }
+  return { role, bodies, pivot, axis: ax, radius: 0, deploy: (amount * Math.PI) / 180, parent: -1, group: gi, drive, amount: (amount * Math.PI) / 180 };
 }
 
 /** a drive wheel turns about a LEVEL axle: the fit's own direction, laid flat */

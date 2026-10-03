@@ -137,6 +137,110 @@ export function componentBodies(nVert: number, indices: Uint32Array, first = 0):
 }
 
 /**
+ * A BODY THAT IS SEVERAL LUMPS GETS AN ID PER LUMP (2026-10-03, owner: "the auto-detector combines a
+ * static channel and a gear into one component that cannot be separated"). A reader's body is a mesh
+ * instance or a STEP solid, and an exporter can put a channel and the gear beside it in ONE (a merged
+ * sub-assembly, a multi-lump solid): picking works on bodies, so the two could only move together.
+ * A lump is a connected piece of the welded mesh; a body whose faces are in two colours lives in two
+ * parts, so lumps are joined ACROSS parts where the same body has a vertex within `eps` (a two-colour
+ * wheel stays one). The lump holding a body's first vertex keeps its id and the rest take new ids
+ * after the largest, in the order they first appear, so a body that is one lump keeps its id and a
+ * mesh split once splits the same way again (a saved robot's moving parts still name the same parts).
+ * Measured on REV's starter bot: 7 of 2,150 solids are more than one lump. Rewrites `body` in place;
+ * returns how many lumps were given new ids.
+ */
+export function splitLumps(parts: readonly { positions: Float32Array; indices: Uint32Array; body: Uint32Array | null }[], eps: number): number {
+  const offs: number[] = [];
+  let total = 0;
+  let maxId = -1;
+  for (const p of parts) {
+    offs.push(total);
+    total += p.positions.length / 3;
+    if (p.body) for (let i = 0; i < p.body.length; i++) if (p.body[i] > maxId) maxId = p.body[i];
+  }
+  if (maxId < 0) return 0;
+  const parent = new Int32Array(total);
+  for (let i = 0; i < total; i++) parent[i] = i;
+  const find = (v: number): number => {
+    while (parent[v] !== v) {
+      parent[v] = parent[parent[v]];
+      v = parent[v];
+    }
+    return v;
+  };
+  const join = (a: number, b: number): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+  // within a part: the triangles
+  parts.forEach((p, pi) => {
+    const o = offs[pi];
+    const ix = p.indices;
+    for (let t = 0; t + 2 < ix.length; t += 3) {
+      join(o + ix[t], o + ix[t + 1]);
+      join(o + ix[t], o + ix[t + 2]);
+    }
+  });
+  // across parts: the same body at the same place (only bodies that are in more than one part)
+  const partsOf = new Map<number, number>();
+  const many = new Set<number>();
+  parts.forEach((p, pi) => {
+    if (!p.body) return;
+    const seen = new Set<number>();
+    for (let i = 0; i < p.body.length; i++) seen.add(p.body[i]);
+    for (const b of seen) {
+      const was = partsOf.get(b);
+      if (was === undefined) partsOf.set(b, pi);
+      else if (was !== pi) many.add(b);
+    }
+  });
+  if (many.size) {
+    const inv = 1 / eps;
+    const cells = new Map<string, number>();
+    parts.forEach((p, pi) => {
+      if (!p.body) return;
+      const a = p.positions;
+      for (let v = 0; v < p.body.length; v++) {
+        const b = p.body[v];
+        if (!many.has(b)) continue;
+        const key = `${b},${Math.round(a[3 * v] * inv)},${Math.round(a[3 * v + 1] * inv)},${Math.round(a[3 * v + 2] * inv)}`;
+        const g = offs[pi] + v;
+        const at = cells.get(key);
+        if (at === undefined) cells.set(key, g);
+        else join(at, g);
+      }
+    });
+  }
+  // each body's lumps, in the order they first appear: the first keeps the id
+  const lumpId = new Map<number, number>(); // root vertex → id
+  const firstLump = new Map<number, number>(); // body → its first lump's root
+  let next = maxId + 1;
+  let made = 0;
+  parts.forEach((p, pi) => {
+    if (!p.body) return;
+    const o = offs[pi];
+    for (let v = 0; v < p.body.length; v++) {
+      const r = find(o + v);
+      let id = lumpId.get(r);
+      if (id === undefined) {
+        const b = p.body[v];
+        if (!firstLump.has(b)) {
+          firstLump.set(b, r);
+          id = b;
+        } else {
+          id = next++;
+          made++;
+        }
+        lumpId.set(r, id);
+      }
+      p.body[v] = id;
+    }
+  });
+  return made;
+}
+
+/**
  * Creased normals that keep the mesh INDEXED: each triangle corner averages the (area-weighted)
  * normals of the triangles round its vertex that are within `creaseDeg` of its own, and corners
  * with the same vertex and the same resulting normal share one output vertex. A CAD part comes

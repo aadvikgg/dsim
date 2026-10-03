@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GameSettings } from '../../game';
-import type { ImportedMech, RobotSpec, Vec2 } from '../../types';
+import type { GameId, ImportedMech, RobotSpec, Vec2 } from '../../types';
 import { coerceSpec } from '../../sim/spawn';
-import { bbIntakeKindOf } from '../../games/biobuzz/mechs';
+import { bbIntakeKindOf, bbIsTurreted, bbLauncherOf } from '../../games/biobuzz/mechs';
+import { BB_HOOD_DEFAULT_DEG } from '../../games/biobuzz/config';
+import { decodeFixedLauncher } from '../../sim/fixedShot';
 import { seasonFor } from '../../seasons';
 import { FOCUSABLE } from '../../ui/PadNavLayer';
 import { loadImporterEngine, type ImporterEngine } from '../engineLoader';
@@ -10,7 +12,7 @@ import type { ImportProgress, NormalisedModel, PreparedModel } from '../engine/i
 import type { LoadStage } from '../engine/load';
 import { wheelDiameterMm } from '../drive';
 import { defaultImportSetup, orientKey, transformParts } from '../geometry';
-import { coaxialBodies, findRollerGroups, findWheelGroups, isSpin, motionAsStored, mountedBodies } from '../motion';
+import { coaxialBodies, findDeployedGroup, findFlywheelGroups, findRollerGroups, findTurretGroup, findWheelGroups, isSpin, motionAsStored, mountedBodies } from '../motion';
 import { deleteRobot, getRobot, listRobots, newRobotId, putRobot } from '../library';
 import { editSaveId, planShareAdd } from '../libraryIds';
 import { readShareFile, type SharePayload } from '../shareFile';
@@ -46,7 +48,7 @@ import { libraryChanged, postRobotNotice, takeHandedFiles } from './handoff';
 import { ConfirmDialog, DuplicateDialog } from './LibraryDialogs';
 import { MechanismsStep } from './MechanismsStep';
 import { ModelStep } from './ModelStep';
-import { MotionPanel } from './MotionPanel';
+import { MotionPanel, type PickTarget } from './MotionPanel';
 import { TunePanel } from './TunePanel';
 import { driveTuneFields, mechTuneFields } from './tuneFields';
 import { PreviewPane } from './PreviewPane';
@@ -85,6 +87,13 @@ const STAGE_LABEL = (stage: LoadStage, file: string): string => {
   const p = COPY.phase[stage];
   return typeof p === 'function' ? p(file) : p;
 };
+
+/** does this build's launcher sit on a turret (so a turret is worth looking for in the model)? */
+function turretBuild(game: GameId, spec: RobotSpec): boolean {
+  if (game === 'biobuzz') return bbIsTurreted(bbLauncherOf(spec, BB_HOOD_DEFAULT_DEG));
+  if (game === 'chain') return spec.scoreMode === 'turret' || spec.scoreMode === 'twinturret';
+  return !decodeFixedLauncher(spec);
+}
 
 /** the drop box's line for an import stage reported by the engine (worker or not) */
 const progressLabel = (p: ImportProgress, file: string): string =>
@@ -134,6 +143,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const sourceFiles = useRef<File[] | null>(null);
   /** the moving part being picked in the preview, or null; and whether the preview runs them */
   const [activeMotion, setActiveMotion] = useState<number | null>(null);
+  const [pickTarget, setPickTarget] = useState<PickTarget>('bodies');
   const [playing, setPlaying] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -704,14 +714,41 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
     normalised && baseWheels && doc
       ? findWheelGroups(normalised.modelParts, baseWheels, doc.setup.drive.drivetrain, wheelDiameterMm(doc.setup.drive.wheel) / 25.4)
       : [];
-  const findRollers = (have: readonly MotionGroup[]): MotionGroup[] =>
-    normalised && doc?.mech?.intakes?.length ? findRollerGroups(normalised.modelParts, doc.mech.intakes, new Set(have.flatMap((g) => g.bodies))) : [];
-  // the drive wheels and the intake rollers are looked for once, on a setup that has never had moving
-  // parts, once the placements are in (the rollers are looked for on the intake spans)
+  /**
+   * EVERY KIND OF MOVING PART the model shows, among the bodies `have` does not hold: the drive wheels
+   * (when there are none yet), the intake rollers on the intake spans, flywheels by the launcher, a
+   * turret under it (a turreted build), and a part the file shows deployed past 18 in at an intake
+   * edge (BIOBUZZ's ramp, else a folding part). Suggestions, marked `found`.
+   */
+  const findAll = (have: readonly MotionGroup[]): MotionGroup[] => {
+    if (!normalised || !doc) return [];
+    const parts = normalised.modelParts;
+    const out: MotionGroup[] = [];
+    const taken = (): Set<number> => new Set([...have, ...out].flatMap((g) => g.bodies));
+    if (!have.some((g) => g.role === 'wheel')) out.push(...findWheels().filter((g) => !g.bodies.some((b) => taken().has(b))));
+    const intakes = doc.mech?.intakes ?? [];
+    if (intakes.length) out.push(...findRollerGroups(parts, intakes, taken()));
+    const shooter = doc.mech?.shooter;
+    if (shooter && built) {
+      const at: [number, number, number] = [shooter.x, shooter.y, shooter.z];
+      if (turretBuild(game, built.spec) && !have.some((g) => g.role === 'turret')) {
+        const t = findTurretGroup(parts, at, taken());
+        if (t) out.push(t);
+      }
+      if (!have.some((g) => g.role === 'flywheel')) out.push(...findFlywheelGroups(parts, at, taken()));
+    }
+    if (intakes.length && !have.some((g) => g.role === 'ramp' || g.role === 'fold')) {
+      const ramp = game === 'biobuzz' && built && bbIntakeKindOf(built.spec) === 'ramp';
+      const dep = findDeployedGroup(parts, intakes, ramp ? 'ramp' : 'fold', taken());
+      if (dep) out.push(dep);
+    }
+    return out;
+  };
+  // the moving parts are looked for once, on a setup that has never had any, once the placements are
+  // in (rollers, flywheels and a turret are looked for by the intake spans and the launcher)
   useEffect(() => {
     if (!doc || !normalised || measuring || !baseWheels || doc.setup.motion !== undefined || !doc.mech) return;
-    const wheels = findWheels();
-    const found = [...wheels, ...findRollers(wheels)];
+    const found = findAll([]);
     update((d) => (d.setup.motion === undefined ? { ...d, setup: { ...d.setup, motion: found } } : d));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.setup.motion, normalised, measuring, baseWheels, !doc?.mech]);
@@ -723,6 +760,12 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const onPickBody = (body: number, shift: boolean): void => {
     if (!picking || !normalised || !motion || activeMotion === null) return;
     const g = motion[activeMotion];
+    if (pickTarget === 'axis') {
+      // naming a joint's axle (or a slide's rail): one click, and the picking ends
+      setMotion(motion.map((o, i) => (i === activeMotion ? { ...o, axis: 'part' as const, axisBody: body, found: undefined } : o)));
+      setActiveMotion(null);
+      return;
+    }
     const parts = normalised.modelParts;
     const take = shift ? [body] : isSpin(g.role) ? coaxialBodies(parts, body, g.role) : mountedBodies(parts, body);
     const leaving = g.bodies.includes(body);
@@ -730,7 +773,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
     const next = motion.map((o, i) => {
       if (i === activeMotion) {
         const bodies = leaving ? o.bodies.filter((b) => !set.has(b)) : [...new Set([...o.bodies, ...take])].sort((a, b) => a - b);
-        return { ...o, bodies };
+        return { ...o, bodies, found: undefined };
       }
       return leaving ? o : { ...o, bodies: o.bodies.filter((b) => !set.has(b)) };
     });
@@ -820,14 +863,16 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
             groups={motion ?? []}
             parts={m.motion ?? []}
             active={picking ? activeMotion : null}
+            target={pickTarget}
             playing={playing}
-            onActive={(i) => {
+            onActive={(i, target = 'bodies') => {
               setActiveMotion(i);
+              setPickTarget(target);
               if (i !== null) setPlaying(false);
             }}
             onChange={setMotion}
+            onFind={() => setMotion([...(motion ?? []), ...findAll(motion ?? [])])}
             onFindWheels={() => setMotion([...(motion ?? []).filter((g) => g.role !== 'wheel'), ...findWheels()])}
-            onFindRollers={doc.mech?.intakes?.length ? () => setMotion([...(motion ?? []), ...findRollers(motion ?? [])]) : undefined}
             onPlay={(on) => {
               setPlaying(on);
               if (on) setActiveMotion(null);

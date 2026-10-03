@@ -136,9 +136,30 @@ export interface ImportSetup {
  * part the file shows deployed) swing about a HINGE, and are measured folded, which is the robot's
  * starting configuration.
  */
-export type MotionRole = 'wheel' | 'roller' | 'flywheel' | 'turret' | 'ramp' | 'fold';
+export type MotionRole = 'wheel' | 'roller' | 'flywheel' | 'turret' | 'ramp' | 'fold' | 'spin' | 'swing' | 'slide';
 
-export const SPIN_ROLES: readonly MotionRole[] = ['wheel', 'roller', 'flywheel'];
+/**
+ * THE GENERIC JOINTS, for a mechanism the named roles do not cover (`docs/area/robot-import.md`,
+ * "Moving parts"): `spin` turns continuously about an axle, `swing` turns to an angle and back (an arm,
+ * a kicker, a claw), `slide` moves along a line and back (a lift, an extension). Each is DRIVEN by one
+ * of the robot's own signals (`MotionDrive`), or GEARED to another moving part at a ratio.
+ */
+export const JOINT_ROLES: readonly MotionRole[] = ['spin', 'swing', 'slide'];
+
+/**
+ * What moves a generic joint, read off the robot's state the way the standard parts read it (BIOBUZZ
+ * 3D draws them; the other games are drawn from above): the intake running, the launcher spun up, a
+ * shot just fired (a pulse), the ramp out, the chassis's speed (a fraction of its top speed), or
+ * always on.
+ */
+export type MotionDrive = 'intake' | 'shooter' | 'fire' | 'ramp' | 'drive' | 'always';
+export const MOTION_DRIVES: readonly MotionDrive[] = ['intake', 'shooter', 'fire', 'ramp', 'drive', 'always'];
+
+/** a generic joint's direction: one of the robot's own axes (+x front, +y left, +z up), or a picked
+ *  part's (`axisBody`: its round axle, or a slide rail's long side) */
+export type JointAxis = 'forward' | 'left' | 'up' | 'part';
+
+export const SPIN_ROLES: readonly MotionRole[] = ['wheel', 'roller', 'flywheel', 'spin'];
 export const HINGE_ROLES: readonly MotionRole[] = ['ramp', 'fold'];
 
 /** one moving part as the player set it up (frame-free: bodies and choices, never positions) */
@@ -157,7 +178,30 @@ export interface MotionGroup {
   foldDeg?: number;
   /** `filePose: 'folded'`: degrees it swings down to deploy (absent: `DEFAULT_DEPLOY_DEG`) */
   deployDeg?: number;
+  /** the editor found it (`findWheelGroups`, `findRollerGroups`, …), not the player: said beside it
+   *  until the player edits it */
+  found?: boolean;
+  /** `spin`, `swing`, `slide`: what moves it (absent: `always` for a spin, `intake` otherwise) */
+  drive?: MotionDrive;
+  /** `spin`, `swing`, `slide`: its direction (absent: its own round axle for a spin, `left` for a
+   *  swing, `up` for a slide) */
+  axis?: JointAxis;
+  /** `axis: 'part'`: the body whose axle (or, for a slide, long side) it takes; a swing also turns
+   *  about that axle's line */
+  axisBody?: number;
+  /** `spin`: turns a second at full drive; `swing`: degrees at full drive; `slide`: inches at full
+   *  drive (absent: `JOINT_DEFAULT_AMOUNT`) */
+  amount?: number;
+  /** moves as another group does, times `ratio` (a gear train, a belt, a cascade's second stage): its
+   *  own drive and amount are then not used. An index into the setup's `motion`. */
+  follows?: { group: number; ratio: number };
+  /** rides on another group (an arm on a slide, a claw on an arm): moves with it. An index into the
+   *  setup's `motion`. */
+  rideOn?: number;
 }
+
+/** a generic joint's amount when the player has not said: turns a second, degrees, inches */
+export const JOINT_DEFAULT_AMOUNT: Readonly<Record<'spin' | 'swing' | 'slide', number>> = { spin: 2, swing: 90, slide: 10 };
 
 /** how far a part the file shows folded swings down to deploy, when the player has not said */
 export const DEFAULT_DEPLOY_DEG = 90;
@@ -183,6 +227,11 @@ export interface MotionPart {
   corner?: number;
   /** the `ImportSetup.motion` group it was measured from */
   group: number;
+  /** `spin`, `swing`, `slide`: its drive and amount (turns a second, RADIANS, inches) */
+  drive?: MotionDrive;
+  amount?: number;
+  /** moves as part `index` does (an index into the measured parts), times `ratio` */
+  follows?: { index: number; ratio: number };
 }
 
 /**
@@ -198,14 +247,25 @@ export interface StoredMotion {
   radius: number;
   deploy: number;
   corner?: number;
+  /** its place among the stored moving parts, for `follow` */
+  id?: number;
+  /** `spin`, `swing`, `slide`: what moves it, and how far at full drive (turns a second, radians, inches) */
+  drive?: MotionDrive;
+  amount?: number;
+  /** moves as stored part `id` does, times `ratio` */
+  follow?: { id: number; ratio: number };
 }
 
-const MOTION_ROLES: readonly MotionRole[] = ['wheel', 'roller', 'flywheel', 'turret', 'ramp', 'fold'];
+const MOTION_ROLES: readonly MotionRole[] = ['wheel', 'roller', 'flywheel', 'turret', 'ramp', 'fold', 'spin', 'swing', 'slide'];
+/** a generic joint's amount, at most: 50 turns a second, two full turns of swing, 60 in of slide */
+const AMOUNT_MAX: Readonly<Record<'spin' | 'swing' | 'slide', number>> = { spin: 50, swing: 4 * Math.PI, slide: 60 };
 
 /**
  * A node's `userData.dsim` as a `StoredMotion`, or null. Read on a mesh that may be another player's
  * (a room's relay), so every field is checked: a known role, a finite axis made unit, a radius in
- * [0, 20] in, a deploy angle in [0, π].
+ * [0, 20] in, a deploy angle in [0, π], a joint's drive one of `MOTION_DRIVES` and its amount within
+ * `AMOUNT_MAX`, ids and a follow's ratio in range. An older viewer reads a joint's unknown role as no
+ * moving part at all, and draws it where it is.
  */
 export function readStoredMotion(x: unknown): StoredMotion | null {
   if (!x || typeof x !== 'object') return null;
@@ -218,6 +278,18 @@ export function readStoredMotion(x: unknown): StoredMotion | null {
   const num = (v: unknown, lo: number, hi: number): number => (typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : 0);
   const out: StoredMotion = { v: 1, role: o.role as MotionRole, axis: [a[0] / l, a[1] / l, a[2] / l], radius: num(o.radius, 0, 20), deploy: num(o.deploy, 0, Math.PI) };
   if (typeof o.corner === 'number' && Number.isInteger(o.corner) && o.corner >= 0 && o.corner < 4) out.corner = o.corner;
+  const int = (v: unknown, hi: number): number | null => (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < hi ? v : null);
+  const id = int(o.id, 64);
+  if (id !== null) out.id = id;
+  if (out.role === 'spin' || out.role === 'swing' || out.role === 'slide') {
+    if (MOTION_DRIVES.includes(o.drive as MotionDrive)) out.drive = o.drive as MotionDrive;
+    out.amount = num(o.amount, 0, AMOUNT_MAX[out.role]);
+  }
+  if (o.follow && typeof o.follow === 'object') {
+    const f = o.follow as Record<string, unknown>;
+    const fid = int(f.id, 64);
+    if (fid !== null && typeof f.ratio === 'number' && Number.isFinite(f.ratio)) out.follow = { id: fid, ratio: Math.max(-100, Math.min(100, f.ratio)) };
+  }
   return out;
 }
 

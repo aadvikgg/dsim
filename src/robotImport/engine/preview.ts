@@ -150,7 +150,7 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
     picking: false,
   };
   /** the moving parts' nodes, posed by the play loop */
-  let moving: { node: THREE.Object3D; part: MotionPart; turret: number; angle: number }[] = [];
+  let moving: { node: THREE.Object3D; part: MotionPart; turret: number; angle: number; rest: THREE.Vector3 }[] = [];
   const tints = new THREE.Group();
   scene.add(tints);
   let hover = -1;
@@ -285,7 +285,7 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
       for (const c of [...meshes.children]) node.add(c);
       (parent ?? model!).add(node);
       nodes[i] = node;
-      moving.push({ node, part: m, turret: m.role === 'turret' ? turrets++ : 0, angle: 0 });
+      moving.push({ node, part: m, turret: m.role === 'turret' ? turrets++ : 0, angle: 0, rest: node.position.clone() });
       return node;
     };
     for (let i = 0; i < motion.length; i++) make(i);
@@ -385,17 +385,36 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
     const swing = 0.5 - 0.5 * Math.cos((playT * Math.PI) / 2);
     for (const m of moving) {
       const role = m.part.role;
+      if (m.part.follows) continue; // after its leader, below
       if (role === 'wheel') m.angle += 4 * dt;
       else if (role === 'roller') m.angle += 9 * dt;
       else if (role === 'flywheel') m.angle += 16 * dt;
       else if (role === 'turret') m.angle = (m.turret ? -0.6 : 0.6) * Math.sin(playT * 1.3);
+      else if (role === 'spin') m.angle += Math.min(26, (m.part.amount ?? 0) * 2 * Math.PI) * dt;
+      else if (role === 'swing' || role === 'slide') m.angle = (m.part.amount ?? 0) * swing;
       else m.angle = m.part.deploy * swing;
-      m.node.quaternion.setFromAxisAngle(new THREE.Vector3(...m.part.axis), m.angle);
+      place(m);
     }
+    // a geared part moves as its leader does, times the ratio
+    for (let pass = 0; pass < 4; pass++) {
+      for (const m of moving) {
+        const f = m.part.follows;
+        const lead = f ? moving.find((o) => o.part === state.motion?.[f.index]) : undefined;
+        if (!f || !lead || lead === m) continue;
+        m.angle = lead.angle * f.ratio;
+        place(m);
+      }
+    }
+  };
+  /** a part at its value: a slide moved along its axis (inches, the model's own unit), the rest turned */
+  const place = (m: (typeof moving)[number]): void => {
+    if (m.part.role === 'slide') m.node.position.copy(m.rest).addScaledVector(new THREE.Vector3(...m.part.axis), m.angle);
+    else m.node.quaternion.setFromAxisAngle(new THREE.Vector3(...m.part.axis), m.angle);
   };
   const still = (): void => {
     for (const m of moving) {
       m.angle = 0;
+      m.node.position.copy(m.rest);
       m.node.quaternion.identity();
     }
   };

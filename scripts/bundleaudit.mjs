@@ -639,7 +639,11 @@ const BASELINE = {
   // 60.31 -> 62.49 against ede417c4 built the same minute: the stored-mesh writer (`storedGlb.ts`,
   // quantised attributes and the meshopt container) and `liteMesh` re-writing a compressed mesh as
   // float for the relay. The encoder itself is lazy (`meshoptEncoder-*.js`, billed to `importworker`).
-  importer: { gzip: 79.85 * 1000 },
+  // 2026-10-03 (moving parts, round two): 79.85 -> 84.28, raised on purpose. `geometry-*.js` 16.82
+  // (+2.6: `motion.ts`'s flywheel, turret and deployed-part finders, upright side rollers, the wheel's
+  // turns-with rules, the generic spin / swing / slide joints and their gearing) and
+  // `importerEngine-*.js` 64.39 (+1.9: `splitLumps`, the preview playing joints and gearing).
+  importer: { gzip: 84.28 * 1000 },
   // 2026-10-01: NEW (lane 9). `importWorker-*.js` 104.06 (three.js core, the GLB/glTF, STL, OBJ+MTL
   // and PLY loaders, meshopt's simplifier, the weld and the crease: the parse-to-prepared pipeline
   // that used to block the main thread for seconds; and GLTFExporter for the bake's mesh half),

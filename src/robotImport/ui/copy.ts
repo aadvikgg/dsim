@@ -16,6 +16,9 @@ const ROLE_NAME: Record<MotionRole, string> = {
   turret: 'Turret',
   ramp: 'Ramp',
   fold: 'Folding part',
+  spin: 'Spinning part',
+  swing: 'Swinging part',
+  slide: 'Sliding part',
 };
 const CORNER_NAME = ['Front-left wheel', 'Front-right wheel', 'Back-left wheel', 'Back-right wheel'];
 import { FORMAT_LABEL, PAGE_COPY } from './pageCopy';
@@ -206,6 +209,8 @@ export const COPY = {
     const parts = `${n} ${n === 1 ? 'part' : 'parts'}`;
     if (!p || typeof p !== 'object') return `${parts}. Couldn’t find how it turns, so it stays still. Pick its round part.`;
     if (role === 'ramp' || role === 'fold') return `${parts}, deploys ${Math.round((p.deploy * 180) / Math.PI)}°`;
+    if (role === 'swing') return `${parts}, swings ${Math.round(((p.amount ?? 0) * 180) / Math.PI)}°`;
+    if (role === 'slide') return `${parts}, slides ${Number((p.amount ?? 0).toFixed(2))} in`;
     if (role === 'turret') return parts;
     return `${parts}, ${(2 * p.radius).toFixed(1)} in across`;
   },
@@ -222,6 +227,25 @@ export const COPY = {
   motionFindWheels: 'Find wheels',
   motionFindAgain: 'Find wheels again',
   motionFindRollers: 'Find rollers',
+  motionFind: 'Find moving parts',
+  motionFound: 'found, check it in the preview',
+  motionPickAxisHint: 'Click the part it turns about or slides along: an axle, a pin, a rail.',
+  motionDriveLabel: 'Moved by',
+  motionDrives: { intake: 'Intake', shooter: 'Launcher', fire: 'Each shot', ramp: 'Ramp', drive: 'Driving', always: 'Always' } as const,
+  motionGearedShort: 'Its gearing',
+  motionAbout: 'Turns about',
+  motionAlong: 'Slides along',
+  motionAxes: { forward: 'Front to back', left: 'Side to side', up: 'Upright', part: 'A part' } as const,
+  motionAxisPicked: 'Picked part',
+  motionAmount: {
+    spin: { label: 'Speed', unit: 'turns/s' },
+    swing: { label: 'Swings by', unit: '°' },
+    slide: { label: 'Slides by', unit: 'in' },
+  } as const,
+  motionGeared: 'Geared to',
+  motionRatio: 'Ratio',
+  motionRides: 'Rides on',
+  motionNone: 'Nothing',
   motionAdd: (role: MotionRole) => `Add ${(ROLE_NAME[role] ?? 'moving part').toLowerCase()}`,
   motionPlay: 'Play',
   motionStop: 'Stop',

@@ -112,6 +112,8 @@ import {
 import { bbFixedAxisLocal, bbFixedFacing, bbFixedHood, bbFixedLocal, bbFlowerInReach, bbMouths, bbMuzzleLocal, bbPlacePointLocal } from '../robot';
 import { bbDumpZ, bbDumperFrame, bbImportTurretAxleZ } from '../importMech';
 import { bbSpecKey } from '../specKey';
+import { driveParams } from '../../../sim/drivetrain';
+import type { MotionDrive } from '../../../robotImport/types';
 import {
   buildAimSight,
   cloneImportedMesh,
@@ -4143,6 +4145,9 @@ const IMPORT_FLYWHEEL_IDLE = 18;
 const IMPORT_SPIN_MAX = 26;
 
 const qTmp = new THREE.Quaternion();
+/** a generic joint's full swing takes this long, s; a full slide, `IMPORT_SLIDE_S` */
+const IMPORT_SWING_S = 0.3;
+const IMPORT_SLIDE_S = 0.5;
 
 /**
  * POSE AN IMPORT'S OWN MOVING PARTS (`ImportedMotionNode`) for this frame. Every rule reads the
@@ -4206,10 +4211,63 @@ function poseImportMotion(motion: readonly ImportedMotionNode[], world: World, r
       m.angle = (turret++ === 0 ? r.turretHeading : (r.bbTurret2Heading ?? r.turretHeading)) - r.heading;
     } else if (role === 'ramp') {
       m.angle = m.info.deploy * rampOut;
+    } else if (role === 'spin' || role === 'swing' || role === 'slide') {
+      if (m.info.follow) continue; // after its leader, below
+      const level = jointLevel(m.info.drive ?? (role === 'spin' ? 'always' : 'intake'), world, r, enabled, intaking, rampOut, Math.hypot(vx, vy));
+      const amount = m.info.amount ?? 0;
+      if (role === 'spin') m.angle += Math.min(IMPORT_SPIN_MAX, amount * 2 * Math.PI * level) * dt;
+      else {
+        const target = amount * level;
+        const rate = (amount / (role === 'swing' ? IMPORT_SWING_S : IMPORT_SLIDE_S)) * dt;
+        m.angle += Math.max(-rate, Math.min(rate, target - m.angle));
+      }
     } else {
       m.angle = 0;
     }
-    m.node.quaternion.copy(qTmp.setFromAxisAngle(m.axis, m.angle));
+    placeJoint(m);
+  }
+  // A GEARED PART moves as its leader does, times the ratio (a gear train, a belt, a cascade stage);
+  // a chain of them settles in as many passes as it is long
+  const byId = new Map<number, ImportedMotionNode>();
+  for (const m of motion) if (m.info.id !== undefined) byId.set(m.info.id, m);
+  for (let pass = 0; pass < 4; pass++) {
+    for (const m of motion) {
+      const f = m.info.follow;
+      const lead = f ? byId.get(f.id) : undefined;
+      if (!f || !lead || lead === m) continue;
+      m.angle = lead.angle * f.ratio;
+      placeJoint(m);
+    }
+  }
+}
+
+/** a moving part's node at its value: a slide moved along its axis, anything else turned about it */
+function placeJoint(m: ImportedMotionNode): void {
+  if (m.info.role === 'slide') m.node.position.copy(m.rest).addScaledVector(m.axis, m.angle * m.perInch);
+  else m.node.quaternion.copy(qTmp.setFromAxisAngle(m.axis, m.angle));
+}
+
+/**
+ * HOW MUCH A GENERIC JOINT'S DRIVE IS ON, 0..1, off the robot's state as the standard parts read it:
+ * the intake running, the launcher spun up or just fired, a fire PULSE (up for 0.15 s, back by 0.4 s:
+ * a kicker, a catapult arm), the ramp's own ease, the chassis's speed as a share of its top speed.
+ */
+function jointLevel(drive: MotionDrive, world: World, r: RobotState, enabled: boolean, intaking: boolean, rampOut: number, speed: number): number {
+  switch (drive) {
+    case 'intake':
+      return intaking ? 1 : 0;
+    case 'shooter':
+      return enabled && ((r.flyRpm ?? 0) > 0 || world.time - r.lastFireAt < 0.6) ? 1 : 0;
+    case 'fire': {
+      const t = world.time - r.lastFireAt;
+      return t < 0 ? 0 : t < 0.15 ? t / 0.15 : t < 0.4 ? 1 - (t - 0.15) / 0.25 : 0;
+    }
+    case 'ramp':
+      return rampOut;
+    case 'drive':
+      return Math.min(1, speed / Math.max(1, driveParams(r.spec).maxSpeed));
+    default:
+      return enabled ? 1 : 0;
   }
 }
 

@@ -134,12 +134,28 @@ export function storedSceneOf(robotParts: readonly MeshPart[], motion: readonly 
       const at = turretAt[turrets++];
       if (at) pivot = [at.x, at.y, pivot[2]];
     }
-    const info: StoredMotion = { v: 1, role: m.role, axis: toStoredDir(m.axis), radius: m.radius, deploy: m.deploy, ...(m.corner !== undefined ? { corner: m.corner } : {}) };
+    const info: StoredMotion = {
+      v: 1,
+      role: m.role,
+      axis: toStoredDir(m.axis),
+      radius: m.radius,
+      deploy: m.deploy,
+      ...(m.corner !== undefined ? { corner: m.corner } : {}),
+      id: scene.moving.length,
+      ...(m.drive !== undefined ? { drive: m.drive } : {}),
+      ...(m.amount !== undefined ? { amount: m.amount } : {}),
+    };
     kept[i] = scene.moving.length;
     scene.moving.push({ info, pivot: toStoredPoint(pivot), parent: m.parent, parts: transformParts(moving[i], ROBOT_TO_STORED_MESH) });
   });
-  // parents by their index in what was kept (a parent with no triangles drops its riders to the root)
+  // parents by their index in what was kept (a parent with no triangles drops its riders to the root),
+  // and a follow by the kept id of the part it follows
   for (const mv of scene.moving) mv.parent = mv.parent >= 0 && kept[mv.parent] !== undefined ? kept[mv.parent] : -1;
+  motion.forEach((m, i) => {
+    const at = kept[i];
+    const to = m.follows ? kept[m.follows.index] : undefined;
+    if (at !== undefined && to !== undefined && m.follows) scene.moving[at].info.follow = { id: to, ratio: m.follows.ratio };
+  });
   return scene;
 }
 

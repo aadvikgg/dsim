@@ -348,7 +348,12 @@ export interface ImportedMotionNode {
   /** the pivot and the axis in the ROBOT frame (inches, +x front), for a wheel's ground speed */
   at: { x: number; y: number };
   axisRobot: { x: number; y: number; z: number };
+  /** the running value: a turn's angle (rad), a slide's travel (in) */
   angle: number;
+  /** where the node sits at rest (its parent's frame), and stored-mesh units per inch: a slide moves
+   *  it along `axis` from there */
+  rest: THREE.Vector3;
+  perInch: number;
 }
 
 /**
@@ -367,10 +372,13 @@ export function importedMotionNodes(mesh: THREE.Object3D): ImportedMotionNode[] 
     // the robot frame (the root carries `IMPORTED_MESH_TO_ROBOT`)
     const p = new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).applyMatrix4(inv);
     const a = new THREE.Vector3(...info.axis).applyMatrix4(new THREE.Matrix4().extractRotation(toRobot)).normalize();
-    out.push({ node: o, info, axis: new THREE.Vector3(...info.axis), at: { x: p.x, y: p.y }, axisRobot: { x: a.x, y: a.y, z: a.z }, angle: 0 });
+    out.push({ node: o, info, axis: new THREE.Vector3(...info.axis), at: { x: p.x, y: p.y }, axisRobot: { x: a.x, y: a.y, z: a.z }, angle: 0, rest: o.position.clone(), perInch });
   });
   return out;
 }
+
+/** stored-mesh units per robot inch (`IMPORTED_MESH_TO_ROBOT` scales stored units to inches) */
+const perInch = 1 / new THREE.Vector3().setFromMatrixColumn(new THREE.Matrix4().fromArray(IMPORTED_MESH_TO_ROBOT as number[]), 0).length();
 
 // ──────────────────────────────────────────────────────────── the placeholder ──
 

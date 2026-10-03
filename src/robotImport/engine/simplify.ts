@@ -20,7 +20,7 @@
  */
 import { MeshoptSimplifier } from 'three/examples/jsm/libs/meshopt_simplifier.module.js';
 import { triangleCount, type MeshPart } from '../geometry';
-import { compact, componentBodies, weld } from './meshOps';
+import { compact, componentBodies, splitLumps, weld } from './meshOps';
 
 export interface SimplifyReport {
   parts: MeshPart[];
@@ -217,13 +217,21 @@ export async function simplifyLists(
   // A MODEL WITH NO BODIES OF ITS OWN (an STL, a PLY, a glTF exported as one mesh, or a reader that
   // gave every vertex one id) gets one per connected piece of the welded mesh, numbered across the
   // parts. Positions and indices are untouched: only `body` is added.
-  if (distinctBodies(welded) <= 1) {
+  if (distinctBodies(welded) === 0) {
     let next = 0;
     for (const w of welded) {
       const c = componentBodies(w.positions.length / 3, w.indices, next);
       w.body = c.body;
       next += c.count;
     }
+  } else {
+    // a body that is several lumps (a reader's one body, or a merged sub-assembly) gets an id per lump,
+    // so each can be picked on its own (`splitLumps`)
+    // (a part with no ids beside parts with them is a body of its own, numbered past the rest)
+    let top = -1;
+    for (const w of welded) if (w.body) for (let i = 0; i < w.body.length; i++) if (w.body[i] > top) top = w.body[i];
+    for (const w of welded) if (!w.body) w.body = new Uint32Array(w.positions.length / 3).fill(++top);
+    splitLumps(welded, extent * 1e-5);
   }
   // ONE CALL PER BODY (the header): the welded parts split into units, put back together at the end
   const units: Unit[] = [];

@@ -19,7 +19,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-import` | src/ui/importer.css:18 | 30 |
+| `.ds-import` | src/ui/importer.css:18 | 32 |
 | `.ds-import-body` | src/ui/importer.css:40 | 1 |
 | `.ds-import-canvas` | src/ui/importer.css:90 | 2 |
 | `.ds-import-canvas-host` | src/ui/importer.css:86 | 1 |
@@ -35,8 +35,8 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 | `.ds-import-map-front` | src/ui/importer.css:298 | 1 |
 | `.ds-import-map-status` | src/ui/importer.css:309 | 1 |
 | `.ds-import-map-wrap` | src/ui/importer.css:101 | 1 |
-| `.ds-import-moving` | src/ui/importer.css:191 | 2 |
-| `.ds-import-moving-hinge` | src/ui/importer.css:228 | 1 |
+| `.ds-import-moving` | src/ui/importer.css:191 | 4 |
+| `.ds-import-moving-hinge` | src/ui/importer.css:228 | 3 |
 | `.ds-import-preview` | src/ui/importer.css:37 | 4 |
 | `.ds-import-preview-empty` | src/ui/importer.css:96 | 1 |
 | `.ds-import-preview-stage` | src/ui/importer.css:76 | 1 |
@@ -452,7 +452,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-field` | src/ui/shell.css:2206 | 85 |
+| `.ds-field` | src/ui/shell.css:2206 | 89 |
 | `.ds-field-row` | src/ui/shell.css:2095 | 8 |
 
 ## `ds-fold` — 2
@@ -536,7 +536,7 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-seg` | src/ui/shell.css:524 | 30 |
+| `.ds-seg` | src/ui/shell.css:524 | 31 |
 | `.ds-seg-dot` | src/ui/shell.css:6089 | 1 |
 
 ## `ds-sub` — 2
@@ -890,13 +890,13 @@ The look and the depth model are `DESIGN.md`. This file is only the inventory.
 
 | class | declared | used |
 |---|---|---|
-| `.ds-segs` | src/ui/shell.css:2369 | 21 |
+| `.ds-segs` | src/ui/shell.css:2369 | 22 |
 
 ## `ds-select` — 1
 
 | class | declared | used |
 |---|---|---|
-| `.ds-select` | src/ui/shell.css:2365 | 17 |
+| `.ds-select` | src/ui/shell.css:2365 | 20 |
 
 ## `ds-server` — 1
 

@@ -350,21 +350,60 @@ puts the game's pre-fill back (DECODE forward, BIOBUZZ its edge).
 
 `ImportSetup.motion` (`MotionGroup[]`, `src/robotImport/motion.ts`) says which CAD bodies move in a
 match: `wheel`, `roller`, `flywheel` spin about their own axle, `turret` turns about a vertical axis,
-`ramp` (BIOBUZZ's deployable intake) and `fold` swing about a hinge. It is FRAME-FREE (body ids and
-choices, never positions), so a units or yaw change keeps it. Absent = never looked for: the editor
-finds the drive wheels once (`findWheelGroups`, every body wholly inside each wheel's cylinder at a
-floor contact) and the intake rollers (`findRollerGroups`: a round body along an intake span's edge,
-within 4 in of it and under 10 in, grown to its axle). `[]` = none.
+`ramp` (BIOBUZZ's deployable intake) and `fold` swing about a hinge, and the GENERIC joints `spin`,
+`swing` and `slide` cover what those do not (below). It is FRAME-FREE (body ids and choices, never
+positions), so a units or yaw change keeps it. Absent = never looked for: the editor looks once, and
+Find moving parts again on demand, among the bodies no row has (each marked `found` until edited):
+- the drive wheels (`findWheelGroups`: every body wholly inside each wheel's cylinder at a floor
+  contact, of which `turnsWithWheel` keeps what turns, below);
+- the intake rollers (`findRollerGroups`: a round body near an intake span's edge, within 4 in of it
+  and under 10 in, grown to its axle), its axle ALONG the edge or UPRIGHT (side rollers);
+- flywheels (`findFlywheelGroups`: round discs with a level axle within 5 in of the placed launcher,
+  the two largest axles);
+- a turret on a turreted build (`findTurretGroup`: the largest round, upright ring under the launcher,
+  1.5 to 6 in in radius, and what stands on it);
+- a part the file shows deployed (`findDeployedGroup`: when the model runs past 18 in toward an
+  intake edge, the bodies past that line and what is mounted on them), as BIOBUZZ's `ramp` on a ramp
+  intake, else a `fold`. The owner's "it says the robot is too big" case, found for the player.
+`[]` = none.
 
 - **Bodies.** `MeshPart.body` is a per-vertex id: one per mesh instance from a reader, one per STEP
   solid, the connected pieces when a file has only one. Weld never joins two bodies; weld, compact,
   crease, merge and simplify all carry it. The stored GLB writes it as `_BODY` (unsigned 32-bit, one
   per vertex; a float mesh saved before has 16-bit where it fits, and the relay's validator allows
   both), so an edit of a saved robot can pick parts again. The lighter relay mesh drops it.
-- **Picking** (Mechanisms step, Moving parts): a click on a spinning part takes everything on its
-  axle (`coaxialBodies`; a wheel keeps to its own width, since the opposite wheel is often on the
-  same line); on anything else, the smaller bodies inside its box (`mountedBodies`: a plate's
+- ⚠️ **A body that is several LUMPS gets an id per lump** (`splitLumps`, in the simplifier). An
+  exporter can put a channel and the gear beside it in one mesh or one multi-lump solid, and picking
+  works on bodies, so they could only move together (owner, 2026-10-03). Lumps are joined across
+  colour groups by position (a two-colour wheel stays one); the first keeps the id, so a one-lump body
+  keeps its id and a saved robot's rows still name the same parts. REV's kit: 7 of 2,150 solids.
+- ⚠️ **What turns with a wheel** (`turnsWithWheel`; owner: "the motor or the motor cover/shield spins
+  with the wheel sometimes", and on goBILDA's kit frame screws beside the axle did). The wheel's WIDTH
+  is the along-axle span of its ring: bodies CENTRED on the axle near the largest radius (a tyre, a
+  rim, a mecanum's side plates); a shield or pulley beside it is centred and big too, so the ring is
+  the bodies within 85 % of the largest. A body on the axle must overlap that width and stand out of
+  it by at most 0.6 in (a hub does; a motor, a bearing block, a shield do not). A body off the axle
+  must lie within it, and one smaller than a fastener lying square to the axle must be tangential (an
+  omni roller), not pointing toward the axle (a frame screw). Measured on goBILDA's kit: the rear
+  wheels 12–13 → 9 bodies (inboard bearings, collars, a frame screw out), the front 78 → 64.
+- **Picking** (Mechanisms step, Moving parts): a click on a wheel takes what lies in its cylinder and
+  turns with it; on a roller, flywheel or spinning part, everything on its axle (`coaxialBodies`),
+  where a body bigger than a fastener must be ROUND about the axle (a channel the shaft runs along is
+  centred on it too, and has corners) and a motor-sized cylinder past the end of the rest (the motor
+  driving it) stays; on anything else, the smaller bodies inside its box (`mountedBodies`: a plate's
   hardware). Shift takes one body. A body is in one group at a time.
+- **Generic joints** (`JOINT_ROLES`), for a mechanism the named roles do not cover: `spin` turns
+  continuously (turns a second), `swing` to an angle and back (an arm, a kicker; degrees), `slide`
+  along a line and back (a lift, an extension; inches). Each is moved by one of the robot's signals
+  (`MotionDrive`: intake, launcher, each shot as a pulse, ramp, driving speed, always), about or
+  along a robot axis or a picked part's (`axis: 'part'`, `axisBody`: its round axle, a slide rail's
+  long side), and a swing pivots on that part's axle or, without one, at its own end nearer the
+  robot's middle. Any spinning or generic part can be GEARED to another (`follows`: its value times a
+  ratio, a gear train, a belt, a cascade's second stage) and RIDE on another (`rideOn`: an arm on a
+  slide). A chain or a gearing that comes back on itself is cut where it closes. Measured as
+  `MotionPart` (`drive`, `amount` in turns a second, radians or inches, `follows` by part index) and
+  stored with an `id` per node and `follow: { id, ratio }`; an older viewer reads a joint's role as
+  unknown and draws it where it is. Removing a row renumbers what named the rows after it.
 - **A hinged part the file shows DEPLOYED is measured FOLDED.** `planFolds` runs in the measurement's
   rotated frame before the box, hull and contacts: the hinge is level, square to the direction the
   part sits out from the robot, through its innermost point; it folds up until its far end is over
@@ -378,14 +417,16 @@ within 4 in of it and under 10 in, grown to its axle). `[]` = none.
   hinge is at its foot (the lowest band), which is where the deployed rule put it, so a reopened
   robot hinges in the same place (smoke: within 0.6 in).
 - **Stored GLB.** Each moving part is a node at its pivot, its geometry relative to it, with
-  `extras.dsim` (`StoredMotion`: role, unit axis, radius, deploy angle, wheel corner); a rider is its
-  carrier's child. A viewer that ignores it draws the starting pose. `readStoredMotion` validates
-  every field, since a relayed mesh is another player's file.
+  `extras.dsim` (`StoredMotion`: role, unit axis, radius, deploy angle, wheel corner, and for a joint
+  its id, drive, amount and follow); a rider is its carrier's child. A viewer that ignores it draws
+  the starting pose. `readStoredMotion` validates every field, since a relayed mesh is another
+  player's file.
 - **Animated** in BIOBUZZ 3D by `poseImportMotion` (`renderRobots.ts`), off the same state the
   standard parts read: a wheel at its contact patch's speed (mecanum through its 45° rollers, swerve
   along its pod), a roller while the intake runs, a flywheel at `flyRpm`, a turret at its yaw, a
-  ramp off `bbRampOut`. Drawn spin is capped at 26 rad/s, past which a spoked wheel strobes. The
-  editor's preview has Play for the same, with fixed rates.
+  ramp off `bbRampOut`, a generic joint off its drive (`jointLevel`; a swing eases over 0.3 s, a
+  slide over 0.5 s), a geared part as its leader times the ratio. Drawn spin is capped at 26 rad/s,
+  past which a spoked wheel strobes. The editor's preview has Play for the same, with fixed rates.
 
 ## Mesh quality
 

@@ -37253,5 +37253,170 @@ function fxImportFixed(): RobotSpec {
   );
 }
 
+/**
+ * MOVING PARTS, ROUND TWO (2026-10-03, owner: "the auto-detector combines a static channel and a gear
+ * into one component that cannot be separated. Also, the motor or the motor cover/shield spins with
+ * the wheel sometimes … try auto-detecting intake side rollers, ramps, flywheels, turrets … proper
+ * revolute, gear relations, or linear extensions as a back-up"). A synthetic scene (inches, MODEL
+ * frame) with each case in it, one body per solid; then the generic joints measured and stored.
+ */
+{
+  const synth = await import('./robot-import/synthRobot');
+  const motion = await import('../src/robotImport/motion');
+  const rtypes = await import('../src/robotImport/types');
+  const { splitLumps } = await import('../src/robotImport/engine/meshOps');
+  const { storedSceneOf } = await import('../src/robotImport/engine/bake');
+  type P = import('../src/robotImport/geometry').MeshPart;
+  const J = (v: unknown): string => JSON.stringify(v);
+  const R = synth.WHEEL_R;
+  const prisms = [
+    synth.box('plate', [0.7, 0.7, 0.7], -8, 8, -6, 6, 1.2, 1.6),
+    // the front-left wheel at (5.5, 7): tyre, a hub through the bore, a screw through the hub along
+    // the axle, a clamp screw across the axle at its centre
+    synth.cylY('tyre', [0.1, 0.1, 0.1], 5.5, R, R, 6.25, 7.75, 24),
+    synth.cylY('hub', [0.6, 0.6, 0.6], 5.5, R, 0.45, 5.9, 7.6, 12),
+    synth.box('hub_screw', [0.5, 0.5, 0.5], 5.95, 6.15, 6.5, 7.5, R - 0.1, R + 0.1),
+    synth.box('clamp_screw', [0.5, 0.5, 0.5], 5.4, 5.6, 6.9, 7.1, R - 0.35, R + 0.35),
+    // beside it: a motor shield disc (not overlapping the tyre), a vertical frame screw off the axle
+    synth.cylY('shield', [0.3, 0.3, 0.3], 5.5, R, 1.6, 5.6, 5.75, 24),
+    synth.box('frame_screw', [0.5, 0.5, 0.5], 6.6, 6.85, 6.8, 7.05, R + 0.5, R + 1.1),
+    // the intake: a roller on a shaft at x = 9, a square tube the shaft runs through, a motor on its end
+    synth.cylY('roller', [0.2, 0.7, 0.3], 9, 1.5, 1, -5, 5, 24),
+    synth.cylY('shaft', [0.7, 0.7, 0.7], 9, 1.5, 0.2, -5.5, 6.4, 12),
+    synth.box('tube', [0.7, 0.7, 0.7], 8.4, 9.6, 5.2, 6.2, 0.9, 2.1),
+    synth.cylY('motor', [0.1, 0.1, 0.1], 9, 1.5, 0.75, 6.4, 9.4, 16),
+  ];
+  // an upright cylinder as a prism along +z (cylY's base turned on end)
+  const cylZ = (name: string, cx: number, cy: number, r: number, z0: number, z1: number, n = 16): (typeof prisms)[number] => ({
+    name,
+    color: [0.2, 0.7, 0.3],
+    base: Array.from({ length: n }, (_, k) => [cx + r * Math.cos((2 * Math.PI * k) / n), cy + r * Math.sin((2 * Math.PI * k) / n), z0] as [number, number, number]),
+    extrude: [0, 0, z1 - z0],
+  });
+  // side rollers: upright, at the mouth's two ends
+  prisms.push(cylZ('side_l', 8.4, 5.8, 0.8, 0.5, 3), cylZ('side_r', 8.4, -5.8, 0.8, 0.5, 3));
+  // the launcher at (-4, 0, 10): a flywheel disc on its axle, a turret ring below it with a hood on it
+  prisms.push(synth.cylY('flywheel', [0.8, 0.2, 0.2], -4, 10, 1.5, -0.4, 0.4, 24));
+  prisms.push(cylZ('ring', -4, 0, 2.5, 6, 6.4, 32), synth.box('hood', [0.9, 0.5, 0.1], -5, -3, -1.5, 1.5, 6.4, 9));
+  const id = (n: string): number => prisms.findIndex((p) => p.name === n);
+  const parts: P[] = synth.synthParts(prisms).map((p, i) => ({ ...p, indices: null, body: new Uint32Array(p.positions.length / 3).fill(i) }));
+
+  // ---- the wheel: what turns with it ----
+  const fl = motion.findWheelGroups(parts, [{ x: 5.5, y: 7 }], 'tank', 2 * R)[0];
+  const has = (g: { bodies: number[] } | undefined, n: string): boolean => !!g && g.bodies.includes(id(n));
+  check(
+    'moving parts 2: a wheel keeps its tyre, its hub and the screws through it, and NOT a motor shield beside it or a frame screw off its axle',
+    has(fl, 'tyre') && has(fl, 'hub') && has(fl, 'hub_screw') && has(fl, 'clamp_screw') && !has(fl, 'shield') && !has(fl, 'frame_screw'),
+    J(fl?.bodies.map((b) => prisms[b].name)),
+  );
+  const flPick = motion.coaxialBodies(parts, id('tyre'), 'wheel').map((b) => prisms[b].name);
+  check('moving parts 2: a click on the tyre takes the same wheel (no shield, no frame screw)', flPick.includes('hub') && !flPick.includes('shield') && !flPick.includes('frame_screw'), J(flPick));
+
+  // ---- the roller's axle: no channel, no motor ----
+  const roll = motion.coaxialBodies(parts, id('roller'), 'roller').map((b) => prisms[b].name);
+  check(
+    'moving parts 2: a click on a roller takes its shaft, and NOT the square tube the shaft runs through or the motor on its end',
+    roll.includes('roller') && roll.includes('shaft') && !roll.includes('tube') && !roll.includes('motor'),
+    J(roll),
+  );
+
+  // ---- the finders ----
+  const rollers = motion.findRollerGroups(parts, [{ edge: 'front', from: -6.5, to: 6.5 }], new Set(fl?.bodies ?? []));
+  const named = rollers.map((g) => g.bodies.map((b) => prisms[b].name).sort().join('+'));
+  check(
+    'moving parts 2: the roller finder finds the roller bar along the mouth AND the two upright side rollers, each marked found',
+    named.includes('roller+shaft') && named.includes('side_l') && named.includes('side_r') && rollers.every((g) => g.found),
+    J(named),
+  );
+  const fw = motion.findFlywheelGroups(parts, [-4, 0, 10], new Set());
+  check('moving parts 2: a flywheel disc by the launcher is found, and nothing else is', fw.length === 1 && fw[0].bodies.includes(id('flywheel')) && fw[0].role === 'flywheel', J(fw));
+  const tur = motion.findTurretGroup(parts, [-4, 0, 10], new Set(fw.flatMap((g) => g.bodies)));
+  check('moving parts 2: the turret is the round ring under the launcher with what stands on it (the hood), not the chassis', !!tur && tur.bodies.includes(id('ring')) && tur.bodies.includes(id('hood')) && !tur.bodies.includes(id('plate')), J(tur?.bodies.map((b) => prisms[b].name)));
+  // a ramp the file shows down: a plate from x 8 to 20 in front, the chassis from −8
+  const rampParts: P[] = [...parts, ...synth.synthParts([synth.box('ramp', [0.9, 0.8, 0.2], 9.8, 20, -5, 5, 0.2, 0.45)]).map((p) => ({ ...p, body: new Uint32Array(p.positions.length / 3).fill(prisms.length) }))];
+  const dep = motion.findDeployedGroup(rampParts, [{ edge: 'front' }], 'ramp', new Set());
+  check('moving parts 2: a part the file shows past 18 in at the intake edge is offered as the ramp; a model that fits offers nothing', !!dep && dep.role === 'ramp' && dep.bodies.includes(prisms.length) && !dep.bodies.includes(id('plate')) && motion.findDeployedGroup(parts, [{ edge: 'front' }], 'fold', new Set()) === null, J(dep));
+
+  // ---- a body that is two lumps becomes two; a two-colour body stays one ----
+  {
+    const a = synth.synthParts([synth.box('gear', [0.5, 0.5, 0.5], 0, 1, 0, 1, 0, 1), synth.box('channel', [0.5, 0.5, 0.5], 3, 6, 0, 1, 0, 1)]);
+    const mk = (p: (typeof a)[number], b: number): P => {
+      const n = p.positions.length / 3;
+      return { positions: p.positions, indices: Uint32Array.from({ length: n }, (_, i) => i), color: p.color, name: p.name, body: new Uint32Array(n).fill(b) };
+    };
+    // one part, one body id for both lumps (a merged sub-assembly)
+    const merged: P = { positions: new Float32Array([...a[0].positions, ...a[1].positions]), indices: null, color: [0.5, 0.5, 0.5], name: 'm', body: new Uint32Array((a[0].positions.length + a[1].positions.length) / 3).fill(7) };
+    const w = { positions: merged.positions, indices: Uint32Array.from({ length: merged.positions.length / 3 }, (_, i) => i), body: merged.body };
+    const { weld } = await import('../src/robotImport/engine/meshOps');
+    const ww = weld(merged, 1e-6);
+    const made = splitLumps([ww as { positions: Float32Array; indices: Uint32Array; body: Uint32Array | null }], 1e-5);
+    const ids = new Set(Array.from(ww.body ?? []));
+    // a cube in two colours: its faces in two parts, one body
+    const cube = synth.prismTriangles(synth.box('c', [1, 1, 1], 0, 1, 0, 1, 0, 1));
+    const half = (k: number): P => {
+      const tris = cube.filter((_, t) => (t < 6 ? k === 0 : k === 1));
+      const pos = new Float32Array(tris.flat(2));
+      return mk({ positions: pos, indices: null, color: [k, 0, 0], name: 'c' } as never, 3);
+    };
+    const two = [weld(half(0), 1e-6), weld(half(1), 1e-6)];
+    splitLumps(two as never, 1e-5);
+    const twoIds = new Set([...Array.from(two[0].body ?? []), ...Array.from(two[1].body ?? [])]);
+    void w;
+    check(
+      'moving parts 2: a body that is two separate lumps (a gear and a channel exported as one) becomes two, the first keeping its id; a cube in two colours stays one body',
+      made === 1 && ids.size === 2 && ids.has(7) && twoIds.size === 1 && twoIds.has(3),
+      J({ made, ids: [...ids], twoIds: [...twoIds] }),
+    );
+  }
+
+  // ---- generic joints: measured ----
+  const setupMotion: import('../src/robotImport/types').MotionGroup[] = [
+    { role: 'spin', bodies: [id('flywheel')], drive: 'shooter', amount: 5 },
+    { role: 'swing', bodies: [id('hood')], axis: 'left', amount: 45, drive: 'fire' },
+    { role: 'slide', bodies: [id('side_l')], axis: 'up', amount: 6, drive: 'intake' },
+    { role: 'spin', bodies: [id('roller')], follows: { group: 0, ratio: -2 }, rideOn: 2 },
+    { role: 'slide', bodies: [id('side_r')], axis: 'part', axisBody: id('shaft'), amount: 3 },
+    { role: 'swing', bodies: [id('tube')], rideOn: 6 },
+    { role: 'swing', bodies: [id('motor')], rideOn: 5 },
+  ];
+  const mp = motion.deriveMotion(parts, setupMotion, [], [0, 0, 0]);
+  const by = (g: number) => mp.find((p) => p.group === g);
+  const near = (a: readonly number[], b: readonly number[], tol = 1e-6): boolean => a.every((v, i) => Math.abs(v - b[i]) < tol);
+  check(
+    'moving parts 2: a spinning part turns about its own round axle, at its turns a second, moved by its drive',
+    !!by(0) && Math.abs(Math.abs(by(0)!.axis[1]) - 1) < 1e-6 && by(0)!.amount === 5 && by(0)!.drive === 'shooter' && Math.abs(by(0)!.radius - 1.5) < 0.05,
+    J(by(0)),
+  );
+  check(
+    'moving parts 2: a swinging part turns about the chosen robot axis at its root end, by its angle in radians',
+    !!by(1) && near(by(1)!.axis, [0, 1, 0]) && Math.abs(by(1)!.amount! - Math.PI / 4) < 1e-9 && by(1)!.drive === 'fire',
+    J(by(1)),
+  );
+  check('moving parts 2: a sliding part slides along the chosen axis by its inches; one on a picked rail slides along the rail’s long side', near(by(2)!.axis, [0, 0, 1]) && by(2)!.amount === 6 && near(by(4)!.axis, [0, 1, 0]) && by(4)!.amount === 3, J([by(2), by(4)]));
+  check(
+    'moving parts 2: a part geared to another follows it at the ratio, and rides on the part it was put on',
+    !!by(3) && by(3)!.follows?.ratio === -2 && mp[by(3)!.follows!.index].group === 0 && mp[by(3)!.parent].group === 2,
+    J(by(3)),
+  );
+  check('moving parts 2: two parts each riding on the other are cut where the chain closes (no loop)', mp.filter((p) => p.group === 5 || p.group === 6).some((p) => p.parent === -1), J(mp.filter((p) => p.group >= 5).map((p) => p.parent)));
+
+  // ---- stored, and read back ----
+  const scene = storedSceneOf(parts, mp, { x: 0, y: 0 }, { v: 1, id: '0123456789abcdef', hull: [{ x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }, { x: -8, y: -8 }], heightIn: 12 });
+  const infos = scene.moving.map((m) => rtypes.readStoredMotion(JSON.parse(J(m.info))));
+  const f = infos.find((i) => i?.follow);
+  check(
+    'moving parts 2: the stored joints keep their drive, amount, id and the follow by id, and every one reads back',
+    infos.every((i) => i !== null) && infos.every((i, k) => i!.id === k) && !!f && f.follow!.ratio === -2 && infos[f.follow!.id]?.role === 'spin' && infos.some((i) => i?.role === 'slide' && i.amount === 6 && i.drive === 'intake'),
+    J(infos),
+  );
+  check(
+    'moving parts 2: a stored joint is checked like the rest: an unknown drive dropped, an amount clamped, a bad follow dropped',
+    (() => {
+      const r = rtypes.readStoredMotion({ v: 1, role: 'slide', axis: [0, 0, 1], radius: 0, deploy: 0, drive: 'laser', amount: 1e9, follow: { id: -1, ratio: 2 } });
+      return !!r && r.drive === undefined && r.amount === 60 && r.follow === undefined;
+    })(),
+  );
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);
