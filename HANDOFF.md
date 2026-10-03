@@ -1,3 +1,12 @@
+# HANDOFF — 2026-10-02e (robot import: real FTC CAD imports; polish lane interrupted)
+
+**State: `feat/robot-import` has swerve (alpha), integration fixes, fixed shooters/hoods and real-CAD import merged.** Shared suite 3702 pass (`--shards=4`); tsc and `server:check` clean on the merge. Not on `alpha`/`main`, feature not deployed (alpha server runs alpha `79a14c80`, swerve included).
+
+- **Real CAD:** big STEP is read in pieces past occt-import-js's 2 GB wasm heap (the REV starter bot meshed to nothing because every allocation failed); zipped STEP is read as downloaded; a cut-off STEP is named; fasteners under 16 mm are skipped in big files; 3MF parses in the import worker; front detection says Detected or Assumed. Starter bots imported end to end: REV DUO DECODE (125 MB, 69 s), goBILDA DECODE mecanum (390 MB in a 58 MB zip, 155 s), goBILDA BIOBUZZ (420 MB in a 66 MB zip, 159 s); goBILDA DECODE skid-steer STEP is truncated at the source. Report: session scratchpad `realcad-report.md`.
+- **Interrupted (usage limit):** the polish lane, worktree `.claude/worktrees/agent-a1bf18765ae314259`, branch `robot-import-polish2`; its uncommitted/committed work is there. Its list: server-side protection so older clients cannot strip `spec.imported` from the synced settings; stale mesh on another device after an edit; relay refusal line and keep-last-good-asset; no IndexedDB created just to look; elements resting on an import's top in 3D; lazy relay client; shiftaudit/importpad with seeded imports; captures of the fixed-shooter controls; `bench:ai` for the BIOBUZZ StarterBot.
+- **Not started:** DECODE hand loading for a no-intake robot (`intake: 'none'` + human-player hand-off in the LOADING ZONE; design in `fixed-shooter-report.md`), so the DECODE StarterBot card still has a sloped intake; measuring the real hood angles from the starter-bot CAD (70° DECODE / 77° BIOBUZZ are guesses).
+- **Owner decisions:** BIOBUZZ flywheel presets need a button (only D-pad down is free); imports simulate the starting configuration only.
+
 # HANDOFF — 2026-10-02d (fixed shooters and fixed hoods, merged on `feat/robot-import`)
 
 **State: merged on `feat/robot-import`; nothing deployed (server change: sim, coercer and a command bit).** At the last commit: `smokeshard --shards=4` 3648, `bbshard --shards=3` 5491 (ROBOT and RENDER lanes re-run green after the fixes), `build`, `server:check`, `bundleaudit`, `uiaudit`, `docaudit`, `contrast` pass. Server code changed (sim, coercer, command bit 1024), so it needs a server deploy with the client.
