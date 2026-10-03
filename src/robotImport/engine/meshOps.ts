@@ -9,9 +9,14 @@ import type { MeshPart } from '../geometry';
  * Weld vertices closer than `eps` (same units as the positions): CAD exports split every vertex
  * per face, and the simplifier needs shared vertices to see topology. Open-addressed hash on the
  * quantised position; exact compare on collision. Degenerate triangles are dropped.
+ *
+ * ⚠️ TWO BODIES ARE NEVER WELDED TOGETHER (`MeshPart.body`): a roller touching its axle at one
+ * corner would otherwise share a vertex with it, and a triangle's body would depend on which corner
+ * it is read from. A part without bodies welds exactly as before.
  */
-export function weld(part: MeshPart, eps: number): { positions: Float32Array; indices: Uint32Array } {
+export function weld(part: MeshPart, eps: number): { positions: Float32Array; indices: Uint32Array; body: Uint32Array | null } {
   const src = part.positions;
+  const bodyIn = part.body ?? null;
   const nVert = src.length / 3;
   const inv = 1 / eps;
   let cap = 1;
@@ -19,12 +24,14 @@ export function weld(part: MeshPart, eps: number): { positions: Float32Array; in
   const table = new Int32Array(cap).fill(-1);
   const remap = new Uint32Array(nVert);
   const out = new Float32Array(src.length);
+  const bodyOut = bodyIn ? new Uint32Array(nVert) : null;
   let count = 0;
   for (let i = 0; i < nVert; i++) {
     const x = Math.round(src[3 * i] * inv);
     const y = Math.round(src[3 * i + 1] * inv);
     const z = Math.round(src[3 * i + 2] * inv);
-    let h = (Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) & (cap - 1);
+    const bd = bodyIn ? bodyIn[i] : 0;
+    let h = (Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791) ^ (bodyIn ? Math.imul(bd, 40503) : 0)) & (cap - 1);
     for (;;) {
       const slot = table[h];
       if (slot < 0) {
@@ -32,13 +39,19 @@ export function weld(part: MeshPart, eps: number): { positions: Float32Array; in
         out[3 * count] = src[3 * i];
         out[3 * count + 1] = src[3 * i + 1];
         out[3 * count + 2] = src[3 * i + 2];
+        if (bodyOut) bodyOut[count] = bd;
         remap[i] = count++;
         break;
       }
       // the slot's quantised position is recomputed from the vertex it holds (the same float32, so
       // the same integers; `| 0` is the Int32Array store the old arrays did) instead of being kept
       // in three more arrays: 12 bytes a vertex, 140 MB on an un-indexed 4M-triangle STL
-      if ((Math.round(out[3 * slot] * inv) | 0) === x && (Math.round(out[3 * slot + 1] * inv) | 0) === y && (Math.round(out[3 * slot + 2] * inv) | 0) === z) {
+      if (
+        (Math.round(out[3 * slot] * inv) | 0) === x &&
+        (Math.round(out[3 * slot + 1] * inv) | 0) === y &&
+        (Math.round(out[3 * slot + 2] * inv) | 0) === z &&
+        (!bodyOut || bodyOut[slot] === bd)
+      ) {
         remap[i] = slot;
         break;
       }
@@ -58,14 +71,19 @@ export function weld(part: MeshPart, eps: number): { positions: Float32Array; in
     tris[t++] = b;
     tris[t++] = c;
   }
-  return { positions: out.slice(0, count * 3), indices: tris.slice(0, t) };
+  return { positions: out.slice(0, count * 3), indices: tris.slice(0, t), body: bodyOut ? bodyOut.slice(0, count) : null };
 }
 
-/** drop vertices no triangle uses, renumbering the indices */
-export function compact(positions: Float32Array, indices: Uint32Array): { positions: Float32Array; indices: Uint32Array } {
+/** drop vertices no triangle uses, renumbering the indices (and carrying each vertex's body) */
+export function compact(
+  positions: Float32Array,
+  indices: Uint32Array,
+  body: Uint32Array | null = null,
+): { positions: Float32Array; indices: Uint32Array; body: Uint32Array | null } {
   const n = positions.length / 3;
   const map = new Int32Array(n).fill(-1);
   const out = new Float32Array(positions.length);
+  const bodyOut = body ? new Uint32Array(n) : null;
   const idx = new Uint32Array(indices.length);
   let count = 0;
   for (let i = 0; i < indices.length; i++) {
@@ -76,11 +94,46 @@ export function compact(positions: Float32Array, indices: Uint32Array): { positi
       out[3 * count] = positions[3 * v];
       out[3 * count + 1] = positions[3 * v + 1];
       out[3 * count + 2] = positions[3 * v + 2];
+      if (bodyOut) bodyOut[count] = body![v];
       count++;
     }
     idx[i] = m;
   }
-  return { positions: out.slice(0, count * 3), indices: idx };
+  return { positions: out.slice(0, count * 3), indices: idx, body: bodyOut ? bodyOut.slice(0, count) : null };
+}
+
+/**
+ * BODIES FOR A MODEL THAT HAS NONE: one per CONNECTED PIECE of a welded mesh (an STL, a PLY, a glTF
+ * exported as one mesh). A CAD export keeps its solids apart, so a roller, its axle and each wheel
+ * come out as pieces of their own. Ids start at `first`; returns the per-vertex ids and how many.
+ */
+export function componentBodies(nVert: number, indices: Uint32Array, first = 0): { body: Uint32Array; count: number } {
+  const parent = new Int32Array(nVert);
+  for (let i = 0; i < nVert; i++) parent[i] = i;
+  const find = (v: number): number => {
+    while (parent[v] !== v) {
+      parent[v] = parent[parent[v]];
+      v = parent[v];
+    }
+    return v;
+  };
+  for (let t = 0; t + 2 < indices.length; t += 3) {
+    const a = find(indices[t]);
+    const b = find(indices[t + 1]);
+    if (a !== b) parent[b] = a;
+    const r = find(a);
+    const c = find(indices[t + 2]);
+    if (r !== c) parent[c] = r;
+  }
+  const id = new Int32Array(nVert).fill(-1);
+  const body = new Uint32Array(nVert);
+  let count = 0;
+  for (let v = 0; v < nVert; v++) {
+    const r = find(v);
+    if (id[r] < 0) id[r] = count++;
+    body[v] = first + id[r];
+  }
+  return { body, count };
 }
 
 /**
@@ -94,7 +147,8 @@ export function creasedNormals(
   positions: Float32Array,
   indices: Uint32Array,
   creaseDeg = 40,
-): { positions: Float32Array; normals: Float32Array; indices: Uint32Array } {
+  body: Uint32Array | null = null,
+): { positions: Float32Array; normals: Float32Array; indices: Uint32Array; body: Uint32Array | null } {
   const nV = positions.length / 3;
   const nT = indices.length / 3;
   const fn = new Float32Array(nT * 3); // area-weighted face normal (unnormalised)
@@ -130,6 +184,7 @@ export function creasedNormals(
   const cosC = Math.cos((creaseDeg * Math.PI) / 180);
   const outPos: number[] = [];
   const outNrm: number[] = [];
+  const outBody: number[] = [];
   const outIdx = new Uint32Array(indices.length);
   // per vertex, the output vertices made so far (their normals), to share between corners
   for (let v = 0; v < nV; v++) {
@@ -163,6 +218,7 @@ export function creasedNormals(
         id = outPos.length / 3;
         outPos.push(positions[3 * v], positions[3 * v + 1], positions[3 * v + 2]);
         outNrm.push(sx, sy, sz);
+        if (body) outBody.push(body[v]);
         made.push({ nx: sx, ny: sy, nz: sz, id });
       }
       // which corner of t is v
@@ -170,7 +226,7 @@ export function creasedNormals(
       outIdx[3 * t + c] = id;
     }
   }
-  return { positions: new Float32Array(outPos), normals: new Float32Array(outNrm), indices: outIdx };
+  return { positions: new Float32Array(outPos), normals: new Float32Array(outNrm), indices: outIdx, body: body ? Uint32Array.from(outBody) : null };
 }
 
 /** the crease angle every importer normal is computed at, degrees */
@@ -180,8 +236,8 @@ export const CREASE_DEG = 40;
 export function creaseParts(parts: readonly MeshPart[]): MeshPart[] {
   return parts.map((p) => {
     if (p.normals || !p.indices) return p;
-    const c = creasedNormals(p.positions, p.indices, CREASE_DEG);
-    return { positions: c.positions, indices: c.indices, normals: c.normals, color: p.color, name: p.name };
+    const c = creasedNormals(p.positions, p.indices, CREASE_DEG, p.body ?? null);
+    return { positions: c.positions, indices: c.indices, normals: c.normals, color: p.color, name: p.name, body: c.body };
   });
 }
 
@@ -235,12 +291,15 @@ export function concatParts(g: readonly MeshPart[]): MeshPart {
   }
   const positions = new Float32Array(nPos);
   const indices = new Uint32Array(nIdx - (nIdx % 3));
+  // bodies when any part has them (a part without any is body 0)
+  const body = g.some((p) => p.body) ? new Uint32Array(nPos / 3) : null;
   let po = 0;
   let io = 0;
   const col = [0, 0, 0];
   let w = 0;
   for (const p of g) {
     positions.set(p.positions, po);
+    if (body && p.body) body.set(p.body, po / 3);
     const base = po / 3;
     if (p.indices) {
       for (let i = 0; i < p.indices.length && io < indices.length; i++) indices[io++] = p.indices[i] + base;
@@ -252,7 +311,7 @@ export function concatParts(g: readonly MeshPart[]): MeshPart {
     w += weight;
     po += p.positions.length;
   }
-  return { positions, indices, color: [col[0] / w, col[1] / w, col[2] / w], name: g[0].name };
+  return { positions, indices, color: [col[0] / w, col[1] / w, col[2] / w], name: g[0].name, body };
 }
 
 /**
@@ -289,8 +348,8 @@ export function splitByVertexColour(part: MeshPart, colors: Float32Array, stride
   const out: MeshPart[] = [];
   for (const [k, list] of groups) {
     const s = sums.get(k)!;
-    out.push({ positions: part.positions, indices: Uint32Array.from(list), color: [s[0] / s[3], s[1] / s[3], s[2] / s[3]], name: part.name });
+    out.push({ positions: part.positions, indices: Uint32Array.from(list), color: [s[0] / s[3], s[1] / s[3], s[2] / s[3]], name: part.name, body: part.body ?? null });
   }
   // each split part shares the whole position array; compact so sizes are honest
-  return out.map((p) => ({ ...p, ...compact(p.positions, p.indices!) }));
+  return out.map((p) => ({ ...p, ...compact(p.positions, p.indices!, p.body ?? null) }));
 }

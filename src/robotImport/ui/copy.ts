@@ -7,7 +7,17 @@
  * library's `LibraryResult.message`) are written to the same rules in their own files and shown as
  * they come; this file is what the UI adds around them.
  */
-import type { LengthUnit, UpAxis } from '../types';
+import type { LengthUnit, MotionPart, MotionRole, UpAxis } from '../types';
+
+const ROLE_NAME: Record<MotionRole, string> = {
+  wheel: 'Wheel',
+  roller: 'Intake roller',
+  flywheel: 'Flywheel',
+  turret: 'Turret',
+  ramp: 'Ramp',
+  fold: 'Folding part',
+};
+const CORNER_NAME = ['Front-left wheel', 'Front-right wheel', 'Back-left wheel', 'Back-right wheel'];
 import { FORMAT_LABEL, PAGE_COPY } from './pageCopy';
 
 export { FORMAT_LABEL };
@@ -171,6 +181,33 @@ export const COPY = {
   placed: (label: string, x: number, y: number, z?: number) => `${label}: ${where(x, y, z)}`,
   span: (label: string, w: number, c: number) => `${label}: ${w.toFixed(1)} in wide, centred ${c.toFixed(1)} in along the edge`,
   noHandles: 'Pick the mechanisms above to place them here.',
+  moving: 'Moving parts',
+  movingHint:
+    'What turns or folds in a match. Press Pick parts, then click parts in the preview. A click on a wheel, roller or flywheel takes its whole axle; Shift-click takes one part.',
+  motionRole: (role: MotionRole, corner?: number) =>
+    role === 'wheel' && corner !== undefined ? (CORNER_NAME[corner] ?? ROLE_NAME.wheel) : (ROLE_NAME[role] ?? 'Moving part'),
+  motionDetail: (role: MotionRole, n: number, p?: MotionPart) => {
+    const parts = `${n} ${n === 1 ? 'part' : 'parts'}`;
+    if (!p || typeof p !== 'object') return `${parts}. Couldn’t find how it turns, so it stays still. Pick its round part.`;
+    if (role === 'ramp' || role === 'fold') return `${parts}, deploys ${Math.round((p.deploy * 180) / Math.PI)}°`;
+    if (role === 'turret') return parts;
+    return `${parts}, ${(2 * p.radius).toFixed(1)} in across`;
+  },
+  motionEmpty: 'Nothing picked yet',
+  motionPick: 'Pick parts',
+  motionDone: 'Done',
+  motionReverse: 'Reverse',
+  motionRemove: 'Remove',
+  motionRemoveAria: (label: string) => `Remove ${label}`,
+  motionFileAria: 'How the file shows it',
+  motionFile: { deployed: 'File shows it deployed', folded: 'File shows it folded' },
+  motionFoldBy: 'Folds up by',
+  motionDeployBy: 'Deploys by',
+  motionFindWheels: 'Find wheels',
+  motionFindAgain: 'Find wheels again',
+  motionAdd: (role: MotionRole) => `Add ${(ROLE_NAME[role] ?? 'moving part').toLowerCase()}`,
+  motionPlay: 'Play',
+  motionStop: 'Stop',
 
   // ---- Review ----
   checks: 'Checks',

@@ -2,16 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GameSettings } from '../../game';
 import type { ImportedMech, RobotSpec, Vec2 } from '../../types';
 import { coerceSpec } from '../../sim/spawn';
+import { bbIntakeKindOf } from '../../games/biobuzz/mechs';
 import { seasonFor } from '../../seasons';
 import { FOCUSABLE } from '../../ui/PadNavLayer';
 import { loadImporterEngine, type ImporterEngine } from '../engineLoader';
 import type { ImportProgress, NormalisedModel, PreparedModel } from '../engine/importerEngine';
 import type { LoadStage } from '../engine/load';
+import { wheelDiameterMm } from '../drive';
 import { defaultImportSetup, orientKey, transformParts } from '../geometry';
+import { coaxialBodies, findWheelGroups, isSpin, motionAsStored, mountedBodies } from '../motion';
 import { deleteRobot, getRobot, listRobots, newRobotId, putRobot } from '../library';
 import { editSaveId, planShareAdd } from '../libraryIds';
 import { readShareFile, type SharePayload } from '../shareFile';
-import { STORED_MESH_TO_ROBOT, type ImportSetup, type LibraryRobot } from '../types';
+import { STORED_MESH_TO_ROBOT, type ImportSetup, type LibraryRobot, type MotionGroup } from '../types';
 import { defaultMechFor, mechHandlesFor, mechRobotToModel, validateMechFor } from './placement';
 import { invalidateImportedAssets, registerImportedAssets, unregisterImportedAssets } from '../../render/importedAssets';
 import { COPY } from './copy';
@@ -39,6 +42,7 @@ import { libraryChanged, postRobotNotice, takeHandedFiles } from './handoff';
 import { ConfirmDialog, DuplicateDialog } from './LibraryDialogs';
 import { MechanismsStep } from './MechanismsStep';
 import { ModelStep } from './ModelStep';
+import { MotionPanel } from './MotionPanel';
 import { PreviewPane } from './PreviewPane';
 import { ReviewStep } from './ReviewStep';
 import { TopDownMap } from './TopDownMap';
@@ -121,6 +125,9 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   const [selWheel, setSelWheel] = useState(0);
   const [mirror, setMirror] = useState(true);
   const [selHandle, setSelHandle] = useState<string | null>(null);
+  /** the moving part being picked in the preview, or null; and whether the preview runs them */
+  const [activeMotion, setActiveMotion] = useState<number | null>(null);
+  const [playing, setPlaying] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<
@@ -200,7 +207,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         setPhase({ title: name, label: COPY.phase.measure });
         const cur = draftRef.current;
         const baseDoc = cur?.doc ?? freshDoc(settings, key, editId);
-        let setup: ImportSetup = { ...baseDoc.setup, units: 'auto', up: 'auto', yaw: 0, wheels: null, ...opts.setup };
+        // a new file's moving parts are looked for afresh: the bodies are numbered per file
+        let setup: ImportSetup = { ...baseDoc.setup, units: 'auto', up: 'auto', yaw: 0, wheels: null, motion: undefined, ...opts.setup };
         // the first measurement in the measure worker; `normalise` then answers from its cache
         await e.prepareMeasure(prepared, setup);
         if (my !== gen.current) {
@@ -251,6 +259,8 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         };
         const replaced = draftRef.current?.model;
         if (replaced && replaced !== prepared) e.releaseModel(replaced as PreparedModel);
+        setActiveMotion(null);
+        setPlaying(false);
         setDraft({ doc, model: prepared, modelStored: false, baked: null });
         setPhase(null);
       } catch (err) {
@@ -524,6 +534,10 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
   };
   const blocked = blocks(items) > 0;
 
+  /** the setup as the stored mesh needs it: the hinged parts already folded (`motionAsStored`) */
+  const storedSetup = (s: ImportSetup): ImportSetup =>
+    s.motion ? { ...s, motion: motionAsStored(s.motion, normalised?.measurement.motion) } : s;
+
   const finalSpec = (): RobotSpec | null => {
     if (!built || !doc) return null;
     const name = (doc.spec.name.trim() || baseName(doc.source?.name ?? 'Robot')).slice(0, 24);
@@ -536,7 +550,12 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
     if (!cur || !e || !normalised || measuring || !built?.spec.imported) return null;
     const stamp = JSON.stringify([cur.doc.setup, cur.doc.mech, built.spec.imported]);
     if (cur.baked?.stamp === stamp) return cur.baked;
-    const r = await e.bake({ modelParts: normalised.modelParts, origin: normalised.measurement.origin, descriptor: built.spec.imported });
+    const r = await e.bake({
+      modelParts: normalised.modelParts,
+      origin: normalised.measurement.origin,
+      descriptor: built.spec.imported,
+      motion: normalised.measurement.motion,
+    });
     const baked = { stamp, mesh: r.mesh, top: r.top, thumb: r.thumb, trisOut: r.trisOut };
     cur.baked = baked;
     return baked;
@@ -575,7 +594,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         top: b.top,
         thumb: b.thumb,
         source: { ...cur.doc.source, trisOut: b.trisOut },
-        setup: cur.doc.setup,
+        setup: storedSetup(cur.doc.setup),
         created: cur.doc.created ?? now,
         updated: now,
       });
@@ -613,7 +632,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
       const b = await ensureBaked();
       const cur = draftRef.current;
       if (!spec || !b || !cur) return;
-      const bytes = await shareBytes(b.mesh, { game, spec, setup: cur.doc.setup, name: spec.name });
+      const bytes = await shareBytes(b.mesh, { game, spec, setup: storedSetup(cur.doc.setup), name: spec.name });
       downloadBytes(bytes, shareFileName(spec.name));
     });
 
@@ -640,6 +659,47 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
     setWheelDrag(null);
     update((d) => ({ ...d, setup: { ...d.setup, wheels: next } }));
   };
+
+  // ---- moving parts ----------------------------------------------------------------------------
+  const motion = doc?.setup.motion;
+  const findWheels = (): MotionGroup[] =>
+    normalised && baseWheels && doc
+      ? findWheelGroups(normalised.modelParts, baseWheels, doc.setup.drive.drivetrain, wheelDiameterMm(doc.setup.drive.wheel) / 25.4)
+      : [];
+  // the drive wheels are looked for once, on a setup that has never had moving parts
+  useEffect(() => {
+    if (!doc || !normalised || measuring || !baseWheels || doc.setup.motion !== undefined) return;
+    const found = findWheels();
+    update((d) => (d.setup.motion === undefined ? { ...d, setup: { ...d.setup, motion: found } } : d));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.setup.motion, normalised, measuring, baseWheels]);
+  const setMotion = (next: MotionGroup[]): void => update((d) => ({ ...d, setup: { ...d.setup, motion: next } }));
+  const picking = step === 2 && activeMotion !== null && !!motion?.[activeMotion];
+  // a click in the preview: the part under it (and, for something that spins, its axle; for the rest,
+  // what is mounted on it) joins the group being picked, or leaves it when it is already in it.
+  // A body belongs to one moving part at a time.
+  const onPickBody = (body: number, shift: boolean): void => {
+    if (!picking || !normalised || !motion || activeMotion === null) return;
+    const g = motion[activeMotion];
+    const parts = normalised.modelParts;
+    const take = shift ? [body] : isSpin(g.role) ? coaxialBodies(parts, body, g.role) : mountedBodies(parts, body);
+    const leaving = g.bodies.includes(body);
+    const set = new Set(take);
+    const next = motion.map((o, i) => {
+      if (i === activeMotion) {
+        const bodies = leaving ? o.bodies.filter((b) => !set.has(b)) : [...new Set([...o.bodies, ...take])].sort((a, b) => a - b);
+        return { ...o, bodies };
+      }
+      return leaving ? o : { ...o, bodies: o.bodies.filter((b) => !set.has(b)) };
+    });
+    setMotion(next);
+  };
+  const highlight = useMemo(() => {
+    if (step !== 2 || !motion) return null;
+    const active = activeMotion !== null ? (motion[activeMotion]?.bodies ?? []) : [];
+    const others = motion.flatMap((g, i) => (i === activeMotion ? [] : g.bodies));
+    return active.length || others.length ? { active, others } : null;
+  }, [step, motion, activeMotion]);
 
   // ---- render ----------------------------------------------------------------------------------
   if (notFound) {
@@ -680,6 +740,10 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         mech: doc.mech,
         size: m.size,
         showCube: true,
+        motion: m.motion ?? null,
+        playing: playing && step === 2 && !picking,
+        highlight: playing ? null : highlight,
+        picking,
       }
     : null;
 
@@ -699,6 +763,25 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         onSelect={setSelHandle}
         onMech={(next: ImportedMech) => update((d) => ({ ...d, mech: next }))}
         onReset={() => update((d) => ({ ...d, mech: null }))}
+        moving={
+          <MotionPanel
+            rampOk={game === 'biobuzz' && bbIntakeKindOf(built.spec) === 'ramp'}
+            groups={motion ?? []}
+            parts={m.motion ?? []}
+            active={picking ? activeMotion : null}
+            playing={playing}
+            onActive={(i) => {
+              setActiveMotion(i);
+              if (i !== null) setPlaying(false);
+            }}
+            onChange={setMotion}
+            onFindWheels={() => setMotion([...(motion ?? []).filter((g) => g.role !== 'wheel'), ...findWheels()])}
+            onPlay={(on) => {
+              setPlaying(on);
+              if (on) setActiveMotion(null);
+            }}
+          />
+        }
       />
     ) : null;
 
@@ -753,6 +836,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         <PreviewPane
           eng={eng}
           state={previewState}
+          onPickBody={onPickBody}
           empty={<p className="ds-hint ds-import-preview-empty">{COPY.previewEmpty}</p>}
           fallback={
             m ? (

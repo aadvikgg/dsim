@@ -286,6 +286,46 @@ BIOBUZZ's `fixed` kind); the Mechanisms step then draws a ray from the point and
 4 in out along it (`shape: 'aim'`), dragged round the point, plus a Facing field (15° steps). Home
 puts the game's pre-fill back (DECODE forward, BIOBUZZ its edge).
 
+## Moving parts
+
+`ImportSetup.motion` (`MotionGroup[]`, `src/robotImport/motion.ts`) says which CAD bodies move in a
+match: `wheel`, `roller`, `flywheel` spin about their own axle, `turret` turns about a vertical axis,
+`ramp` (BIOBUZZ's deployable intake) and `fold` swing about a hinge. It is FRAME-FREE (body ids and
+choices, never positions), so a units or yaw change keeps it. Absent = never looked for: the editor
+finds the drive wheels once (`findWheelGroups`, every body wholly inside each wheel's cylinder at a
+floor contact). `[]` = none.
+
+- **Bodies.** `MeshPart.body` is a per-vertex id: one per mesh instance from a reader, one per STEP
+  solid, the connected pieces when a file has only one. Weld never joins two bodies; weld, compact,
+  crease, merge and simplify all carry it. The stored GLB writes it as `_BODY` (the relay's
+  validator allows it, 16- or 32-bit unsigned, one per vertex), so an edit of a saved robot can pick
+  parts again. The lighter relay mesh drops it.
+- **Picking** (Mechanisms step, Moving parts): a click on a spinning part takes everything on its
+  axle (`coaxialBodies`; a wheel keeps to its own width, since the opposite wheel is often on the
+  same line); on anything else, the smaller bodies inside its box (`mountedBodies`: a plate's
+  hardware). Shift takes one body. A body is in one group at a time.
+- **A hinged part the file shows DEPLOYED is measured FOLDED.** `planFolds` runs in the measurement's
+  rotated frame before the box, hull and contacts: the hinge is level, square to the direction the
+  part sits out from the robot, through its innermost point; it folds up until its far end is over
+  the hinge (or by `foldDeg`). That is how a robot whose CAD has its ramp out fits the 18-in start.
+  A spinning part whose box centre is inside the hinged part's box rides on it and folds with it.
+  `toModelFrame` re-applies the folds at the same step, so the main thread rebuilds the worker's
+  model frame bit for bit. Use the box centre, not the vertex mean, for "inside": a fanned cap puts
+  half a cylinder's vertices on one rim point.
+- **Saved folded.** The stored mesh is in the starting pose, so Save and Export rewrite a deployed
+  hinge as `filePose: 'folded'` with the measured `deployDeg` (`motionAsStored`). A folded part's
+  hinge is at its foot (the lowest band), which is where the deployed rule put it, so a reopened
+  robot hinges in the same place (smoke: within 0.6 in).
+- **Stored GLB.** Each moving part is a node at its pivot, its geometry relative to it, with
+  `extras.dsim` (`StoredMotion`: role, unit axis, radius, deploy angle, wheel corner); a rider is its
+  carrier's child. A viewer that ignores it draws the starting pose. `readStoredMotion` validates
+  every field, since a relayed mesh is another player's file.
+- **Animated** in BIOBUZZ 3D by `poseImportMotion` (`renderRobots.ts`), off the same state the
+  standard parts read: a wheel at its contact patch's speed (mecanum through its 45° rollers, swerve
+  along its pod), a roller while the intake runs, a flywheel at `flyRpm`, a turret at its yaw, a
+  ramp off `bbRampOut`. Drawn spin is capped at 26 rad/s, past which a spoked wheel strobes. The
+  editor's preview has Play for the same, with fixed rates.
+
 ## Relayed to a room (VISUALS RELAY)
 
 The picture and mesh live on the owner's device, so a custom or LAN room relays them (`docs/area/netcode.md`, VISUALS RELAY has the wire, budgets and validation). What the importer owns:
@@ -294,7 +334,7 @@ The picture and mesh live on the owner's device, so a custom or LAN room relays 
 - **`liteMesh`** (`engine/lite.ts`, reached through `loadImporterEngine()`) makes the 1 MiB mesh when the stored one (≤ 4 MB) is bigger. It does NOT go back through `normalise`/`bake`: a re-measure could re-detect the wheels or the origin and land the mesh a hair off the footprint the sim was told about. It reads the stored GLB, simplifies the same vertices with the importer's simplifier, re-creases the normals and writes it back in the SAME stored mesh frame, so a viewer places it with `STORED_MESH_TO_ROBOT` exactly as the full one. Measured against real GLTFExporter output: 140k triangles, 2.5 MB → 0.9 MB, bounding box unchanged to 0.1 mm, both colours kept. It returns null below 400 triangles, and the relay then sends the picture alone.
 - **`meshLite`** is cached on the library record (`LibraryRobot.meshLite`, `meshLiteFor`, `putMeshLite`; the file key `<id>:meshLite`). `putRobot` drops it unless the save carries one, because the mesh it was cut from may have changed; `deleteRobot` removes it; `getRobot` returns it when present. It is never required.
 - **A viewer sees what the owner's device would**: the relayed blobs are lent to the renderers' registry, which prefers a lent blob over the library, and are taken back when the room is left or the viewer turns "Show other players’ imported robots" off. A lent blob carries its LENDER (`registerImportedAssets(id, assets, lender)`): `''` is this device (the editor's draft) and always wins; `relay:<owner>` is a room's, and never replaces another lender's look for that id.
-- **The relayed mesh must be what the exporter writes and nothing more.** The relay's GLB check (`validateMeshGlb`) is an allowlist sized to `exportGlbStored`'s output: no glTF extensions, no images or textures, only POSITION/NORMAL/TANGENT/COLOR_0/TEXCOORD_0-1 attributes, nodes with a mesh, children and a transform. If the bake ever writes something new (a material extension, quantised attributes), add it to `VISUAL_GLB_EXTENSIONS` or the key lists WITH a check of its fields, or every relayed mesh is refused and viewers see outlines.
+- **The relayed mesh must be what the exporter writes and nothing more.** The relay's GLB check (`validateMeshGlb`) is an allowlist sized to `exportGlbStored`'s output: no glTF extensions, no images or textures, only POSITION/NORMAL/TANGENT/COLOR_0/TEXCOORD_0-1 and `_BODY` attributes, nodes with a mesh, children and a transform. If the bake ever writes something new (a material extension, quantised attributes), add it to `VISUAL_GLB_EXTENSIONS` or the key lists WITH a check of its fields, or every relayed mesh is refused and viewers see outlines.
 - **A host that draws frames in one burst must wait for them.** The pictures and meshes load
   lazily (a draw asks, a later task delivers), which a live view never notices and the replay
   export did: it draws every frame before the browser gets a turn, so a file made from a viewer

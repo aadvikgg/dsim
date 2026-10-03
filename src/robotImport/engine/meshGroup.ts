@@ -17,6 +17,13 @@ export function geometryOf(p: MeshPart): THREE.BufferGeometry {
     const nV = p.positions.length / 3;
     g.setIndex(new THREE.BufferAttribute(nV < 65536 ? Uint16Array.from(p.indices) : p.indices, 1));
   }
+  // the body ids (`MeshPart.body`), as a custom attribute: GLTFExporter writes it `_BODY` and the
+  // loader reads it back as `_body` (`parse.ts`, `bodyIdsOf`), so a stored robot keeps its parts
+  if (p.body && p.body.length === p.positions.length / 3) {
+    let max = 0;
+    for (let i = 0; i < p.body.length; i++) if (p.body[i] > max) max = p.body[i];
+    g.setAttribute('_body', new THREE.BufferAttribute(max < 65536 ? Uint16Array.from(p.body) : p.body, 1));
+  }
   if (!p.normals) g.computeVertexNormals();
   g.computeBoundingSphere();
   return g;

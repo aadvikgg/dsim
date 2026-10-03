@@ -7,7 +7,7 @@
  */
 import { MeshoptSimplifier } from 'three/examples/jsm/libs/meshopt_simplifier.module.js';
 import { triangleCount, type MeshPart } from '../geometry';
-import { compact, weld } from './meshOps';
+import { compact, componentBodies, weld } from './meshOps';
 
 export interface SimplifyReport {
   parts: MeshPart[];
@@ -61,24 +61,35 @@ export async function simplifyParts(
   // one's arrays are let go as soon as its welded copy exists, instead of all of them living until
   // the end beside their copies
   const src = parts as (MeshPart | null)[];
-  const welded: { part: Pick<MeshPart, 'color' | 'name'>; positions: Float32Array; indices: Uint32Array }[] = [];
+  const welded: { part: Pick<MeshPart, 'color' | 'name'>; positions: Float32Array; indices: Uint32Array; body: Uint32Array | null }[] = [];
   for (let i = 0; i < src.length; i++) {
     const p = src[i]!;
     welded.push({ part: { color: p.color, name: p.name }, ...weld(p, eps) });
     tick(triangleCount([p]), 0, 0.25);
     if (opts.consume) src[i] = null;
   }
+  // A MODEL WITH NO BODIES OF ITS OWN (an STL, a PLY, a glTF exported as one mesh, or a reader that
+  // gave every vertex one id) gets one per connected piece of the welded mesh, numbered across the
+  // parts. Positions and indices are untouched: only `body` is added.
+  if (distinctBodies(welded) <= 1) {
+    let next = 0;
+    for (const w of welded) {
+      const c = componentBodies(w.positions.length / 3, w.indices, next);
+      w.body = c.body;
+      next += c.count;
+    }
+  }
   doneTris = 0;
   const weldedTris = welded.reduce((s, w) => s + w.indices.length / 3, 0);
   const out: MeshPart[] = [];
   let error = 0;
   if (weldedTris <= budget) {
-    for (const w of welded) if (w.indices.length) out.push({ ...compact(w.positions, w.indices), color: w.part.color, name: w.part.name });
+    for (const w of welded) if (w.indices.length) out.push({ ...compact(w.positions, w.indices, w.body), color: w.part.color, name: w.part.name });
     return { parts: out, trisIn, trisOut: weldedTris, error: 0 };
   }
   // meshopt lands NEAR a target, not on it (and the 12-triangle floor adds a little), so the
   // budget is a ceiling enforced by re-running the pass on its own result, aimed lower each time
-  let current = welded.map((w) => ({ positions: w.positions, indices: w.indices, part: w.part }));
+  let current = welded.map((w) => ({ positions: w.positions, indices: w.indices, part: w.part, body: w.body }));
   let total = weldedTris;
   let aim = budget;
   for (let pass = 0; pass < 4 && total > budget; pass++) {
@@ -103,12 +114,25 @@ export async function simplifyParts(
       }
       if (pass === 0) tick(n, 0.25, 0.75);
       if (idx.length < 3) continue;
-      next.push({ positions: w.positions, indices: idx, part: w.part });
+      next.push({ positions: w.positions, indices: idx, part: w.part, body: w.body });
     }
     current = next;
     total = current.reduce((s, w) => s + w.indices.length / 3, 0);
     aim = Math.floor(aim * (budget / Math.max(total, 1)) * 0.995);
   }
-  for (const w of current) out.push({ ...compact(w.positions, w.indices), color: w.part.color, name: w.part.name });
+  for (const w of current) out.push({ ...compact(w.positions, w.indices, w.body), color: w.part.color, name: w.part.name });
   return { parts: out, trisIn, trisOut: triangleCount(out), error };
+}
+
+/** how many different body ids the welded parts carry (0 when none carries any) */
+function distinctBodies(welded: readonly { body: Uint32Array | null }[]): number {
+  let first = -1;
+  for (const w of welded) {
+    if (!w.body) continue;
+    for (let i = 0; i < w.body.length; i++) {
+      if (first < 0) first = w.body[i];
+      else if (w.body[i] !== first) return 2;
+    }
+  }
+  return first < 0 ? 0 : 1;
 }

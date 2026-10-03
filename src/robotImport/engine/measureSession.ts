@@ -13,7 +13,7 @@
  * computes on this thread only when nobody asked `prepare` first (the dev harness) or a worker
  * cannot start.
  */
-import { finishMeasure, orientKey, orientParts, toModelFrame, type MeasureOptions, type MeshPart, type OrientedMeasure } from '../geometry';
+import { finishMeasure, orientKey, orientParts, toModelFrame, withMotion, type MeasureOptions, type MeshPart, type OrientedMeasure } from '../geometry';
 import type { ImportMeasurement, ImportSetup } from '../types';
 import type { MeasureRequest, MeasureResponse } from './measureProtocol';
 import type { PreparedModel } from './prepare';
@@ -36,8 +36,8 @@ interface Entry {
   fin?: NormalisedModel;
 }
 
-/** what `finishMeasure` reads that `orientKey` does not */
-const finishKey = (s: ImportSetup): string => JSON.stringify([s.wheels, s.hullMaxVerts]);
+/** what `finishMeasure` (and the moving parts on it) reads that `orientKey` does not */
+const finishKey = (s: ImportSetup): string => JSON.stringify([s.wheels, s.hullMaxVerts, s.motion ?? null]);
 
 export class Measurer {
   private worker: Worker | null = null;
@@ -85,10 +85,10 @@ export class Measurer {
     // most recently used last
     this.entries.delete(key);
     this.entries.set(key, entry);
-    if (!entry.modelParts) entry.modelParts = toModelFrame(this.model.parts, entry.oriented.sourceToModel);
+    if (!entry.modelParts) entry.modelParts = toModelFrame(this.model.parts, entry.oriented.sourceToModel, entry.oriented.folds);
     const fk = finishKey(setup);
     if (entry.fin && entry.finKey === fk) return entry.fin;
-    const measurement = finishMeasure(entry.oriented, setup);
+    const measurement = withMotion(finishMeasure(entry.oriented, setup), entry.modelParts, setup, entry.oriented);
     measurement.trisIn = this.model.trisIn;
     if (this.model.trisOut < this.model.trisIn) {
       measurement.checks.push({
@@ -165,11 +165,12 @@ export class Measurer {
     };
     // positions and indices only (normals do not change a measurement), copied: the editor keeps
     // the prepared model for the preview, the bake and the draft
-    const parts: MeshPart[] = this.model.parts.map((p) => ({ positions: p.positions.slice(), indices: p.indices ? p.indices.slice() : null, color: p.color, name: p.name }));
+    const parts: MeshPart[] = this.model.parts.map((p) => ({ positions: p.positions.slice(), indices: p.indices ? p.indices.slice() : null, color: p.color, name: p.name, body: p.body ? p.body.slice() : null }));
     const transfer = new Set<ArrayBuffer>();
     for (const p of parts) {
       transfer.add(p.positions.buffer as ArrayBuffer);
       if (p.indices) transfer.add(p.indices.buffer as ArrayBuffer);
+      if (p.body) transfer.add(p.body.buffer as ArrayBuffer);
     }
     w.postMessage({ kind: 'init', parts, opts: this.opts } satisfies MeasureRequest, [...transfer]);
     this.worker = w;

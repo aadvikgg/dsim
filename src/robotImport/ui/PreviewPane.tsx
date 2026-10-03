@@ -18,12 +18,15 @@ export function PreviewPane({
   state,
   fallback,
   empty,
+  onPickBody,
 }: {
   eng: ImporterEngine | null;
   /** null before a model: the empty frame */
   state: Partial<PreviewState> | null;
   fallback: ReactNode;
   empty: ReactNode;
+  /** a click on a part while `state.picking` (`shift`: that one body, not its axle) */
+  onPickBody?: (body: number, shift: boolean) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const canvasHost = useRef<HTMLDivElement>(null);
@@ -77,6 +80,13 @@ export function PreviewPane({
   useEffect(() => {
     if (state) ctl.current?.update({ ...state, showCollision: collision });
   }, [state, collision]);
+
+  // the latest handler, through a ref, so the controller's callback is set once per controller
+  const pickRef = useRef(onPickBody);
+  pickRef.current = onPickBody;
+  useEffect(() => {
+    ctl.current?.onPickBody((b, shift) => pickRef.current?.(b, shift));
+  }, [ready, failed, eng]);
 
   const pick = (v: PreviewView): void => {
     setView(v);

@@ -174,6 +174,52 @@
   flex-wrap: wrap;
   gap: var(--ds-s-2);
 }
+
+/* ---- Mechanisms: the moving parts ---- */
+.ds-import-moving {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-s-2);
+}
+.ds-import-moving li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ds-s-2) var(--ds-s-3);
+  padding: var(--ds-s-2) var(--ds-s-3);
+  border: 1px solid var(--ds-line);
+  border-radius: var(--ds-round);
+}
+.ds-import-moving li.on {
+  border-color: var(--ds-accent);
+}
+.ds-import-moving .what {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 160px;
+  min-width: 0;
+  font-size: var(--ds-t-md);
+  color: var(--ds-ink);
+}
+.ds-import-moving .what small {
+  font-size: var(--ds-t-sm);
+  color: var(--ds-mut);
+}
+.ds-import-moving .acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ds-s-2);
+}
+.ds-import-moving-hinge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ds-s-2) var(--ds-s-3);
+  flex-basis: 100%;
+}
 .ds-import .ds-facts dd.warn {
   color: var(--ds-warn);
 }

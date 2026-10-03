@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { ImportedEdge, ImportedMech, RobotSpec, Vec2 } from '../../types';
 import type { GameId } from '../../games/types';
 import { moduleFor } from '../../games';
@@ -46,6 +47,7 @@ export function MechanismsStep({
   onSelect,
   onMech,
   onReset,
+  moving,
 }: {
   game: GameId;
   /** the built spec (coerced), which the game's mechanism controls read */
@@ -64,6 +66,8 @@ export function MechanismsStep({
   onSelect: (key: string) => void;
   onMech: (next: ImportedMech) => void;
   onReset: () => void;
+  /** the moving parts (`MotionPanel`), after the placements */
+  moving?: ReactNode;
 }) {
   const mod = moduleFor(game);
   const Builder = mod.Builder;
@@ -263,6 +267,7 @@ export function MechanismsStep({
           {COPY.resetPlacement}
         </button>
       </div>
+      {moving}
     </>
   );
 }

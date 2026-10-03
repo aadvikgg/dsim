@@ -119,9 +119,10 @@ import {
   importedDeckZ,
   importedFrontMarkGeometries,
   importedMeshKey,
-
+  importedMotionNodes,
   isImportShared,
   releaseImportedMesh,
+  type ImportedMotionNode,
 } from './renderImported';
 import {
   bbMouthFrame,
@@ -3428,6 +3429,9 @@ function buildImportedRobot(spec: RobotSpec, imp: ImportedRobot, id: number, all
     mesh.name = `robot:${id}:mesh`;
     group.add(mesh);
     group.userData.importedMesh = true;
+    // ITS OWN MOVING PARTS (wheels, rollers, flywheels, turret, ramp), posed by `sync` from the same
+    // state the standard parts read
+    group.userData.importMotion = importedMotionNodes(mesh);
     if (bbIsTurreted(launcher)) {
       const mounts = launcher.kind === 'twinturret' && launcher.mount2 ? [launcher.mount, launcher.mount2] : [launcher.mount];
       mounts.forEach((m, i) => {
@@ -4131,6 +4135,84 @@ export interface BbRobots {
  *  `BB_INTAKE_DRAW_IN`. Derived, so it cannot fall out of step again. */
 const BB_ROLLER_SPIN = BB_INTAKE_DRAW_IN / BB_ROLLER_FLAP_R;
 
+/** an imported flywheel that has an element to throw (and no setpoint the sim tracks) is drawn turning
+ *  at this, rad/s; a setpoint wheel turns at `flyRpm`, capped at `IMPORT_SPIN_MAX` */
+const IMPORT_FLYWHEEL_IDLE = 18;
+/** no imported part is DRAWN turning faster than this, rad/s: past ~4 turns a second a spoked wheel
+ *  sampled at 60 fps strobes into a random dance, which reads as a glitch, not as speed */
+const IMPORT_SPIN_MAX = 26;
+
+const qTmp = new THREE.Quaternion();
+
+/**
+ * POSE AN IMPORT'S OWN MOVING PARTS (`ImportedMotionNode`) for this frame. Every rule reads the
+ * world, never a command, like the standard hardware in `sync`:
+ *  · WHEEL — turns at the speed its contact patch moves along its tread, the robot's own rigid motion
+ *    at that point (`r.vel`, `r.angVel`), so it rolls driving, turns opposite on a spin turn and (on a
+ *    mecanum, through its rollers' 45°) turns when strafing; a swerve wheel along its pod's angle.
+ *  · ROLLER — `BB_ROLLER_SPIN` while the intake runs (the standard roller's gate).
+ *  · FLYWHEEL — at the setpoint wheel's `flyRpm`, else idling while there is something to throw.
+ *  · TURRET — the turret's yaw against the chassis (`turretHeading`; a second turret part, the second).
+ *  · RAMP — deployed off `bbRampOut` with the standard ramp's ease (`BB_RAMP_DEPLOY_S`).
+ *  · FOLD — stays as it starts.
+ */
+function poseImportMotion(motion: readonly ImportedMotionNode[], world: World, r: RobotState, dt: number, wheelSpin: boolean): void {
+  const enabled = robotsEnabled(world);
+  const intaking = enabled && (r.autoIntake || world.time - r.lastIntakeAt < 0.4) && r.hopper.length < bbHopperCap(r.spec);
+  const c = Math.cos(-r.heading);
+  const s = Math.sin(-r.heading);
+  const vx = r.vel.x * c - r.vel.y * s;
+  const vy = r.vel.x * s + r.vel.y * c;
+  const w = r.angVel ?? 0;
+  const rampT = Math.max(0, Math.min(1, (world.time - (r.bbRampAt ?? -Infinity)) / BB_RAMP_DEPLOY_S));
+  const rampE = smoothstep01(rampT);
+  const rampOut = r.bbRampOut ? rampE : 1 - rampE;
+  const mecanum = r.spec.drivetrain === 'mecanum' || (r.spec.drivetrain === 'butterfly' && !r.butterflyTank);
+  let turret = 0;
+  for (const m of motion) {
+    const role = m.info.role;
+    if (role === 'wheel') {
+      if (!wheelSpin || m.info.radius < 0.3) continue;
+      // the tread direction: a positive turn rolls the robot along it (`MotionPart`)
+      let tx = m.axisRobot.y;
+      let ty = -m.axisRobot.x;
+      const tl = Math.hypot(tx, ty);
+      if (tl < 1e-6) continue;
+      tx /= tl;
+      ty /= tl;
+      const px = vx - w * m.at.y;
+      const py = vy + w * m.at.x;
+      let speed: number;
+      if (r.spec.drivetrain === 'swerve' && m.info.corner !== undefined) {
+        const a = r.moduleAngles?.[m.info.corner] ?? 0;
+        speed = px * (tx * Math.cos(a) - ty * Math.sin(a)) + py * (tx * Math.sin(a) + ty * Math.cos(a));
+      } else if (mecanum) {
+        // the rollers take the slip along ρ, the tread turned 45° one way or the other by its corner
+        const diag = m.at.x * m.at.y >= 0 ? 1 : -1;
+        const rx = (tx - diag * ty) * Math.SQRT1_2;
+        const ry = (ty + diag * tx) * Math.SQRT1_2;
+        const den = tx * ry - ty * rx;
+        speed = Math.abs(den) < 1e-6 ? px * tx + py * ty : (px * ry - py * rx) / den;
+      } else {
+        speed = px * tx + py * ty;
+      }
+      m.angle += Math.max(-IMPORT_SPIN_MAX, Math.min(IMPORT_SPIN_MAX, speed / m.info.radius)) * dt;
+    } else if (role === 'roller') {
+      if (intaking) m.angle += Math.min(IMPORT_SPIN_MAX, BB_ROLLER_SPIN) * dt;
+    } else if (role === 'flywheel') {
+      const rate = r.flyRpm ? (r.flyRpm * Math.PI) / 30 : enabled && r.hopper.length > 0 ? IMPORT_FLYWHEEL_IDLE : 0;
+      m.angle += Math.min(IMPORT_SPIN_MAX, rate) * dt;
+    } else if (role === 'turret') {
+      m.angle = (turret++ === 0 ? r.turretHeading : (r.bbTurret2Heading ?? r.turretHeading)) - r.heading;
+    } else if (role === 'ramp') {
+      m.angle = m.info.deploy * rampOut;
+    } else {
+      m.angle = 0;
+    }
+    m.node.quaternion.copy(qTmp.setFromAxisAngle(m.axis, m.angle));
+  }
+}
+
 export function buildBiobuzzRobots(): BbRobots {
   const group = new THREE.Group();
   group.name = 'bb-robots';
@@ -4348,6 +4430,11 @@ export function buildBiobuzzRobots(): BbRobots {
       // THE CATAPULT'S ARM — one node, one rotation, off sim state alone (`dumpThrowPhase`).
       const dumpArm = entry.group.userData.dumpArm as THREE.Group | undefined;
       if (dumpArm) dumpArm.rotation.y = -DUMP_THROW_ANGLE * dumpThrowPhase(world, r);
+
+      // AN IMPORT'S OWN MOVING PARTS (`importedMotionNodes`): the same clocks and gates as the
+      // standard hardware above, so an imported roller runs exactly when a standard one would
+      const motion = entry.group.userData.importMotion as ImportedMotionNode[] | undefined;
+      if (motion && motion.length > 0) poseImportMotion(motion, world, r, dt, wheelSpin);
     }
     for (const [id, entry] of entries) {
       if (!seen.has(id)) {

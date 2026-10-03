@@ -12,6 +12,7 @@
  * editor on exactly the robot that was saved.
  */
 import type { ImportedBand, ImportedEdge, ImportedMech, ImportedRobot, Vec2 } from '../types';
+import { applyFolds, deriveMotion, foldKey, planFolds, type FoldPlan } from './motion';
 import {
   INCHES_PER_UNIT,
   LENGTH_UNITS,
@@ -69,6 +70,20 @@ export interface MeshPart {
   /** base colour, LINEAR RGB 0..1 (three.js's working colour space, glTF's baseColorFactor) */
   color: [number, number, number];
   name: string;
+  /**
+   * per-VERTEX body id: which CAD body (a STEP solid, a glTF node instance, a connected piece of an
+   * STL) the vertex came from, so a part keeps its identity after the merge by colour. Ids are
+   * global to the model. A triangle's body is its first vertex's (the weld never joins two bodies,
+   * so the three agree). Absent until a reader or the simplifier sets it (`docs/area/robot-import.md`,
+   * "Moving parts").
+   */
+  body?: Uint32Array | null;
+}
+
+/** a triangle's body: its first corner's (`MeshPart.body`) */
+export function triangleBody(p: MeshPart, t: number): number {
+  if (!p.body) return 0;
+  return p.body[p.indices ? p.indices[3 * t] : 3 * t];
 }
 
 export function triangleCount(parts: readonly MeshPart[]): number {
@@ -1088,7 +1103,7 @@ export function transformParts(parts: readonly MeshPart[], m: readonly number[])
         normals[i + 2] = z / l;
       }
     }
-    return { positions: out, indices: p.indices, normals, color: p.color, name: p.name };
+    return { positions: out, indices: p.indices, normals, color: p.color, name: p.name, body: p.body ?? null };
   });
 }
 
@@ -1149,11 +1164,17 @@ export interface OrientedMeasure {
   front: FrontDetection;
   /** bands in the MODEL frame, before the shift to the wheelbase centre; null = none or not asked */
   bandsModel: ImportedBand[] | null;
+  /** the hinged moving parts folded for the starting configuration, as planned (rotated frame:
+   *  after the linear part of `sourceToModel`, before its shift). `toModelFrame` re-applies them. */
+  folds: FoldPlan[];
 }
 
 /** what `orientParts` depends on in a setup: equal keys, equal `OrientedMeasure` */
 export function orientKey(setup: ImportSetup): string {
-  return `${setup.units}|${setup.up}|${setup.yaw}|${setup.bands ? 1 : 0}`;
+  // a FOLD changes the footprint, so a hinged moving part (and what rides on it) is part of the key;
+  // a spinning part alone is not (it moves nothing the heavy half measures)
+  const f = foldKey(setup.motion);
+  return `${setup.units}|${setup.up}|${setup.yaw}|${setup.bands ? 1 : 0}${f ? `|${f}` : ''}`;
 }
 
 /**
@@ -1162,11 +1183,14 @@ export function orientKey(setup: ImportSetup): string {
  * twice and give positions a float32 ulp away, so the engine rebuilds the model frame on the main
  * thread from a worker's `sourceToModel` with THIS, and gets the same arrays bit for bit.
  */
-export function toModelFrame(parts: readonly MeshPart[], sourceToModel: readonly number[]): MeshPart[] {
+export function toModelFrame(parts: readonly MeshPart[], sourceToModel: readonly number[], folds: readonly FoldPlan[] = []): MeshPart[] {
   const m = sourceToModel;
   const linear = [m[0], m[1], m[2], 0, m[4], m[5], m[6], 0, m[8], m[9], m[10], 0, 0, 0, 0, 1];
   const t = [m[12], m[13], m[14]];
-  return transformParts(parts, linear).map((p) => {
+  const rotated = transformParts(parts, linear);
+  // the folds at the same step `orientParts` makes them: after the linear part, before the shift
+  applyFolds(rotated, folds);
+  return rotated.map((p) => {
     const a = p.positions;
     for (let i = 0; i < a.length; i += 3) {
       a[i] += t[0];
@@ -1189,7 +1213,19 @@ export function measureParts(
   opts: MeasureOptions,
 ): { measurement: ImportMeasurement; modelParts: MeshPart[] } {
   const { oriented, modelParts } = orientParts(parts, setup, opts);
-  return { measurement: finishMeasure(oriented, setup), modelParts };
+  return { measurement: withMotion(finishMeasure(oriented, setup), modelParts, setup, oriented), modelParts };
+}
+
+/**
+ * The moving parts on a finished measurement (`MotionPart`, MODEL frame, starting pose), when the
+ * setup has any. Light: reads only the moving bodies' vertices. `measureParts` and the engine's
+ * cached measurer both call it, so the two agree field for field.
+ */
+export function withMotion(measurement: ImportMeasurement, modelParts: readonly MeshPart[], setup: ImportSetup, o: OrientedMeasure): ImportMeasurement {
+  if (!setup.motion || o.empty) return measurement;
+  const t: [number, number, number] = [o.sourceToModel[12], o.sourceToModel[13], o.sourceToModel[14]];
+  measurement.motion = deriveMotion(modelParts, setup.motion, o.folds, t);
+  return measurement;
 }
 
 /** the heavy half (`OrientedMeasure`), and the parts in the MODEL frame it was measured on */
@@ -1239,6 +1275,11 @@ export function orientParts(
     [R[2][0] * k, R[2][1] * k, R[2][2] * k],
   ];
   const rotated = transformParts(parts, mat4(rows, [0, 0, 0]));
+  // HINGED MOVING PARTS THE FILE SHOWS DEPLOYED ARE FOLDED HERE, before anything is measured: the box,
+  // the centring, the footprint, the floor contacts and the bands are all of the STARTING pose
+  // (`motion.ts`, `planFolds`)
+  const folds = setup.motion && setup.motion.length ? planFolds(rotated, setup.motion) : [];
+  applyFolds(rotated, folds);
   const mn = [Infinity, Infinity, Infinity];
   const mx = [-Infinity, -Infinity, -Infinity];
   for (const p of rotated) {
@@ -1308,6 +1349,7 @@ export function orientParts(
       wheels,
       front,
       bandsModel,
+      folds,
     },
     modelParts,
   };
@@ -1350,7 +1392,7 @@ export function finishMeasure(o: OrientedMeasure, setup: ImportSetup): ImportMea
       checks.push({
         code: 'oversize',
         level: 'block',
-        message: `The robot is ${fmtIn(size.length)} × ${fmtIn(size.width)} × ${fmtIn(size.height)} in; ${over.join(' and ')} ${over.length === 1 ? 'is' : 'are'} over 18 in. Check the units, or import the robot in its starting configuration.`,
+        message: `The robot is ${fmtIn(size.length)} × ${fmtIn(size.width)} × ${fmtIn(size.height)} in; ${over.join(' and ')} ${over.length === 1 ? 'is' : 'are'} over 18 in. Check the units. A ramp or arm the file shows deployed can be marked under Mechanisms, Moving parts, and it is measured folded.`,
       });
       // a units hint when a different unit would make it robot-sized
       const alt = detectUnits(worst / INCHES_PER_UNIT[units], null).unit;

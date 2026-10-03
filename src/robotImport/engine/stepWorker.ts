@@ -141,6 +141,21 @@ async function readInPieces(bytes: Uint8Array, name: string): Promise<{ parts: S
   if (plan.skipped.length) {
     notes.push(`Left out ${plural(plan.skipped.length, 'part', 'parts')} under ${MIN_PART_MM} mm across (screws, nuts and washers) to read this large file faster. They don’t change the footprint.`);
   }
+  // each piece numbers its bodies from 0: move every piece's past the last one's, so a body id names
+  // one solid across the whole file
+  let base = 0;
+  for (const r of results) {
+    let top = -1;
+    for (const p of r.parts) {
+      if (!p.body) continue;
+      for (let i = 0; i < p.body.length; i++) {
+        const b = p.body[i];
+        if (b > top) top = b;
+        p.body[i] = b + base;
+      }
+    }
+    base += top + 1;
+  }
   return { parts: results.flatMap((r) => r.parts), trisIn: results.reduce((s, r) => s + r.trisIn, 0), notes };
 }
 
@@ -165,14 +180,14 @@ ctx.onmessage = async (e: MessageEvent<StepRequest>) => {
       }
       if (!(r.trisIn === 0 && r.faces > 0)) {
         const transfer: Transferable[] = [];
-        for (const p of r.parts) transfer.push(p.positions.buffer, p.indices.buffer);
+        for (const p of r.parts) transfer.push(p.positions.buffer, p.indices.buffer, ...(p.body ? [p.body.buffer] : []));
         ctx.postMessage({ kind: 'done', parts: r.parts, trisIn: r.trisIn, notes: [] }, transfer);
         return;
       }
     }
     const out = await readInPieces(bytes, req.name);
     const transfer: Transferable[] = [];
-    for (const p of out.parts) transfer.push(p.positions.buffer, p.indices.buffer);
+    for (const p of out.parts) transfer.push(p.positions.buffer, p.indices.buffer, ...(p.body ? [p.body.buffer] : []));
     ctx.postMessage({ kind: 'done', parts: out.parts, trisIn: out.trisIn, notes: out.notes }, transfer);
   } catch (err) {
     if (err instanceof ImportError) ctx.postMessage({ kind: 'error', code: err.code, message: err.message });

@@ -35,6 +35,8 @@ export interface StepPart {
   /** linear RGB 0..1 */
   color: [number, number, number];
   name: string;
+  /** per-vertex body id: the occt mesh (a solid) it came from, from 0 within one read */
+  body?: Uint32Array;
 }
 
 /** what one occt read gave: parts by colour, the triangles, and the B-rep faces it saw */
@@ -69,10 +71,11 @@ const DEFAULT_LINEAR: [number, number, number] = [0.48, 0.5, 0.52];
  */
 export function stepToParts(res: OcctResult): StepParts {
   if (!res || !res.success) return { kind: 'error', message: 'occt could not read the file' };
-  const groups = new Map<string, { color: [number, number, number]; pos: number[]; idx: number[]; name: string }>();
+  const groups = new Map<string, { color: [number, number, number]; pos: number[]; idx: number[]; name: string; body: number[] }>();
   let trisIn = 0;
   let faces = 0;
-  for (const m of res.meshes) {
+  for (let mi = 0; mi < res.meshes.length; mi++) {
+    const m = res.meshes[mi];
     const P = m.attributes.position.array;
     const I = m.index.array;
     const nT = Math.floor(I.length / 3);
@@ -91,7 +94,7 @@ export function stepToParts(res: OcctResult): StepParts {
       const key = `${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)}`;
       let g = groups.get(key);
       if (!g) {
-        g = { color: [c[0], c[1], c[2]], pos: [], idx: [], name: m.name || 'step' };
+        g = { color: [c[0], c[1], c[2]], pos: [], idx: [], name: m.name || 'step', body: [] };
         groups.set(key, g);
       }
       let vm = local.get(key);
@@ -102,6 +105,7 @@ export function stepToParts(res: OcctResult): StepParts {
         if (nv === undefined) {
           nv = g.pos.length / 3;
           g.pos.push(P[3 * v], P[3 * v + 1], P[3 * v + 2]);
+          g.body.push(mi);
           vm.set(v, nv);
         }
         g.idx.push(nv);
@@ -113,6 +117,7 @@ export function stepToParts(res: OcctResult): StepParts {
     indices: new Uint32Array(g.idx),
     color: g.color,
     name: g.name,
+    body: new Uint32Array(g.body),
   }));
   return { kind: 'done', parts, trisIn, faces };
 }

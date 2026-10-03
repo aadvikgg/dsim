@@ -12,7 +12,7 @@
  * It also runs the bake's mesh half (`{ kind: 'bake' }`, `bakeMesh.ts`): the GLB export and its
  * refits, so Save does not block on them either.
  */
-import { bakeMeshHere } from './bakeMesh';
+import { bakeSceneHere, sceneParts } from './bakeMesh';
 import { ImportError } from './importError';
 import type { ImportRequest, ImportResponse } from './importProtocol';
 import { partBuffers } from './importProtocol';
@@ -29,8 +29,8 @@ ctx.onmessage = async (e: MessageEvent<ImportRequest>) => {
   const post = (m: ImportResponse, transfer?: Transferable[]): void => ctx.postMessage(m, transfer);
   try {
     if (req.kind === 'bake') {
-      const { glb, parts, refits } = await bakeMeshHere(req.parts);
-      post({ kind: 'baked', glb, parts, refits }, [glb, ...partBuffers(parts)]);
+      const { glb, scene, refits } = await bakeSceneHere(req.scene);
+      post({ kind: 'baked', glb, scene, refits }, [glb, ...partBuffers(sceneParts(scene))]);
       return;
     }
     let loaded;

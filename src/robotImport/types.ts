@@ -106,6 +106,102 @@ export interface ImportSetup {
   /** triangle budget after simplification, ≤ `MAX_TRIANGLES` */
   triBudget: number;
   drive: DriveSetup;
+  /** the parts that move in a match (`docs/area/robot-import.md`, "Moving parts"). Absent = not yet
+   *  looked for (the editor finds the wheels once); `[]` = none. */
+  motion?: MotionGroup[];
+}
+
+// ---- moving parts ----------------------------------------------------------------------------
+
+/**
+ * What a group of CAD bodies does in a match. `wheel`, `roller` and `flywheel` SPIN about their own
+ * axle; `turret` turns about a vertical axis; `ramp` (BIOBUZZ's deployable intake) and `fold` (any
+ * part the file shows deployed) swing about a HINGE, and are measured folded, which is the robot's
+ * starting configuration.
+ */
+export type MotionRole = 'wheel' | 'roller' | 'flywheel' | 'turret' | 'ramp' | 'fold';
+
+export const SPIN_ROLES: readonly MotionRole[] = ['wheel', 'roller', 'flywheel'];
+export const HINGE_ROLES: readonly MotionRole[] = ['ramp', 'fold'];
+
+/** one moving part as the player set it up (frame-free: bodies and choices, never positions) */
+export interface MotionGroup {
+  role: MotionRole;
+  /** the model's bodies in it (`MeshPart.body` ids), ascending */
+  bodies: number[];
+  /** spin (or swing) the other way */
+  flip?: boolean;
+  /** `wheel`: which wheel, 0..3 (FL, FR, BL, BR) */
+  corner?: number;
+  /** `ramp`, `fold`: how the FILE shows it. `deployed` (the default): it is turned up about its hinge
+   *  for the starting configuration; `folded`: the file already is the starting configuration */
+  filePose?: 'deployed' | 'folded';
+  /** `filePose: 'deployed'`: degrees it folds up by (absent: until it stands upright) */
+  foldDeg?: number;
+  /** `filePose: 'folded'`: degrees it swings down to deploy (absent: `DEFAULT_DEPLOY_DEG`) */
+  deployDeg?: number;
+}
+
+/** how far a part the file shows folded swings down to deploy, when the player has not said */
+export const DEFAULT_DEPLOY_DEG = 90;
+
+/**
+ * A moving part as MEASURED: MODEL frame, inches, in the STARTING pose (a ramp folded). A positive
+ * turn about `axis` is the part's own sense: a wheel rolling the robot forward, a roller drawing in,
+ * a flywheel throwing outward over its top, a turret turning left, a ramp deploying.
+ */
+export interface MotionPart {
+  role: MotionRole;
+  bodies: number[];
+  /** a point on the axis */
+  pivot: [number, number, number];
+  /** unit direction */
+  axis: [number, number, number];
+  /** wheel: its rolling radius; roller, flywheel: its outer radius (inches; 0 for the rest) */
+  radius: number;
+  /** ramp, fold: radians from the starting pose to deployed (0 for the rest) */
+  deploy: number;
+  /** the part this one rides on (a roller on a ramp, a flywheel on a turret), by index, or -1 */
+  parent: number;
+  corner?: number;
+  /** the `ImportSetup.motion` group it was measured from */
+  group: number;
+}
+
+/**
+ * THE STORED MESH'S MOVING PARTS: every moving part is its own node in the stored GLB, translated to
+ * its pivot (its geometry relative to it), with this in the node's `extras` under `dsim` (GLTFLoader
+ * puts it in `userData.dsim`). Stored-mesh frame: `axis` is a unit vector there; `radius` is inches.
+ * A viewer that knows nothing of it draws the node where it is: the starting pose.
+ */
+export interface StoredMotion {
+  v: 1;
+  role: MotionRole;
+  axis: [number, number, number];
+  radius: number;
+  deploy: number;
+  corner?: number;
+}
+
+const MOTION_ROLES: readonly MotionRole[] = ['wheel', 'roller', 'flywheel', 'turret', 'ramp', 'fold'];
+
+/**
+ * A node's `userData.dsim` as a `StoredMotion`, or null. Read on a mesh that may be another player's
+ * (a room's relay), so every field is checked: a known role, a finite axis made unit, a radius in
+ * [0, 20] in, a deploy angle in [0, π].
+ */
+export function readStoredMotion(x: unknown): StoredMotion | null {
+  if (!x || typeof x !== 'object') return null;
+  const o = x as Record<string, unknown>;
+  if (o.v !== 1 || !MOTION_ROLES.includes(o.role as MotionRole)) return null;
+  const a = o.axis;
+  if (!Array.isArray(a) || a.length !== 3 || !a.every((v) => typeof v === 'number' && Number.isFinite(v))) return null;
+  const l = Math.hypot(a[0], a[1], a[2]);
+  if (l < 1e-6) return null;
+  const num = (v: unknown, lo: number, hi: number): number => (typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : 0);
+  const out: StoredMotion = { v: 1, role: o.role as MotionRole, axis: [a[0] / l, a[1] / l, a[2] / l], radius: num(o.radius, 0, 20), deploy: num(o.deploy, 0, Math.PI) };
+  if (typeof o.corner === 'number' && Number.isInteger(o.corner) && o.corner >= 0 && o.corner < 4) out.corner = o.corner;
+  return out;
 }
 
 export const MAX_TRIANGLES = 150_000;
@@ -199,6 +295,8 @@ export interface ImportMeasurement {
   bands?: { z0: number; z1: number; hull: Vec2[] }[];
   trisIn: number;
   checks: ImportCheck[];
+  /** the moving parts, MODEL frame, starting pose (absent when the setup has none) */
+  motion?: MotionPart[];
 }
 
 // ---- the library record (plan §3.2) ------------------------------------------------------

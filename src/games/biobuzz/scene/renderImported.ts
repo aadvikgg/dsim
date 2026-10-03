@@ -12,6 +12,7 @@ import { polyGrow } from '../../../sim/imported';
 import { frontArrowSpot } from '../../../render/drawImported';
 import { BB_DECK_Z } from '../config';
 import { loader } from './renderElementsGlb';
+import { readStoredMotion, type StoredMotion } from '../../../robotImport/types';
 
 /**
  * BIOBUZZ 3D — AN IMPORTED ROBOT'S OWN PARTS (`docs/robot-import-plan.md` §1 "In a match").
@@ -299,6 +300,45 @@ export function installImportedMeshForTests(spec: RobotSpec, scene: THREE.Object
   if (old?.root) disposeTemplate(old.root);
   slots.set(k, { id: imp.id, imp, state: 'ready', root: prepareImportedMesh(scene), users: old?.users ?? 0, used: ++stamp, settled: Promise.resolve() });
   notify(imp.id);
+}
+
+// ──────────────────────────────────────────────────────────── the moving parts ──
+
+/**
+ * ONE MOVING PART OF AN IMPORTED MESH (`docs/area/robot-import.md`, "Moving parts"): a node of the
+ * stored GLB with `extras.dsim`, translated to its pivot, so turning it about its own `axis` (stored
+ * mesh frame, which is the node's parent's frame when nothing above it has turned) turns it about the
+ * part's own axle or hinge. `angle` is the renderer's running total for a spinning part.
+ */
+export interface ImportedMotionNode {
+  node: THREE.Object3D;
+  info: StoredMotion;
+  axis: THREE.Vector3;
+  /** the pivot and the axis in the ROBOT frame (inches, +x front), for a wheel's ground speed */
+  at: { x: number; y: number };
+  axisRobot: { x: number; y: number; z: number };
+  angle: number;
+}
+
+/**
+ * The moving parts of a CLONED import mesh (`cloneImportedMesh`), in the order they were stored.
+ * Each node's pose is set from its role by `renderRobots.ts`'s sync; a mesh with none gives [].
+ */
+export function importedMotionNodes(mesh: THREE.Object3D): ImportedMotionNode[] {
+  const out: ImportedMotionNode[] = [];
+  mesh.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+  const toRobot = new THREE.Matrix4().fromArray(IMPORTED_MESH_TO_ROBOT as number[]);
+  mesh.traverse((o) => {
+    const info = readStoredMotion((o.userData as { dsim?: unknown }).dsim);
+    if (!info) return;
+    // the pivot in the robot frame: the node's world position relative to the mesh root, which IS
+    // the robot frame (the root carries `IMPORTED_MESH_TO_ROBOT`)
+    const p = new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).applyMatrix4(inv);
+    const a = new THREE.Vector3(...info.axis).applyMatrix4(new THREE.Matrix4().extractRotation(toRobot)).normalize();
+    out.push({ node: o, info, axis: new THREE.Vector3(...info.axis), at: { x: p.x, y: p.y }, axisRobot: { x: a.x, y: a.y, z: a.z }, angle: 0 });
+  });
+  return out;
 }
 
 // ──────────────────────────────────────────────────────────── the placeholder ──

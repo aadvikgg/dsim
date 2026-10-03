@@ -103,8 +103,10 @@ const KEYS = {
   bufferView: new Set(['buffer', 'byteOffset', 'byteLength', 'byteStride', 'target', 'name', 'extras']),
   buffer: new Set(['byteLength', 'name', 'extras']),
 } as const;
-/** vertex attributes a primitive may carry (no skinning, no morph targets, no custom ones) */
-const ATTRIBUTES = new Set(['POSITION', 'NORMAL', 'TANGENT', 'COLOR_0', 'TEXCOORD_0', 'TEXCOORD_1']);
+/** vertex attributes a primitive may carry (no skinning, no morph targets) — and ONE custom one,
+ *  `_BODY`, the importer's per-vertex body id (`MeshPart.body`), checked below to be one unsigned
+ *  integer per vertex and nothing else */
+const ATTRIBUTES = new Set(['POSITION', 'NORMAL', 'TANGENT', 'COLOR_0', 'TEXCOORD_0', 'TEXCOORD_1', '_BODY']);
 /** top-level collections that a mesh made of colours never has, each refused by its own name */
 const REFUSED_COLLECTIONS = ['images', 'textures', 'samplers', 'skins', 'animations', 'cameras'] as const;
 /** the deepest node a scene may nest (a cycle is infinitely deep) */
@@ -300,6 +302,7 @@ export function validateMeshGlb(b: Uint8Array, maxBytes = VISUAL_MAX_BYTES.mesh)
         if (!isCount(ai, accessors.length - 1)) return 'primitive attribute';
         // every attribute names a value per vertex: one short of the positions is a read past it
         if (acc[ai].count !== nv) return 'primitive attribute count';
+        if (k === '_BODY' && (acc[ai].per !== 1 || (acc[ai].ctype !== 5123 && acc[ai].ctype !== 5125))) return 'primitive attribute';
       }
       if (p.material !== undefined && !isCount(p.material, materials.length - 1)) return 'primitive material';
       if (p.indices !== undefined) {

@@ -10,8 +10,7 @@
  * Where a worker cannot start (no `Worker`, or a script that fails to load), the same steps run
  * here on the main thread through `load.ts`, as they always did.
  */
-import type { MeshPart } from '../geometry';
-import { bakeMeshHere } from './bakeMesh';
+import { bakeSceneHere, type StoredScene } from './bakeMesh';
 import { ImportError, abortError } from './importError';
 import { partBuffers, type ImportProgress, type ImportRequest, type ImportResponse } from './importProtocol';
 import { loadModel, readStepFile, resolveFiles } from './load';
@@ -47,28 +46,28 @@ async function onMainThread(files: File[], opts: ImportOptions): Promise<Prepare
 }
 
 /**
- * The bake's mesh half (`bakeMeshHere`) in a fresh import worker, the result transferred back; on
+ * The bake's mesh half (`bakeSceneHere`) in a fresh import worker, the result transferred back; on
  * this thread where a worker cannot start or stops. The parts are COPIED there (a few MB, a few
  * milliseconds), so this thread still has them to fall back on.
  */
-export async function bakeMeshOff(parts: MeshPart[]): Promise<{ glb: ArrayBuffer; parts: MeshPart[]; refits: number }> {
+export async function bakeSceneOff(scene: StoredScene): Promise<{ glb: ArrayBuffer; scene: StoredScene; refits: number }> {
   const worker = spawn();
-  if (!worker) return bakeMeshHere(parts);
+  if (!worker) return bakeSceneHere(scene);
   return new Promise((resolve, reject) => {
     worker.onmessage = (e: MessageEvent<ImportResponse>) => {
       const m = e.data;
       if (m.kind === 'progress') return;
       worker.terminate();
-      if (m.kind === 'baked') resolve({ glb: m.glb, parts: m.parts, refits: m.refits });
+      if (m.kind === 'baked') resolve({ glb: m.glb, scene: m.scene, refits: m.refits });
       else reject(new Error(m.kind === 'error' ? m.message : 'unexpected answer from the import worker'));
     };
     worker.onerror = (e) => {
       e.preventDefault();
       worker.terminate();
       console.warn('[import] the bake worker stopped; baking on the main thread', e.message);
-      bakeMeshHere(parts).then(resolve, reject);
+      bakeSceneHere(scene).then(resolve, reject);
     };
-    worker.postMessage({ kind: 'bake', parts } satisfies ImportRequest);
+    worker.postMessage({ kind: 'bake', scene } satisfies ImportRequest);
   });
 }
 

@@ -8,7 +8,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { ImportedMech, Vec2 } from '../../types';
-import { bbox, type MeshPart } from '../geometry';
+import { bbox, triangleBody, type MeshPart } from '../geometry';
+import type { MotionPart } from '../types';
+import { splitMoving } from './bake';
 import { buildMeshGroup, creaseParts, disposeTree } from './meshGroup';
 
 export interface PreviewState {
@@ -26,6 +28,15 @@ export interface PreviewState {
   showCube: boolean;
   /** draw the shape physics uses: the footprint hull as a prism up to the model's height */
   showCollision: boolean;
+  /** the moving parts as measured (MODEL frame, starting pose; compared by identity) */
+  motion: MotionPart[] | null;
+  /** run every moving part (wheels roll, rollers and flywheels turn, a turret sweeps, a ramp deploys
+   *  and folds) — the editor's way of showing what was set up */
+  playing: boolean;
+  /** bodies to tint: the moving part being edited (`active`) and the others */
+  highlight: { active: number[]; others: number[] } | null;
+  /** clicking a part reports its body (`onPickBody`); hovering tints it */
+  picking: boolean;
 }
 
 /** the editor's camera presets (lane 4) */
@@ -38,6 +49,8 @@ export interface PreviewController {
   resetView(): void;
   /** one of the camera presets, framed on the model */
   setView(view: PreviewView): void;
+  /** called with the body under a click while `picking` (`shift`: the one body, not its axle) */
+  onPickBody(cb: ((body: number, shift: boolean) => void) | null): void;
   dispose(): void;
 }
 
@@ -56,6 +69,9 @@ const COLORS = {
   intake: 0x58d68d,
   shooter: 0xff7a45,
   place: 0xc58cff,
+  pickActive: 0x36c5ff,
+  pickOther: 0xffb347,
+  pickHover: 0xffffff,
 };
 
 function line(points: THREE.Vector3[], color: number, loop = false): THREE.Line {
@@ -119,7 +135,17 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
     size: null,
     showCube: true,
     showCollision: false,
+    motion: null,
+    playing: false,
+    highlight: null,
+    picking: false,
   };
+  /** the moving parts' nodes, posed by the play loop */
+  let moving: { node: THREE.Object3D; part: MotionPart; turret: number; angle: number }[] = [];
+  const tints = new THREE.Group();
+  scene.add(tints);
+  let hover = -1;
+  let pickCb: ((body: number, shift: boolean) => void) | null = null;
 
   let frame = 0;
   const render = (): void => {
@@ -212,21 +238,193 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
     cube.visible = state.showCube;
   };
 
-  const update = (next: Partial<PreviewState>): void => {
-    const partsChanged = next.parts !== undefined && next.parts !== state.parts;
-    Object.assign(state, next);
-    if (partsChanged) {
-      if (model) {
-        scene.remove(model);
-        disposeTree(model);
-        model = null;
-      }
-      if (state.parts) {
-        model = buildMeshGroup(creaseParts(state.parts), 'preview');
-        scene.add(model);
+  /**
+   * THE MODEL, with each moving part a node of its own at its pivot (the stored mesh's layout,
+   * `bakeMesh.ts`), so the play loop can turn it about its axis; a rider is its carrier's child.
+   */
+  const buildModel = (): void => {
+    if (model) {
+      scene.remove(model);
+      disposeTree(model);
+      model = null;
+    }
+    moving = [];
+    if (!state.parts) return;
+    const parts = creaseParts(state.parts);
+    const motion = state.motion ?? [];
+    const { rest, moving: groups } = splitMoving(parts, motion);
+    model = buildMeshGroup(rest, 'preview');
+    const nodes: (THREE.Group | null)[] = motion.map(() => null);
+    let turrets = 0;
+    const make = (i: number, depth = 0): THREE.Group | null => {
+      if (nodes[i] || depth > 8) return nodes[i];
+      const m = motion[i];
+      const parent = m.parent >= 0 && m.parent !== i ? make(m.parent, depth + 1) : null;
+      const node = new THREE.Group();
+      const base = parent ? motion[m.parent].pivot : [0, 0, 0];
+      node.position.set(m.pivot[0] - base[0], m.pivot[1] - base[1], m.pivot[2] - base[2]);
+      const shifted = groups[i].map((p) => {
+        const a = new Float32Array(p.positions.length);
+        for (let k = 0; k < a.length; k += 3) {
+          a[k] = p.positions[k] - m.pivot[0];
+          a[k + 1] = p.positions[k + 1] - m.pivot[1];
+          a[k + 2] = p.positions[k + 2] - m.pivot[2];
+        }
+        return { ...p, positions: a };
+      });
+      const meshes = buildMeshGroup(shifted, 'moving');
+      for (const c of [...meshes.children]) node.add(c);
+      (parent ?? model!).add(node);
+      nodes[i] = node;
+      moving.push({ node, part: m, turret: m.role === 'turret' ? turrets++ : 0, angle: 0 });
+      return node;
+    };
+    for (let i = 0; i < motion.length; i++) make(i);
+    scene.add(model);
+  };
+
+  /** the triangles of `bodies` as one tinted overlay (starting pose; picking stops the play loop) */
+  const tint = (bodies: ReadonlySet<number>, color: number, opacity: number): THREE.Mesh | null => {
+    if (!state.parts || !bodies.size) return null;
+    const pos: number[] = [];
+    for (const p of state.parts) {
+      if (!p.body) continue;
+      const n = Math.floor((p.indices ? p.indices.length : p.positions.length / 3) / 3);
+      for (let t = 0; t < n; t++) {
+        if (!bodies.has(triangleBody(p, t))) continue;
+        for (let c = 0; c < 3; c++) {
+          const v = p.indices ? p.indices[3 * t + c] : 3 * t + c;
+          pos.push(p.positions[3 * v], p.positions[3 * v + 1], p.positions[3 * v + 2]);
+        }
       }
     }
+    if (!pos.length) return null;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthTest: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    return new THREE.Mesh(g, mat);
+  };
+  const rebuildTints = (): void => {
+    disposeTree(tints);
+    tints.clear();
+    const h = state.highlight;
+    const others = tint(new Set(h?.others ?? []), COLORS.pickOther, 0.35);
+    const active = tint(new Set(h?.active ?? []), COLORS.pickActive, 0.55);
+    const hov = state.picking && hover >= 0 ? tint(new Set([hover]), COLORS.pickHover, 0.45) : null;
+    for (const m of [others, active, hov]) if (m) tints.add(m);
+  };
+
+  // ---- picking: a click (not a drag) on a part reports its body ---------------------------------
+  const ray = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  const bodyAt = (clientX: number, clientY: number): number => {
+    if (!model) return -1;
+    const r = canvas.getBoundingClientRect();
+    if (!r.width || !r.height) return -1;
+    ndc.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(ndc, camera);
+    const hit = ray.intersectObject(model, true)[0];
+    const geo = (hit?.object as THREE.Mesh | undefined)?.geometry as THREE.BufferGeometry | undefined;
+    const attr = geo?.getAttribute('_body');
+    if (!hit?.face || !attr) return -1;
+    return Math.round(attr.getX(hit.face.a));
+  };
+  let down: { x: number; y: number; t: number } | null = null;
+  let hoverAt = 0;
+  const onDown = (e: PointerEvent): void => {
+    down = { x: e.clientX, y: e.clientY, t: performance.now() };
+  };
+  const onUp = (e: PointerEvent): void => {
+    const d = down;
+    down = null;
+    if (!d || !state.picking || !pickCb || e.button !== 0) return;
+    if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5 || performance.now() - d.t > 600) return;
+    const b = bodyAt(e.clientX, e.clientY);
+    if (b >= 0) pickCb(b, e.shiftKey);
+  };
+  const onMove = (e: PointerEvent): void => {
+    if (!state.picking || down) return;
+    const now = performance.now();
+    if (now - hoverAt < 70) return;
+    hoverAt = now;
+    const b = bodyAt(e.clientX, e.clientY);
+    if (b === hover) return;
+    hover = b;
+    canvas.style.cursor = b >= 0 ? 'pointer' : '';
+    rebuildTints();
+    render();
+  };
+  const onLeave = (): void => {
+    if (hover < 0) return;
+    hover = -1;
+    canvas.style.cursor = '';
+    rebuildTints();
+    render();
+  };
+  canvas.addEventListener('pointerdown', onDown);
+  canvas.addEventListener('pointerup', onUp);
+  canvas.addEventListener('pointermove', onMove);
+  canvas.addEventListener('pointerleave', onLeave);
+
+  // ---- play: every moving part runs, on a loop, until stopped -----------------------------------
+  let playFrame = 0;
+  let playLast = 0;
+  let playT = 0;
+  const pose = (dt: number): void => {
+    playT += dt;
+    // a ramp or a folding part deploys and folds back every four seconds
+    const swing = 0.5 - 0.5 * Math.cos((playT * Math.PI) / 2);
+    for (const m of moving) {
+      const role = m.part.role;
+      if (role === 'wheel') m.angle += 4 * dt;
+      else if (role === 'roller') m.angle += 9 * dt;
+      else if (role === 'flywheel') m.angle += 16 * dt;
+      else if (role === 'turret') m.angle = (m.turret ? -0.6 : 0.6) * Math.sin(playT * 1.3);
+      else m.angle = m.part.deploy * swing;
+      m.node.quaternion.setFromAxisAngle(new THREE.Vector3(...m.part.axis), m.angle);
+    }
+  };
+  const still = (): void => {
+    for (const m of moving) {
+      m.angle = 0;
+      m.node.quaternion.identity();
+    }
+  };
+  const loop = (now: number): void => {
+    playFrame = 0;
+    if (!state.playing || state.picking) return;
+    const dt = playLast ? Math.min(0.1, (now - playLast) / 1000) : 0;
+    playLast = now;
+    pose(dt);
+    renderer.render(scene, camera);
+    playFrame = requestAnimationFrame(loop);
+  };
+  const syncPlay = (): void => {
+    if (state.playing && !state.picking) {
+      if (!playFrame) {
+        playLast = 0;
+        playFrame = requestAnimationFrame(loop);
+      }
+    } else {
+      if (playFrame) cancelAnimationFrame(playFrame);
+      playFrame = 0;
+      playT = 0;
+      still();
+    }
+  };
+
+  const update = (next: Partial<PreviewState>): void => {
+    const modelChanged = (next.parts !== undefined && next.parts !== state.parts) || (next.motion !== undefined && next.motion !== state.motion);
+    const tintChanged = modelChanged || (next.highlight !== undefined && next.highlight !== state.highlight) || (next.picking !== undefined && next.picking !== state.picking);
+    Object.assign(state, next);
+    if (!state.picking && hover >= 0) {
+      hover = -1;
+      canvas.style.cursor = '';
+    }
+    if (modelChanged) buildModel();
+    if (tintChanged) rebuildTints();
     rebuildOverlays();
+    syncPlay();
     render();
   };
 
@@ -246,8 +444,16 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
     resize,
     resetView,
     setView,
+    onPickBody(cb): void {
+      pickCb = cb;
+    },
     dispose(): void {
       if (frame) cancelAnimationFrame(frame);
+      if (playFrame) cancelAnimationFrame(playFrame);
+      canvas.removeEventListener('pointerdown', onDown);
+      canvas.removeEventListener('pointerup', onUp);
+      canvas.removeEventListener('pointermove', onMove);
+      canvas.removeEventListener('pointerleave', onLeave);
       controls.removeEventListener('change', render);
       controls.dispose();
       disposeTree(scene);

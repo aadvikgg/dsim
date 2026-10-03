@@ -446,6 +446,9 @@ export function partsFromObject(root: THREE.Object3D, useVertexColours: boolean)
   const out: MeshPart[] = [];
   const v = new THREE.Vector3();
   const tmp = new THREE.Matrix4();
+  // BODIES (`MeshPart.body`): one per mesh instance, in traversal order — or, in a mesh the importer
+  // stored itself, the ids it wrote (`_body`, `bodyIdsOf`)
+  let nextBody = 0;
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
     if (!mesh.isMesh || (obj as THREE.Points).isPoints || (obj as THREE.Line).isLine) return;
@@ -460,7 +463,9 @@ export function partsFromObject(root: THREE.Object3D, useVertexColours: boolean)
     const plain = !(pos as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute && !pos.normalized && pos.itemSize === 3;
     const src = plain ? (pos as THREE.BufferAttribute).array : null;
     const full = index ? Uint32Array.from(index.array as ArrayLike<number>) : null;
+    const stored = bodyIdsOf(geo);
     for (let n = 0; n < instances; n++) {
+      const bodyId = nextBody++;
       const m = new THREE.Matrix4().copy(mesh.matrixWorld);
       if (inst) {
         inst.getMatrixAt(n, tmp);
@@ -489,6 +494,7 @@ export function partsFromObject(root: THREE.Object3D, useVertexColours: boolean)
           indices: idx,
           color: c ? [c.r, c.g, c.b] : [DEFAULT_LINEAR[0], DEFAULT_LINEAR[1], DEFAULT_LINEAR[2]],
           name: mesh.name || obj.parent?.name || 'part',
+          body: stored ? stored.slice() : new Uint32Array(pos.count).fill(bodyId),
         };
         if (colorAttr && (useVertexColours || (mat as THREE.MeshStandardMaterial | undefined)?.vertexColors)) {
           const cols = new Float32Array(colorAttr.count * 3);
@@ -504,6 +510,19 @@ export function partsFromObject(root: THREE.Object3D, useVertexColours: boolean)
       }
     }
   });
+  return out;
+}
+
+/**
+ * The body ids a mesh the importer stored carries (`_BODY` in the GLB, which GLTFLoader names
+ * `_body`; `meshGroup.ts` writes it), as a fresh array, or null for any other mesh.
+ */
+function bodyIdsOf(geo: THREE.BufferGeometry): Uint32Array | null {
+  const a = geo.getAttribute('_body');
+  const pos = geo.getAttribute('position');
+  if (!a || !pos || a.count !== pos.count || a.itemSize !== 1) return null;
+  const out = new Uint32Array(a.count);
+  for (let i = 0; i < a.count; i++) out[i] = Math.max(0, Math.round(a.getX(i)));
   return out;
 }
 
@@ -554,11 +573,14 @@ function transformInto(
  */
 export function mergedPartsFromObject(root: THREE.Object3D, maxParts = 48): MeshPart[] | null {
   root.updateMatrixWorld(true);
-  type Item = { mesh: THREE.Mesh; inst: number; start: number; size: number; posLen: number; color: [number, number, number]; name: string };
+  type Item = { mesh: THREE.Mesh; inst: number; start: number; size: number; posLen: number; color: [number, number, number]; name: string; body: number };
   const items: Item[] = [];
   const uses = new Map<THREE.BufferGeometry, number>();
   const tmp = new THREE.Matrix4();
   let splits = false;
+  // one body per mesh instance, numbered as `partsFromObject` numbers them
+  let nextBody = 0;
+  const storedIds = new Map<THREE.BufferGeometry, Uint32Array | null>();
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
     if (!mesh.isMesh || (obj as THREE.Points).isPoints || (obj as THREE.Line).isLine) return;
@@ -570,7 +592,9 @@ export function mergedPartsFromObject(root: THREE.Object3D, maxParts = 48): Mesh
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     const nIdx = index ? index.count : pos.count;
     const groups = geo.groups.length && materials.length > 1 ? geo.groups : [{ start: 0, count: nIdx, materialIndex: 0 }];
+    if (!storedIds.has(geo)) storedIds.set(geo, bodyIdsOf(geo));
     for (let n = 0; n < instances; n++) {
+      const bodyId = nextBody++;
       for (const g of groups) {
         const end = Math.min(nIdx, g.start + g.count);
         const len = Math.max(0, end - g.start);
@@ -585,6 +609,7 @@ export function mergedPartsFromObject(root: THREE.Object3D, maxParts = 48): Mesh
           color: c ? [c.r, c.g, c.b] : [DEFAULT_LINEAR[0], DEFAULT_LINEAR[1], DEFAULT_LINEAR[2]],
           name: mesh.name || obj.parent?.name || 'part',
           posLen: pos.count * 3,
+          body: bodyId,
         });
         uses.set(geo, (uses.get(geo) ?? 0) + 1);
       }
@@ -609,7 +634,7 @@ export function mergedPartsFromObject(root: THREE.Object3D, maxParts = 48): Mesh
       nPos += items[i].posLen;
       nIdx += items[i].size;
     }
-    return { positions: new Float32Array(nPos), indices: new Uint32Array(nIdx - (nIdx % 3)) };
+    return { positions: new Float32Array(nPos), indices: new Uint32Array(nIdx - (nIdx % 3)), body: new Uint32Array(nPos / 3) };
   });
   const v = new THREE.Vector3();
   // one instance's positions serve each of its groups, as they do in `partsFromObject`
@@ -627,6 +652,10 @@ export function mergedPartsFromObject(root: THREE.Object3D, maxParts = 48): Mesh
     const flip = m.determinant() < 0;
     const dst = out[groupOf[i]];
     const at = posAt[i];
+    // the instance's body ids: the stored mesh's own, else the instance's one id
+    const ids = storedIds.get(geo);
+    if (ids) dst.body.set(ids, at / 3);
+    else dst.body.fill(it.body, at / 3, at / 3 + pos.count);
     if (last && last.mesh === it.mesh && last.inst === it.inst && last.group === groupOf[i]) {
       dst.positions.copyWithin(at, last.at, last.at + pos.count * 3);
     } else if (last && last.mesh === it.mesh && last.inst === it.inst) {
@@ -656,7 +685,7 @@ export function mergedPartsFromObject(root: THREE.Object3D, maxParts = 48): Mesh
     }
   }
   return groups.map((g, gi) => {
-    if (g.length === 1) return { positions: out[gi].positions, indices: out[gi].indices, color: items[g[0]].color, name: items[g[0]].name };
+    if (g.length === 1) return { positions: out[gi].positions, indices: out[gi].indices, color: items[g[0]].color, name: items[g[0]].name, body: out[gi].body };
     // the area-weighted colour, summed in `concatParts`'s order with its weights
     const col = [0, 0, 0];
     let w = 0;
@@ -665,6 +694,6 @@ export function mergedPartsFromObject(root: THREE.Object3D, maxParts = 48): Mesh
       for (let k = 0; k < 3; k++) col[k] += items[i].color[k] * weight;
       w += weight;
     }
-    return { positions: out[gi].positions, indices: out[gi].indices, color: [col[0] / w, col[1] / w, col[2] / w], name: items[g[0]].name };
+    return { positions: out[gi].positions, indices: out[gi].indices, color: [col[0] / w, col[1] / w, col[2] / w], name: items[g[0]].name, body: out[gi].body };
   });
 }

@@ -627,7 +627,11 @@ const BASELINE = {
   // for the lazy `threeMf-*.js`, billed to `importworker`), `geometry-*.js` 9.61 (+1.1: front
   // detection) and `fflate.module-*.js` 3.07, three's fflate, now split out because the lazy 3MF
   // chunk shares it (it was inside the engine chunk before).
-  importer: { gzip: 69.1 * 1000 },
+  // 2026-10-02 (moving parts): 69.10 -> 76.94, raised on purpose. `geometry-*.js` 13.62 (+4.0:
+  // `motion.ts`, the round-part fit, the wheel and axle finders and the fold planner, which the
+  // editor's picking reads too) and `importerEngine-*.js` 60.25 (+3.8: the preview's picking, tints
+  // and Play loop, the stored scene's export and read-back, the lighter mesh keeping its nodes).
+  importer: { gzip: 76.94 * 1000 },
   // 2026-10-01: NEW (lane 9). `importWorker-*.js` 104.06 (three.js core, the GLB/glTF, STL, OBJ+MTL
   // and PLY loaders, meshopt's simplifier, the weld and the crease: the parse-to-prepared pipeline
   // that used to block the main thread for seconds; and GLTFExporter for the bake's mesh half),

@@ -34966,6 +34966,194 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
 }
 
 /**
+ * MOVING PARTS (`docs/area/robot-import.md`, "Moving parts"). The synthetic robot with a body id per
+ * solid and a ramp the file shows deployed: the wheels are found from the floor contacts, a click on
+ * a roller takes its shaft, a ramp folds for the measurement (so the robot fits the 18-in start) and
+ * the folded model frame rebuilds bit for bit, a saved robot reopens with the same hinge, and the
+ * stored GLB keeps each moving part a node of its own through the lighter relay mesh.
+ */
+{
+  const geo = await import('../src/robotImport/geometry');
+  const synth = await import('./robot-import/synthRobot');
+  const motion = await import('../src/robotImport/motion');
+  const rtypes = await import('../src/robotImport/types');
+  const { Measurer } = await import('../src/robotImport/engine/measureSession');
+  type P = import('../src/robotImport/geometry').MeshPart;
+  const prisms = [
+    ...synth.synthRobot(),
+    synth.cylY('shaft', [0.7, 0.7, 0.7], 9, 1.5, 0.2, -6.5, 6.5, 12),
+    // the ramp, as the file shows it: deployed, flat out in front of the robot
+    synth.box('ramp', [0.9, 0.8, 0.2], 9.6, 20, -6, 6, 0.2, 0.45),
+    synth.box('ramp_bolt', [0.6, 0.6, 0.6], 15, 15.3, 2, 2.3, 0.45, 0.7),
+    // a roller at the ramp's far end, which folds with it
+    synth.cylY('ramp_roller', [0.2, 0.7, 0.3], 19, 0.9, 0.4, -5, 5, 12),
+  ];
+  const id = (name: string): number => prisms.findIndex((p) => p.name === name);
+  // the file as CAD writes it (Z up, front −Y, millimetres): the importer's default front
+  const parts: P[] = synth.synthParts(prisms, synth.FRAMES.cadMm).map((p, i) => ({ ...p, body: new Uint32Array(p.positions.length / 3).fill(i) }));
+  const prepared = { name: 'moving.stl', format: 'stl' as const, bytes: 0, fileUnit: null, parts, trisIn: geo.triangleCount(parts), notes: [], trisOut: geo.triangleCount(parts), simplifyError: 0 };
+  const base = { ...geo.defaultImportSetup(), units: 'mm' as const, up: '+z' as const, yaw: 0 as const };
+  const codes = (m: { checks: { code: string }[] }): string[] => m.checks.map((c) => c.code);
+
+  const flat = geo.measureParts(parts, base, { format: 'stl' });
+  check('moving parts: the ramp the file shows deployed makes the robot oversize when nothing is marked', codes(flat.measurement).includes('oversize'), String(flat.measurement.size.length));
+  check('moving parts: the oversize sentence points at Moving parts', /Moving parts/.test(flat.measurement.checks.find((c) => c.code === 'oversize')?.message ?? ''));
+
+  // ---- the wheels, from the floor contacts --------------------------------------------------------
+  const wheelsAt = flat.measurement.wheelsUsed ?? flat.measurement.wheels.contacts;
+  const found = motion.findWheelGroups(flat.modelParts, wheelsAt, 'mecanum', (104 / 25.4));
+  const wheelIds = ['wheel_5.5_5.5', 'wheel_5.5_-5.5', 'wheel_-5.5_5.5', 'wheel_-5.5_-5.5'].map(id);
+  check(
+    'moving parts: findWheelGroups finds the four wheels from the floor contacts, one body each, FL FR BL BR, and nothing of the frame',
+    found.length === 4 && found.every((g, i) => g.role === 'wheel' && g.corner === i && g.bodies.length === 1 && g.bodies[0] === wheelIds[i]),
+    JSON.stringify(found),
+  );
+  const fl = motion.coaxialBodies(flat.modelParts, wheelIds[0], 'wheel');
+  check('moving parts: a click on a wheel takes that wheel, not the one across the robot on the same axle line', fl.length === 1 && fl[0] === wheelIds[0], JSON.stringify(fl));
+  const roller = motion.coaxialBodies(flat.modelParts, id('intake'), 'roller');
+  check('moving parts: a click on a roller takes its shaft too, and no rail it runs through', JSON.stringify(roller) === JSON.stringify([id('intake'), id('shaft')].sort((a, b) => a - b)), JSON.stringify(roller));
+  const rampBodies = motion.mountedBodies(flat.modelParts, id('ramp'));
+  check(
+    'moving parts: a click on a plate takes the smaller parts mounted inside its box (the ramp takes its bolt), never the roller beside it or the robot',
+    JSON.stringify(rampBodies) === JSON.stringify([id('ramp'), id('ramp_bolt')].sort((a, b) => a - b)),
+    JSON.stringify(rampBodies),
+  );
+
+  // ---- the ramp folds for the measurement ----------------------------------------------------------
+  const setup = {
+    ...base,
+    motion: [...found, { role: 'roller' as const, bodies: roller }, { role: 'ramp' as const, bodies: rampBodies }, { role: 'roller' as const, bodies: [id('ramp_roller')] }],
+  };
+  const folded = geo.measureParts(parts, setup, { format: 'stl' });
+  const fm = folded.measurement;
+  check('moving parts: marked as a ramp, it is measured folded, and the robot fits the 18-in start', !codes(fm).includes('oversize') && fm.size.length <= 18.05 && fm.size.height < 18, `${fm.size.length} × ${fm.size.height}`);
+  const ramp = fm.motion?.find((p) => p.role === 'ramp');
+  check('moving parts: the ramp folds a quarter turn (stands up over its hinge) and deploys back by it', !!ramp && Math.abs(ramp.deploy - Math.PI / 2) < (2 * Math.PI) / 180 && ramp.group === 5, JSON.stringify(ramp));
+  const w0 = fm.motion?.find((p) => p.role === 'wheel' && p.corner === 0);
+  check(
+    'moving parts: a wheel is measured round about its level axle at its own radius, the axle turned so a positive turn rolls the robot forward',
+    !!w0 && Math.abs(w0.radius - synth.WHEEL_R) < 0.08 && w0.axis[1] > 0.99 && w0.group === 0,
+    JSON.stringify(w0),
+  );
+  const rl = fm.motion?.find((p) => p.group === 4);
+  check('moving parts: the roller is measured at its own radius, on its own axle, riding on nothing', !!rl && Math.abs(rl.radius - 1) < 0.08 && Math.abs(rl.axis[1]) > 0.99 && rl.parent === -1, JSON.stringify(rl));
+  const rr = fm.motion?.find((p) => p.group === 6);
+  check(
+    'moving parts: a roller on the ramp rides it: folded up with it (its axle now high over the hinge) and the ramp its parent',
+    !!rr && !!ramp && rr.parent === fm.motion!.indexOf(ramp) && rr.pivot[2] > 8 && Math.abs(rr.radius - 0.4) < 0.05,
+    JSON.stringify(rr),
+  );
+  const { oriented, modelParts } = geo.orientParts(parts, setup, { format: 'stl' });
+  const same = geo.toModelFrame(parts, oriented.sourceToModel, oriented.folds);
+  const bits = (a: Float32Array, b: Float32Array): boolean => a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
+  check('moving parts: toModelFrame(sourceToModel, folds) rebuilds the FOLDED model frame bit for bit (the main thread trusts the worker’s plan)', same.length === modelParts.length && same.every((p, i) => bits(p.positions, modelParts[i].positions)));
+  check('moving parts: an orientation with a fold survives a structured clone (the measure worker posts it)', JSON.stringify(structuredClone(oriented).folds) === JSON.stringify(oriented.folds));
+  check('moving parts: a fold re-measures the heavy half (orientKey), a spinning part alone does not', geo.orientKey(setup) !== geo.orientKey(base) && geo.orientKey({ ...base, motion: [{ role: 'roller', bodies: roller }] }) === geo.orientKey(base));
+  const meas = new Measurer(prepared);
+  const viaMeasurer = meas.normalise(setup);
+  check('moving parts: the engine’s cached measurer reports the same moving parts as measureParts, field for field', JSON.stringify(viaMeasurer.measurement.motion) === JSON.stringify(fm.motion));
+
+  // ---- saved: the stored mesh is folded, and reopening does not fold it twice ----------------------
+  const stored = motion.motionAsStored(setup.motion, fm.motion);
+  const sr = stored?.find((g) => g.role === 'ramp');
+  check('moving parts: saving rewrites a deployed ramp as the stored mesh has it (folded, deploying by what was measured)', !!sr && sr.filePose === 'folded' && sr.deployDeg === Math.round(((ramp?.deploy ?? 0) * 180) / Math.PI) && sr.foldDeg === undefined && stored!.filter((g) => g.role === 'wheel').every((g, i) => g === setup.motion[i]));
+  // reopened as the editor reopens a saved robot: the stored mesh (robot frame → stored frame), read in metres, +Y up
+  const o1 = fm.origin;
+  const robotParts = folded.modelParts.map((p) => {
+    const a = new Float32Array(p.positions);
+    for (let i = 0; i < a.length; i += 3) {
+      a[i] -= o1.x;
+      a[i + 1] -= o1.y;
+    }
+    return { ...p, positions: a };
+  });
+  const storedParts = geo.transformParts(robotParts, rtypes.ROBOT_TO_STORED_MESH);
+  const again = geo.measureParts(storedParts, { ...base, units: 'm', up: '+y', motion: stored }, { format: 'glb' });
+  const ramp2 = again.measurement.motion?.find((p) => p.role === 'ramp');
+  const o2 = again.measurement.origin;
+  const dPivot = ramp && ramp2 ? Math.hypot(ramp.pivot[0] - o1.x - (ramp2.pivot[0] - o2.x), ramp.pivot[1] - o1.y - (ramp2.pivot[1] - o2.y), ramp.pivot[2] - ramp2.pivot[2]) : Infinity;
+  check(
+    'moving parts: the saved robot reopens fitting, its ramp hinged where it was (within 0.6 in) and deploying by the same angle',
+    !codes(again.measurement).includes('oversize') && !!ramp2 && dPivot < 0.6 && Math.abs(ramp2.deploy - ramp!.deploy) < 0.02 && Math.abs(again.measurement.size.length - fm.size.length) < 0.05,
+    `pivot off ${dPivot.toFixed(3)} in`,
+  );
+
+  // ---- what a stored mesh may carry -----------------------------------------------------------
+  const ok = rtypes.readStoredMotion({ v: 1, role: 'flywheel', axis: [0, 3, 4], radius: 99, deploy: 1 });
+  check(
+    'moving parts: readStoredMotion keeps a known role, makes the axis unit and clamps the radius, and refuses an unknown role, a zero axis or a NaN',
+    !!ok && Math.abs(ok.axis[1] - 0.6) < 1e-12 && ok.radius === 20 &&
+      rtypes.readStoredMotion({ v: 1, role: 'laser', axis: [0, 0, 1], radius: 1, deploy: 0 }) === null &&
+      rtypes.readStoredMotion({ v: 1, role: 'wheel', axis: [0, 0, 0], radius: 1, deploy: 0 }) === null &&
+      rtypes.readStoredMotion({ v: 1, role: 'wheel', axis: [0, NaN, 1], radius: 1, deploy: 0 }) === null,
+  );
+
+  // ---- the stored GLB: each moving part a node at its pivot, through the lighter relay mesh -----
+  const THREE = await import('three');
+  const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+  const { exportStoredScene, readStoredScene, sceneParts } = await import('../src/robotImport/engine/bakeMesh');
+  const { splitMoving } = await import('../src/robotImport/engine/bake');
+  const { liteMesh } = await import('../src/robotImport/engine/lite');
+  const { creaseParts } = await import('../src/robotImport/engine/meshGroup');
+  const g = globalThis as unknown as { FileReader?: unknown };
+  const hadReader = !!g.FileReader;
+  if (!hadReader) {
+    g.FileReader = class {
+      result: unknown = null;
+      onloadend: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      readAsArrayBuffer(blob: Blob): void {
+        void blob.arrayBuffer().then((b) => {
+          this.result = b;
+          this.onloadend?.();
+          this.onload?.();
+        });
+      }
+    };
+  }
+  try {
+    const mp = fm.motion ?? [];
+    const { rest, moving } = splitMoving(folded.modelParts, mp);
+    const movingTris = moving.reduce((s, ps) => s + geo.triangleCount(ps), 0);
+    check('moving parts: splitMoving keeps every triangle, each moving body’s in its own part', geo.triangleCount(rest) + movingTris === geo.triangleCount(folded.modelParts) && moving.every((ps) => ps.length > 0));
+    // the scene in the model frame (it is only a round trip here; the bake turns it into the stored frame)
+    const scene = {
+      rest: creaseParts(rest),
+      moving: mp.map((p, i) => ({ info: { v: 1 as const, role: p.role, axis: p.axis, radius: p.radius, deploy: p.deploy, ...(p.corner !== undefined ? { corner: p.corner } : {}) }, pivot: p.pivot, parent: p.parent, parts: creaseParts(moving[i]) })),
+    };
+    const glb = await exportStoredScene(scene);
+    check('moving parts: the stored GLB with body ids (`_BODY`) and moving-part nodes passes the relay’s validator', VC.validateMeshGlb(new Uint8Array(glb)) === null, String(VC.validateMeshGlb(new Uint8Array(glb))));
+    const back = readStoredScene((await new GLTFLoader().parseAsync(glb, '')).scene);
+    // a rider is its carrier's child, so the nodes come back in tree order: matched by role and pivot
+    const near = (m: (typeof back.moving)[number]) =>
+      Math.min(...mp.filter((p) => p.role === m.info.role && Math.abs(p.axis[0] - m.info.axis[0]) + Math.abs(p.axis[1] - m.info.axis[1]) + Math.abs(p.axis[2] - m.info.axis[2]) < 1e-6).map((p) => Math.hypot(m.pivot[0] - p.pivot[0], m.pivot[1] - p.pivot[1], m.pivot[2] - p.pivot[2])));
+    const pivotOff = Math.max(...back.moving.map(near));
+    const roles = (r: string[]): string => r.sort().join();
+    const rider = back.moving.find((m) => m.info.role === 'roller' && m.parent >= 0);
+    check(
+      'moving parts: read back, every moving part is a node at its pivot (to 1e-4 in) with its role and axis, the ramp’s roller nested in the ramp, and no triangle moved between the robot and its parts',
+      back.moving.length === mp.length && pivotOff < 1e-4 && roles(back.moving.map((m) => m.info.role)) === roles(mp.map((p) => p.role)) &&
+        (mp.some((p) => p.role === 'roller' && p.parent >= 0) ? !!rider && back.moving[rider.parent]?.info.role === 'ramp' : true) &&
+        geo.triangleCount(back.rest) === geo.triangleCount(scene.rest) && geo.triangleCount(sceneParts(back)) === geo.triangleCount(sceneParts(scene)),
+      `pivot off ${pivotOff}`,
+    );
+    const bodyKept = back.rest.some((p) => !!p.body) && back.moving.every((m) => m.parts.every((p) => !!p.body));
+    check('moving parts: the body ids come back from `_BODY` (an edit of a saved robot can pick parts again)', bodyKept);
+    const lite = await liteMesh(glb, 2_000_000);
+    const liteBack = lite ? readStoredScene((await new GLTFLoader().parseAsync(lite, '')).scene) : null;
+    const json = (b: ArrayBuffer): string => new TextDecoder().decode(new Uint8Array(b, 20, new DataView(b).getUint32(12, true)));
+    check(
+      'moving parts: the lighter relay mesh keeps every moving part a node of its own, and drops the body ids (`_BODY`)',
+      !!lite && !!liteBack && roles(liteBack.moving.map((m) => m.info.role)) === roles(mp.map((p) => p.role)) && json(glb).includes('_BODY') && !json(lite).includes('_BODY'),
+      `${lite?.byteLength} B, ${liteBack?.moving.map((m) => m.info.role).join()}, glb _BODY ${json(glb).includes('_BODY')}, lite _BODY ${lite ? json(lite).includes('_BODY') : '-'}`,
+    );
+    void THREE;
+  } finally {
+    if (!hadReader) delete g.FileReader;
+  }
+}
+
+/**
  * THE IMPORTER UI'S DOM-FREE HALF (lane 4: `src/robotImport/ui/`). The copy keeps the house rules,
  * the review list blocks what `coerceImported` would refuse (and passes an ordinary robot), the
  * wheel mirror is a mirror, and the wiring the screens depend on is still there: the test drive's

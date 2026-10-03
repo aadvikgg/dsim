@@ -2,11 +2,11 @@
  * The messages between the main thread (`importSession.ts`) and the import worker
  * (`importWorker.ts`). Types only, so neither side imports the other.
  */
-import type { MeshPart } from '../geometry';
 import type { ModelFormat } from '../types';
 import type { ImportErrorCode } from './importError';
 import type { LoadStage, ParsedFiles } from './parse';
 import type { PreparedModel } from './prepare';
+import type { StoredScene } from './bakeMesh';
 import type { ZipPick } from './zip';
 
 /** what the import is doing; `simplify` carries the triangle count it started from */
@@ -27,22 +27,23 @@ export type ImportRequest =
   | { kind: 'zip'; pick: ZipPick; budget: number }
   /** parts read elsewhere (STEP in its own workers), not yet merged */
   | { kind: 'parts'; name: string; format: ModelFormat; parsed: ParsedFiles; budget: number }
-  /** the bake's mesh half (`bakeMeshHere`): robot-local creased parts → the stored GLB */
-  | { kind: 'bake'; parts: MeshPart[] };
+  /** the bake's mesh half (`bakeSceneHere`): the stored scene (rest and moving parts) → the stored GLB */
+  | { kind: 'bake'; scene: StoredScene };
 
 export type ImportResponse =
   | ({ kind: 'progress' } & ImportProgress)
   | { kind: 'done'; model: PreparedModel }
-  | { kind: 'baked'; glb: ArrayBuffer; parts: MeshPart[]; refits: number }
+  | { kind: 'baked'; glb: ArrayBuffer; scene: StoredScene; refits: number }
   | { kind: 'error'; code: ImportErrorCode | null; name: string; message: string };
 
 /** every distinct ArrayBuffer under these parts (a buffer listed twice is a DataCloneError) */
-export function partBuffers(parts: readonly { positions: Float32Array; indices: Uint32Array | null; normals?: Float32Array | null }[]): ArrayBuffer[] {
+export function partBuffers(parts: readonly { positions: Float32Array; indices: Uint32Array | null; normals?: Float32Array | null; body?: Uint32Array | null }[]): ArrayBuffer[] {
   const out = new Set<ArrayBuffer>();
   for (const p of parts) {
     out.add(p.positions.buffer as ArrayBuffer);
     if (p.indices) out.add(p.indices.buffer as ArrayBuffer);
     if (p.normals) out.add(p.normals.buffer as ArrayBuffer);
+    if (p.body) out.add(p.body.buffer as ArrayBuffer);
   }
   return [...out];
 }
