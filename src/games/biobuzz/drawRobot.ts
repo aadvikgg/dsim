@@ -72,7 +72,7 @@ import {
   turretLocal,
   turretRadius,
 } from './mounts';
-import { bbFixedFacing, bbFixedHood, bbFixedLocal, bbFlowerInReach, bbFootprint, bbMouths, bbPlacePointLocal } from './robot';
+import { bbFixedAxisLocal, bbFixedFacing, bbFixedHood, bbFixedLocal, bbFlowerInReach, bbFootprint, bbMouths, bbPlacePointLocal } from './robot';
 import { BB_ALLIANCE_BLUE, ELEMENT_FILL, ELEMENT_LINE } from './draw';
 
 /**
@@ -329,8 +329,9 @@ export function drawBiobuzzRobot(
     drawAimMark(ctx, x, y, r.heading + bbFixedFacing(r.spec), turretRadius(r.spec), loaded);
   } else if (launcher.kind === 'fixed') {
     // THE FIXED SHOOTER: the turret's own head, with no ring under it, square to its edge and held
-    // at the build's hood angle — the sim's release (`bbFixedLocal`) is this head's lip
-    drawTurret(ctx, r, launcher.mount, r.heading + bbFixedFacing(r.spec), bbFixedHood(r.spec), loaded, null, true);
+    // at the build's hood angle — the sim's release (`bbFixedLocal`) is this head's lip, an
+    // import's placed lip included (`bbFixedAxisLocal`, the 3D head's own axis)
+    drawTurret(ctx, r, launcher.mount, r.heading + bbFixedFacing(r.spec), bbFixedHood(r.spec), loaded, null, true, bbFixedAxisLocal(r.spec));
   } else if (bbIsTurreted(launcher)) {
     // A DOUBLE turret is TWO INDIVIDUAL turrets, each at its own cell with its own yaw and pitch:
     // turret 0 (`mount`) launches POLLEN, turret 1 (`mount2`) launches NECTAR and wears the
@@ -690,9 +691,11 @@ function drawTurret(
   nectarAccent: string | null,
   /** a FIXED shooter: the head alone on a square riser, no slew ring, no teeth, no feed hole */
   ringless = false,
+  /** the head's axis, robot-local, when it is not the cell's (`bbFixedAxisLocal`) */
+  at?: { x: number; y: number },
 ): void {
   const ring = turretRadius(r.spec);
-  const local = turretLocal(r.spec, pos);
+  const local = at ?? turretLocal(r.spec, pos);
   const cx = r.pos.x + Math.cos(r.heading) * local.x - Math.sin(r.heading) * local.y;
   const cy = r.pos.y + Math.sin(r.heading) * local.x + Math.cos(r.heading) * local.y;
   ctx.save();

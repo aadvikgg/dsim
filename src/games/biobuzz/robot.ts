@@ -747,6 +747,23 @@ export function bbFixedHood(spec: RobotSpec): number {
  * along the facing — so the 3D head and the sim release are one point. An IMPORT: the placed lip
  * (`mech.shooter`) at its placed height (`bbDumpZ`, the turretless reading of it).
  */
+/**
+ * WHERE A FIXED LAUNCHER'S HEAD STANDS, robot-local: the axis both drawings put the head on. A
+ * standard robot: its edge cell (`turretLocal`), which `bbFixedLocal` walks back from. An IMPORT
+ * with a placed lip: the lip walked FORWARD along the facing by the muzzle's setback, so the drawn
+ * lip lands on the release. One answer for the 2D sprite and the 3D head (`buildFixedShooter`);
+ * either way `release = axis − facing · bbMuzzleLocal(hood).back`.
+ */
+export function bbFixedAxisLocal(spec: RobotSpec): Vec2 {
+  const placed = spec.imported?.mech?.shooter;
+  if (spec.imported && placed) {
+    const face = bbFixedFacing(spec);
+    const back = bbMuzzleLocal(bbFixedHood(spec), 0).back;
+    return { x: placed.x + dcos(face) * back, y: placed.y + dsin(face) * back };
+  }
+  return turretLocal(spec, bbLauncherOf(spec, BB_HOOD_DEFAULT_DEG).mount);
+}
+
 export function bbFixedLocal(spec: RobotSpec): { x: number; y: number; z: number } {
   const placed = spec.imported?.mech?.shooter;
   if (spec.imported && placed) return { x: placed.x, y: placed.y, z: bbDumpZ(spec) };

@@ -250,7 +250,7 @@ import {
 } from '../../src/games/biobuzz/scene/renderRobots';
 import { lengthLimits } from '../../src/sim/drivetrain';
 import { BB_MOUNT_POSITIONS, bbMouthFrame, turretLocal, type BbMountPos } from '../../src/games/biobuzz/mounts';
-import { bbFixedLocal, bbMuzzleLocal } from '../../src/games/biobuzz/robot';
+import { bbFixedAxisLocal, bbFixedFacing, bbFixedHood, bbFixedLocal, bbMuzzleLocal } from '../../src/games/biobuzz/robot';
 import { BB_FIXED_HOOD_MAX_DEG, BB_FIXED_HOOD_MIN_DEG } from '../../src/games/biobuzz/config';
 import { INTAKE_RAIL_T } from '../../src/config';
 import { BB_DEFAULT_SPEC } from '../../src/games/biobuzz/coerce';
@@ -1844,6 +1844,55 @@ function fixedShooterChecks(check: Check): void {
   }
   check('fixed shooter 3D: every edge and hood angle builds one fixed head', nodes === 12, `${nodes}/12`);
   check('fixed shooter 3D: its drawn lip IS the sim’s release (`bbFixedLocal`), on every edge, at both ends of the hood’s travel', worst < 1e-6, `worst ${worst} ${where}`);
+
+  // AN IMPORT's fixed launcher: the placed point is the LIP, so the head's axis stands the muzzle's
+  // setback in front of it along the facing (`bbFixedAxisLocal`). The 2D sprite used to put the
+  // axis ON the placed point, a setback away from where the 3D head and the sim release are.
+  {
+    const imp = coerceImported({
+      v: 1, id: '00000000000000fb', heightIn: 14,
+      hull: [{ x: -8, y: -7 }, { x: 8, y: -7 }, { x: 8, y: 7 }, { x: -8, y: 7 }],
+      mech: { shooter: { x: 2, y: -3, z: 11 }, shooterYawDeg: 30 },
+    })!;
+    const spec = coerceSpec(
+      { ...BB_DEFAULT_SPEC, scoreMode: 'dumper', shooterMount: 'front', bbMech: { launcher: { kind: 'fixed', mount: 'front', hoodDeg: 70 }, lift: null, intake: { kind: 'sweeper' } }, imported: imp },
+      BB_DEFAULT_SPEC,
+      'biobuzz',
+    );
+    const axis = bbFixedAxisLocal(spec);
+    const rel = bbFixedLocal(spec);
+    const face = bbFixedFacing(spec);
+    const back = bbMuzzleLocal(bbFixedHood(spec), 0).back;
+    check(
+      'fixed shooter (import): release = axis − facing · setback, and the release is the placed lip',
+      Math.abs(axis.x - Math.cos(face) * back - rel.x) < 1e-9 && Math.abs(axis.y - Math.sin(face) * back - rel.y) < 1e-9 &&
+        rel.x === 2 && rel.y === -3 && Math.abs(back) > 0.1,
+      JSON.stringify({ axis, rel, back }),
+    );
+    const g = buildRobotGroup(spec, 1, 'blue', 'high');
+    g.updateMatrixWorld(true);
+    const exit = g.getObjectByName('bb-fixed-shooter')?.getObjectByName('bb-turret-exit');
+    const p = new THREE.Vector3();
+    exit?.getWorldPosition(p);
+    disposeRobotGroup(g);
+    check('fixed shooter 3D (import): the drawn lip is the placed release', !!exit && Math.hypot(p.x - rel.x, p.y - rel.y, p.z - rel.z) < 1e-6, exit ? `${p.x.toFixed(4)}, ${p.y.toFixed(4)}, ${p.z.toFixed(4)}` : 'no lip node');
+    const world = createBiobuzzWorld('free', 5, [{ id: 0, alliance: 'red', spec, assists: {} as never, startIndex: 0 }]);
+    const r = world.robots[0];
+    r.pos = { x: 0, y: 0 };
+    r.heading = 0;
+    const moves: number[][] = [];
+    const sink: unknown = new Proxy(function () {}, { get: () => sink, apply: () => sink });
+    const ctx = new Proxy({}, {
+      get: (_t, k) => (k === 'translate' ? (x: number, y: number) => { moves.push([x, y]); } : sink),
+      set: () => true,
+    }) as unknown as CanvasRenderingContext2D;
+    drawBiobuzzRobot(ctx, r, false, [], { x: 0, y: 1 }, world);
+    check(
+      'fixed shooter 2D (import): the head is drawn on `bbFixedAxisLocal`, so its lip is the placed release too',
+      moves.some(([x, y]) => Math.abs(x - axis.x) < 1e-9 && Math.abs(y - axis.y) < 1e-9) && !moves.some(([x, y]) => x === 2 && y === -3),
+      JSON.stringify({ axis, moves: moves.slice(-4) }),
+    );
+  }
 }
 
 /**

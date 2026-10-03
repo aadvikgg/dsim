@@ -109,7 +109,7 @@ import {
   bbRailSegments,
   type BbKeepOut,
 } from '../parts';
-import { bbFixedFacing, bbFixedHood, bbFixedLocal, bbFlowerInReach, bbMouths, bbMuzzleLocal, bbPlacePointLocal } from '../robot';
+import { bbFixedAxisLocal, bbFixedFacing, bbFixedHood, bbFixedLocal, bbFlowerInReach, bbMouths, bbMuzzleLocal, bbPlacePointLocal } from '../robot';
 import { bbDumpZ, bbDumperFrame, bbImportTurretAxleZ } from '../importMech';
 import { bbSpecKey } from '../specKey';
 import {
@@ -3099,19 +3099,15 @@ export function buildTurret(spec: RobotSpec, mountPos: BbMountPos, which: 0 | 1 
 export function buildFixedShooter(spec: RobotSpec, lip?: { x: number; y: number; z: number }): THREE.Group {
   const group = new THREE.Group();
   const H = bbHead(0);
-  const launcher = bbLauncherOf(spec, 0);
   const face = bbFixedFacing(spec);
   const hood = bbFixedHood(spec);
   const muzzle = bbMuzzleLocal(hood, 0);
   group.name = 'bb-fixed-shooter';
-  if (lip) {
-    // the axis sits `back` behind the lip along the facing; the whole head rides up or down so its
-    // lip is at the placed height, the placeholder turret's own bargain
-    group.position.set(lip.x + Math.cos(face) * muzzle.back, lip.y + Math.sin(face) * muzzle.back, BB_DECK_Z + (lip.z - muzzle.z));
-  } else {
-    const local = turretLocal(spec, launcher.mount);
-    group.position.set(local.x, local.y, BB_DECK_Z);
-  }
+  // the axis (`bbFixedAxisLocal`, the 2D sprite's too): an import's sits `back` in front of the
+  // placed lip along the facing, and the whole head rides up or down so its lip is at the placed
+  // height, the placeholder turret's own bargain
+  const axis = bbFixedAxisLocal(spec);
+  group.position.set(axis.x, axis.y, lip ? BB_DECK_Z + (lip.z - muzzle.z) : BB_DECK_Z);
   const ring = turretRadius(spec);
   const side = Math.max(1.2, ring * 1.3);
   const riserGeo = framePart(`fixedRiser:${side.toFixed(4)}`, () => [boxAt(side, side, BB_TURRET_RING_H, 0, 0, BB_TURRET_RING_H / 2)]);
