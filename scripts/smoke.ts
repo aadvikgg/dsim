@@ -36731,5 +36731,296 @@ function fxImportFixed(): RobotSpec {
   check('mesh quality: simplifyLists keeps each list apart and brings the whole under its budget', both.lists.length === 2 && both.lists[1].length === 1 && both.trisOut <= 4000 && triangleCount(both.lists[0]) + triangleCount(both.lists[1]) === both.trisOut, String(both.trisOut));
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// THE COMPRESSED STORED MESH (`writeStoredGlb`, `src/robotImport/engine/storedGlb.ts`)
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const THREE = await import('three');
+  const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+  const { MeshoptDecoder } = await import('three/examples/jsm/libs/meshopt_decoder.module.js');
+  const { exportStoredScene, readStoredScene, sceneParts, bakeSceneHere } = await import('../src/robotImport/engine/bakeMesh');
+  const { writeStoredGlb, glbUsesExtensions, STORED_POSITION_BITS } = await import('../src/robotImport/engine/storedGlb');
+  const { liteMesh } = await import('../src/robotImport/engine/lite');
+  const { creaseParts } = await import('../src/robotImport/engine/meshOps');
+  const { loadModel } = await import('../src/robotImport/engine/load');
+  const { triangleCount } = await import('../src/robotImport/geometry');
+  const { finishOf } = await import('../src/robotImport/finish');
+  const rtypes = await import('../src/robotImport/types');
+  const share = await import('../src/robotImport/shareFile');
+  const { prepareImportedMesh, importedMotionNodes } = await import('../src/games/biobuzz/scene/renderImported');
+  type Part = import('../src/robotImport/geometry').MeshPart;
+  // three's exporter (the float writer) reads a Blob back through FileReader, which Node does not have
+  const g = globalThis as unknown as { FileReader?: unknown };
+  const hadReader = !!g.FileReader;
+  if (!hadReader) {
+    g.FileReader = class {
+      result: unknown = null;
+      onloadend: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      readAsArrayBuffer(blob: Blob): void {
+        void blob.arrayBuffer().then((b) => {
+          this.result = b;
+          this.onloadend?.();
+          this.onload?.();
+        });
+      }
+    };
+  }
+  const loader = new GLTFLoader();
+  loader.setMeshoptDecoder(MeshoptDecoder as Parameters<typeof loader.setMeshoptDecoder>[0]);
+  const parse = async (b: ArrayBuffer) => (await loader.parseAsync(b.slice(0), '')).scene;
+  // a part from a three geometry, moved by `at`, with a body id per `bodySize` vertices, its
+  // vertices jittered ±`jitter` (metres) so the codec meets CAD-like coordinates, not a perfect grid
+  let seed = 7;
+  const rnd = (): number => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
+  const partOf = (geo: import('three').BufferGeometry, at: [number, number, number], color: [number, number, number], name: string, body0: number, bodySize = 1e9, jitter = 0): Part => {
+    const pos = geo.getAttribute('position');
+    const positions = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      positions[3 * i] = pos.getX(i) + at[0] + (rnd() - 0.5) * 2 * jitter;
+      positions[3 * i + 1] = pos.getY(i) + at[1] + (rnd() - 0.5) * 2 * jitter;
+      positions[3 * i + 2] = pos.getZ(i) + at[2] + (rnd() - 0.5) * 2 * jitter;
+    }
+    const indices = geo.index ? Uint32Array.from(geo.index.array as ArrayLike<number>) : Uint32Array.from({ length: pos.count }, (_, i) => i);
+    const body = Uint32Array.from({ length: pos.count }, (_, i) => body0 + Math.floor(i / bodySize));
+    return { positions, indices, color, name, body };
+  };
+  try {
+    // ---- a robot with moving parts: two static colours, a wheel, and a roller riding on it ----
+    const frame = partOf(new THREE.BoxGeometry(0.4, 0.05, 0.4, 20, 4, 20), [0, 0.08, 0], [0.8, 0.8, 0.82], 'frame', 1, 400);
+    const tower = partOf(new THREE.CylinderGeometry(0.03, 0.03, 0.3, 24, 6), [0.1, 0.25, -0.1], [0.05, 0.05, 0.05], 'tower', 20);
+    const wheel = partOf(new THREE.TorusGeometry(0.045, 0.012, 16, 48).rotateY(Math.PI / 2), [0.21, 0.05, 0.15], [0.02, 0.02, 0.02], 'wheel', 30);
+    const roller = partOf(new THREE.CylinderGeometry(0.015, 0.015, 0.3, 16, 2).rotateZ(Math.PI / 2), [0.21, 0.12, 0.15], [0.9, 0.3, 0.05], 'roller', 31);
+    const scene = {
+      rest: creaseParts([frame, tower]),
+      moving: [
+        { info: { v: 1 as const, role: 'wheel' as const, axis: [1, 0, 0] as [number, number, number], radius: 0.057, deploy: 0, corner: 0 }, pivot: [0.21, 0.05, 0.15] as [number, number, number], parent: -1, parts: creaseParts([wheel]) },
+        { info: { v: 1 as const, role: 'roller' as const, axis: [1, 0, 0] as [number, number, number], radius: 0.015, deploy: 0 }, pivot: [0.21, 0.12, 0.15] as [number, number, number], parent: 0, parts: creaseParts([roller]) },
+      ],
+    };
+    const glb = await writeStoredGlb(scene);
+    const json = JSON.parse(new TextDecoder().decode(new Uint8Array(glb, 20, new DataView(glb).getUint32(12, true)))) as {
+      extensionsRequired?: string[];
+      materials: { pbrMetallicRoughness: { baseColorFactor: number[]; metallicFactor: number; roughnessFactor: number } }[];
+      meshes: { primitives: { attributes: Record<string, number> }[] }[];
+      accessors: { componentType: number; normalized?: boolean; type: string }[];
+    };
+    check(
+      'stored mesh: the bake writes KHR_mesh_quantization and EXT_meshopt_compression, both required (no float fallback in the file)',
+      glbUsesExtensions(glb) && JSON.stringify(json.extensionsRequired?.slice().sort()) === JSON.stringify(['EXT_meshopt_compression', 'KHR_mesh_quantization']),
+      JSON.stringify(json.extensionsRequired),
+    );
+    const colours = [frame, tower, wheel, roller].map((p) => p.color);
+    check(
+      'stored mesh: one material per colour, each with its colour’s finish (finishOf)',
+      json.materials.length === colours.length &&
+        colours.every((c) => json.materials.some((m) => m.pbrMetallicRoughness.baseColorFactor.slice(0, 3).join() === c.join() && m.pbrMetallicRoughness.metallicFactor === finishOf(c).metalness && m.pbrMetallicRoughness.roughnessFactor === finishOf(c).roughness)),
+    );
+    const bodyAcc = json.meshes.map((m) => json.accessors[m.primitives[0].attributes._BODY]);
+    check(
+      'stored mesh: every mesh carries `_BODY`, one unsigned 32-bit integer per vertex, unnormalised (what the relay validator and `bodyIdsOf` read)',
+      bodyAcc.length === 4 && bodyAcc.every((a) => !!a && a.componentType === 5125 && a.type === 'SCALAR' && !a.normalized),
+    );
+    const sc = await parse(glb);
+    const back = readStoredScene(sc);
+    // every vertex read back sits within half a quantisation step (per axis) of a source vertex of
+    // the same part with the same body, and every source vertex has one read back near it
+    const near = (a: readonly Part[], b: readonly Part[], tol: number, bodies: boolean): number => {
+      let worst = 0;
+      a.forEach((pa) => {
+        const pb = b.find((q) => q.color.join() === pa.color.join());
+        if (!pb) {
+          worst = Infinity;
+          return;
+        }
+        const cell = tol * 4;
+        const grid = new Map<string, number[]>();
+        for (let i = 0; i < pb.positions.length; i += 3) {
+          const k = `${Math.floor(pb.positions[i] / cell)},${Math.floor(pb.positions[i + 1] / cell)},${Math.floor(pb.positions[i + 2] / cell)}`;
+          (grid.get(k) ?? grid.set(k, []).get(k)!).push(i / 3);
+        }
+        for (let i = 0; i < pa.positions.length; i += 3) {
+          const [x, y, z] = [pa.positions[i], pa.positions[i + 1], pa.positions[i + 2]];
+          let best = Infinity;
+          for (let dx = -1; dx <= 1; dx++)
+            for (let dy = -1; dy <= 1; dy++)
+              for (let dz = -1; dz <= 1; dz++)
+                for (const j of grid.get(`${Math.floor(x / cell) + dx},${Math.floor(y / cell) + dy},${Math.floor(z / cell) + dz}`) ?? []) {
+                  if (bodies && pa.body && pb.body && pa.body[i / 3] !== pb.body[j]) continue;
+                  best = Math.min(best, Math.hypot(pb.positions[3 * j] - x, pb.positions[3 * j + 1] - y, pb.positions[3 * j + 2] - z));
+                }
+          worst = Math.max(worst, best);
+        }
+      });
+      return worst;
+    };
+    const srcParts = sceneParts(scene);
+    const backParts = sceneParts(back);
+    // a part's step is its largest side over 2^bits − 1; the frame (0.4 m) is the largest
+    const step = 0.4 / (2 ** STORED_POSITION_BITS - 1);
+    const tol = (step * Math.sqrt(3)) / 2 + 1e-7;
+    const off = Math.max(near(backParts, srcParts, tol, true), near(srcParts, backParts, tol, true));
+    check(
+      'stored mesh: read back, every vertex is its source’s to half a quantisation step (and the same body), the triangle count unchanged',
+      off <= tol && triangleCount(backParts) === triangleCount(srcParts),
+      `${(off * 1e6).toFixed(1)} µm ≤ ${(tol * 1e6).toFixed(1)} µm, ${triangleCount(backParts)} triangles`,
+    );
+    const rider = back.moving.find((m) => m.info.role === 'roller');
+    const wheelBack = back.moving.find((m) => m.info.role === 'wheel');
+    check(
+      'stored mesh: each moving part is a node at its pivot with its `extras.dsim`, the roller nested in the wheel, and readStoredScene finds them as it did in the float GLB',
+      back.moving.length === 2 && !!rider && !!wheelBack && back.moving[rider.parent] === wheelBack &&
+        [rider, wheelBack].every((m) => {
+          const src = scene.moving.find((s) => s.info.role === m.info.role)!;
+          return Math.hypot(m.pivot[0] - src.pivot[0], m.pivot[1] - src.pivot[1], m.pivot[2] - src.pivot[2]) < 1e-7 && JSON.stringify(m.info) === JSON.stringify(src.info);
+        }) &&
+        triangleCount(back.rest) === triangleCount(scene.rest),
+    );
+    // the normals: the octahedral 8-bit ones within 2° of the creased float normals
+    let worstDeg = 0;
+    sc.updateMatrixWorld(true);
+    sc.traverse((o) => {
+      const m = o as import('three').Mesh;
+      if (!m.isMesh) return;
+      const c = (m.material as import('three').MeshStandardMaterial).color;
+      const src = srcParts.find((p) => Math.abs(p.color[0] - c.r) < 1e-6 && Math.abs(p.color[1] - c.g) < 1e-6 && Math.abs(p.color[2] - c.b) < 1e-6)!;
+      const pos = m.geometry.getAttribute('position');
+      const nrm = m.geometry.getAttribute('normal');
+      const v = new THREE.Vector3();
+      for (let i = 0; i < pos.count; i++) {
+        v.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(m.matrixWorld);
+        const n = new THREE.Vector3(nrm.getX(i), nrm.getY(i), nrm.getZ(i)).normalize();
+        let best = Infinity;
+        for (let j = 0; j < src.positions.length; j += 3) {
+          if (Math.hypot(src.positions[j] - v.x, src.positions[j + 1] - v.y, src.positions[j + 2] - v.z) > tol) continue;
+          best = Math.min(best, Math.acos(Math.min(1, n.dot(new THREE.Vector3(src.normals![j], src.normals![j + 1], src.normals![j + 2])))));
+        }
+        worstDeg = Math.max(worstDeg, (best * 180) / Math.PI);
+      }
+    });
+    check('stored mesh: the normals are the creased ones to 2° (8-bit octahedral)', worstDeg < 2, `${worstDeg.toFixed(2)}°`);
+
+    // ---- the scene: quantised attributes become Float32, the picture does not move ----
+    const float = await exportStoredScene(scene);
+    // every vertex in the glTF scene's own frame (the template wraps it in the robot frame)
+    const sceneFrame = (gl: import('three').Object3D): number[] => {
+      gl.updateWorldMatrix(true, true);
+      const inv = new THREE.Matrix4().copy(gl.matrixWorld).invert();
+      const out: number[] = [];
+      const v = new THREE.Vector3();
+      gl.traverse((o) => {
+        const m = o as import('three').Mesh;
+        if (!m.isMesh) return;
+        const to = new THREE.Matrix4().multiplyMatrices(inv, m.matrixWorld);
+        const p = m.geometry.getAttribute('position');
+        for (let i = 0; i < p.count; i++) out.push(...v.set(p.getX(i), p.getY(i), p.getZ(i)).applyMatrix4(to).toArray());
+      });
+      return out;
+    };
+    const qScene = await parse(glb);
+    const before = sceneFrame(qScene);
+    const prepped = prepareImportedMesh(qScene);
+    const after = sceneFrame(qScene);
+    let attrsFloat = true;
+    let moved = 0;
+    for (let i = 0; i < before.length; i++) moved = Math.max(moved, Math.abs(after[i] - before[i]));
+    prepped.traverse((o) => {
+      const m = o as import('three').Mesh;
+      if (!m.isMesh) return;
+      for (const name of ['position', 'normal']) {
+        const a = m.geometry.getAttribute(name) as import('three').BufferAttribute;
+        if (!a || (a as unknown as { isInterleavedBufferAttribute?: boolean }).isInterleavedBufferAttribute || !(a.array instanceof Float32Array) || a.normalized) attrsFloat = false;
+      }
+      if (m.geometry.getAttribute('_body')) attrsFloat = false;
+    });
+    check('stored mesh: the 3D scene draws it from plain Float32 positions and normals (quantised attributes are slower on ANGLE/D3D11), every vertex where it was, no `_body` uploaded', attrsFloat && moved < 1e-9 && before.length === after.length, `${moved}`);
+    const fScene = await parse(float);
+    const fAttrs: unknown[] = [];
+    fScene.traverse((o) => {
+      const m = o as import('three').Mesh;
+      if (m.isMesh) fAttrs.push(m.geometry.getAttribute('position'), m.geometry.getAttribute('normal'));
+    });
+    const fPrepped = prepareImportedMesh(fScene);
+    const fAfter: unknown[] = [];
+    fPrepped.traverse((o) => {
+      const m = o as import('three').Mesh;
+      if (m.isMesh) fAfter.push(m.geometry.getAttribute('position'), m.geometry.getAttribute('normal'));
+    });
+    check('stored mesh: a float stored mesh saved before loads as it always did (its attributes are left as they are)', fAttrs.length > 0 && fAttrs.every((a, i) => a === fAfter[i]));
+    const motion = (root: import('three').Object3D) => importedMotionNodes(root).map((n) => ({ role: n.info.role, at: [n.at.x, n.at.y], axis: [n.axisRobot.x, n.axisRobot.y, n.axisRobot.z] }));
+    const qm = motion(prepped);
+    const fm = motion(fPrepped);
+    check(
+      'stored mesh: importedMotionNodes finds the same moving parts, pivots and axes in the compressed mesh as in the float one',
+      qm.length === 2 && qm.length === fm.length && qm.every((m, i) => m.role === fm[i].role && Math.hypot(m.at[0] - fm[i].at[0], m.at[1] - fm[i].at[1]) < 1e-5 && m.axis.every((x, k) => Math.abs(x - fm[i].axis[k]) < 1e-9)),
+      JSON.stringify(qm),
+    );
+
+    // ---- the editor re-opens it, and a share file of it opens ----
+    const reopened = await loadModel([new File([glb], 'robot.glb')]);
+    check(
+      'stored mesh: the editor’s reader (loadModel, meshopt decoder) re-opens it with every triangle and its body ids (an edit can pick parts again)',
+      triangleCount(reopened.parts) === triangleCount(srcParts) && reopened.parts.every((p) => !!p.body) && new Set(reopened.parts.flatMap((p) => [...p.body!])).size === new Set(srcParts.flatMap((p) => [...p.body!])).size,
+    );
+    const spec = { name: 'Quantised' } as unknown as import('../src/types').RobotSpec;
+    const shared = share.writeShareFile(glb, { game: 'biobuzz', spec, setup: {} as never, name: 'Quantised' });
+    const readBack = share.readShareFile(shared);
+    const sharedModel = await loadModel([new File([shared], 'quantised.dsim.glb')]);
+    check(
+      'stored mesh: a share file of it reads (payload) and opens (every triangle), as the robot page and the editor read it',
+      readBack.ok && readBack.payload.name === 'Quantised' && triangleCount(sharedModel.parts) === triangleCount(srcParts),
+    );
+    const oldModel = await loadModel([new File([float], 'old.glb')]);
+    check('stored mesh: an old float stored mesh still opens in the editor, every triangle and body', triangleCount(oldModel.parts) === triangleCount(srcParts) && oldModel.parts.every((p) => !!p.body));
+
+    // ---- the relay: never the compressed mesh, always a float GLB today's validator takes ----
+    const refused = VC.validateMeshGlb(new Uint8Array(glb));
+    check('stored mesh: ⚠️ the relay’s validator (this build, older servers and clients) refuses the compressed mesh, small as it is', glb.byteLength < IV.VISUAL_MAX_BYTES.mesh && refused !== null, String(refused));
+    const small = await liteMesh(glb, IV.VISUAL_MAX_BYTES.mesh);
+    const smallParts = small ? sceneParts(readStoredScene(await parse(small))) : [];
+    check(
+      'stored mesh: liteMesh re-writes a small compressed mesh as a FLOAT GLB the validator takes, whole (every triangle) and without extensions',
+      !!small && VC.validateMeshGlb(new Uint8Array(small)) === null && !glbUsesExtensions(small) && triangleCount(smallParts) === triangleCount(srcParts),
+      String(small && VC.validateMeshGlb(new Uint8Array(small))),
+    );
+    const ivc = readFileSync('src/net/importVisualsClient.ts', 'utf8');
+    check(
+      'stored mesh: the owner sends the library mesh as it is only when the relay’s validator takes it, else the float lighter copy (source pin)',
+      /if \(\(await loadCheck\(\)\)\?\.validateMeshGlb\(bytes\) === null\) return bytes;/.test(ivc) && /engine\.liteMesh\(/.test(ivc),
+    );
+
+    // ---- 250k triangles fit, and the relay copy of them passes ----
+    const dense: Part[] = [];
+    const palette: [number, number, number][] = [[0.8, 0.8, 0.82], [0.05, 0.05, 0.05], [0.9, 0.3, 0.05], [0.35, 0.35, 0.35], [0.1, 0.2, 0.7], [0.92, 0.92, 0.9]];
+    let b0 = 100;
+    for (let k = 0; k < 6; k++) {
+      // ~42k triangles a colour: a torus knot (a gear's worth of facets) and a perforated-looking slab
+      const knot = new THREE.TorusKnotGeometry(0.06, 0.012, 480, 40, 2 + (k % 3), 3);
+      dense.push(partOf(knot, [((k % 3) - 1) * 0.15, 0.1 + 0.08 * Math.floor(k / 3), 0], palette[k], `knot${k}`, b0, 2000, 2e-5));
+      b0 += 20;
+      const slab = new THREE.BoxGeometry(0.3, 0.004, 0.3, 30, 1, 30);
+      dense.push(partOf(slab, [0, 0.02 + 0.06 * k, 0], palette[k], `slab${k}`, b0, 500, 2e-5));
+      b0 += 20;
+    }
+    const denseTris = triangleCount(dense);
+    const baked = await bakeSceneHere({ rest: creaseParts(dense), moving: [] });
+    check(
+      `stored mesh: a ${Math.round(denseTris / 1000)}k-triangle robot bakes under MAX_MESH_BYTES with no refit`,
+      denseTris >= 250_000 && baked.refits === 0 && baked.glb.byteLength <= rtypes.MAX_MESH_BYTES && triangleCount(sceneParts(baked.scene)) === denseTris,
+      `${(baked.glb.byteLength / 1048576).toFixed(2)} MiB, ${(baked.glb.byteLength / denseTris).toFixed(2)} B a triangle, ${baked.refits} refits`,
+    );
+    const lite = await liteMesh(baked.glb, IV.VISUAL_MAX_BYTES.mesh);
+    const liteTris = lite ? triangleCount(sceneParts(readStoredScene(await parse(lite)))) : 0;
+    check(
+      'stored mesh: its relay copy (liteMesh) fits 1 MiB, is a float GLB, and passes today’s validator',
+      !!lite && lite.byteLength <= IV.VISUAL_MAX_BYTES.mesh && !glbUsesExtensions(lite) && VC.validateMeshGlb(new Uint8Array(lite)) === null && liteTris > 2000 && liteTris <= VC.VISUAL_MAX_TRIANGLES,
+      `${lite?.byteLength} B, ${liteTris} triangles`,
+    );
+    check('stored mesh: the importer’s caps are 250k by default and 400k at most', (await import('../src/robotImport/geometry')).DEFAULT_TRI_BUDGET === 250_000 && rtypes.MAX_TRIANGLES === 400_000);
+  } finally {
+    if (!hadReader) delete g.FileReader;
+  }
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

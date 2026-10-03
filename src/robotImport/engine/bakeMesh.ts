@@ -1,8 +1,9 @@
 /**
  * THE STORED MESH: parts → a GLB in the stored mesh frame (`STORED_MESH_TO_ROBOT`), held to
- * `MAX_MESH_BYTES`. DOM-free (GLTFExporter writes a binary GLB through a `Blob` and a `FileReader`,
- * both of which a worker has), so `bake` runs it in the import worker and keeps only the two
- * pictures, which need WebGL, on the main thread.
+ * `MAX_MESH_BYTES`. DOM-free, so `bake` runs it in the import worker and keeps only the two pictures,
+ * which need WebGL, on the main thread. The bake writes it compressed (`storedGlb.ts`); the float
+ * writer here (`exportStoredScene`, GLTFExporter through a `Blob` and a `FileReader`) is what a room
+ * is sent (`liteMesh`), since the relay's validator takes no extension.
  *
  * MOVING PARTS ARE NODES OF THEIR OWN (`docs/area/robot-import.md`, "Moving parts"): each is a group
  * translated to its pivot, its meshes relative to it, and `extras.dsim` (`StoredMotion`) saying what
@@ -16,6 +17,7 @@ import { MAX_MESH_BYTES, ROBOT_TO_STORED_MESH, STORED_MESH_TO_ROBOT, readStoredM
 import { buildMeshGroup, creaseParts, disposeTree } from './meshGroup';
 import { partsFromObject } from './parse';
 import { simplifyLists } from './simplify';
+import { writeStoredGlb } from './storedGlb';
 
 type V3 = [number, number, number];
 
@@ -87,7 +89,8 @@ export async function exportGlbStored(stored: readonly MeshPart[]): Promise<Arra
 const translateParts = (parts: readonly MeshPart[], d: V3): MeshPart[] =>
   transformParts(parts, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, d[0], d[1], d[2], 1]);
 
-/** a stored scene → the GLB: the rest under the root, each moving part a node at its pivot */
+/** a stored scene → a FLOAT GLB (no extensions, what the relay takes): the rest under the root, each
+ *  moving part a node at its pivot */
 export async function exportStoredScene(scene: StoredScene): Promise<ArrayBuffer> {
   const root3 = new THREE.Scene();
   const group = buildMeshGroup(scene.rest, 'dsim_robot');
@@ -119,14 +122,15 @@ export async function exportStoredScene(scene: StoredScene): Promise<ArrayBuffer
 }
 
 /**
- * A stored scene → the stored GLB. When an export comes out larger than `MAX_MESH_BYTES`, the
- * triangle budget drops in proportion (with 10 % to spare) and every part list is simplified again,
- * each to its share, up to four times. Returns the GLB and the scene it holds (the pictures are
- * rendered from that, so they show what is stored).
+ * A stored scene → the stored GLB, compressed (`writeStoredGlb`: quantised, meshopt-packed, about 9
+ * bytes a triangle). When it comes out larger than `MAX_MESH_BYTES`, the triangle budget drops in
+ * proportion (with 10 % to spare) and every part list is simplified again, each to its share, up to
+ * four times. Returns the GLB and the scene it holds (the pictures are rendered from that, so they
+ * show what is stored).
  */
 export async function bakeSceneHere(scene: StoredScene): Promise<{ glb: ArrayBuffer; scene: StoredScene; refits: number }> {
   let cur = scene;
-  let glb = await exportStoredScene(cur);
+  let glb = await writeStoredGlb(cur);
   let refits = 0;
   while (glb.byteLength > MAX_MESH_BYTES && refits < 4) {
     const tris = triangleCount(sceneParts(cur));
@@ -135,7 +139,7 @@ export async function bakeSceneHere(scene: StoredScene): Promise<{ glb: ArrayBuf
     const strip = (parts: MeshPart[]): MeshPart[] => parts.map((p) => ({ ...p, normals: null }));
     const s = await simplifyLists([strip(cur.rest), ...cur.moving.map((m) => strip(m.parts))], Math.floor(tris * ratio));
     cur = { rest: creaseParts(s.lists[0]), moving: cur.moving.map((m, i) => ({ ...m, parts: creaseParts(s.lists[i + 1]) })) };
-    glb = await exportStoredScene(cur);
+    glb = await writeStoredGlb(cur);
     refits++;
   }
   return { glb, scene: cur, refits };

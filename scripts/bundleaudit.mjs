@@ -81,7 +81,8 @@
  *                a STEP file is dropped. Matched by FILENAME.
  *   importworker — the importer's two WORKERS (lane 9): `importWorker-*.js` (parse, weld, simplify
  *                off the main thread), `measureWorker-*.js` (a measurement's orientation half) and
- *                the import worker's lazy `meshoptDecoder-*.js`. Fetched when a file is dropped on the
+ *                the import worker's lazy `meshoptDecoder-*.js` and `meshoptEncoder-*.js` (the bake's
+ *                stored-mesh writer, fetched on a Save). Fetched when a file is dropped on the
  *                importer. Matched by FILENAME.
  *   library    — the device ROBOT LIBRARY (`library-*.js`, `src/robotImport/library.ts`), reached
  *                by a dynamic import from the renderers' asset seam the first time an imported
@@ -214,8 +215,10 @@ function routeFor(file, buf) {
   // chunk (`meshopt_decoder.module-*.js`, routed `scene` by its marker).
   // `threeMf-*.js` (three's 3MF loader, fflate's unzip and `miniDom.ts`) and `zip-*.js` (the zip
   // reader) are the import worker's lazy chunks for a 3MF or a zip; the engine's main-thread fallback
-  // reaches `threeMf.ts` by the same `import()`, so the main build has one too, billed here as well
-  if (/^(importWorker|measureWorker|meshoptDecoder|threeMf|zip)-[^/]*\.js$/.test(base)) return 'importworker';
+  // reaches `threeMf.ts` by the same `import()`, so the main build has one too, billed here as well.
+  // `meshoptEncoder-*.js` is meshoptimizer's encoder, which the bake's stored-mesh writer
+  // (`storedGlb.ts`) fetches on a Save; the worker and the engine's fallback share the one file
+  if (/^(importWorker|measureWorker|meshoptDecoder|meshoptEncoder|threeMf|zip)-[^/]*\.js$/.test(base)) return 'importworker';
   // THE ROBOT LIBRARY (`src/robotImport/library.ts`, IndexedDB), by FILENAME: the renderers' asset
   // seam (`src/render/importedAssets.ts`) reaches it with a dynamic `import()` the first time an
   // imported robot is drawn, so it is its own small chunk rather than a cost in `main`.
@@ -631,7 +634,11 @@ const BASELINE = {
   // `motion.ts`, the round-part fit, the wheel and axle finders and the fold planner, which the
   // editor's picking reads too) and `importerEngine-*.js` 60.25 (+3.8: the preview's picking, tints
   // and Play loop, the stored scene's export and read-back, the lighter mesh keeping its nodes).
-  importer: { gzip: 76.94 * 1000 },
+  // 2026-10-03 (compressed stored mesh): 76.94 -> 79.85, raised on purpose. `importerEngine-*.js`
+  // 60.31 -> 62.49 against ede417c4 built the same minute: the stored-mesh writer (`storedGlb.ts`,
+  // quantised attributes and the meshopt container) and `liteMesh` re-writing a compressed mesh as
+  // float for the relay. The encoder itself is lazy (`meshoptEncoder-*.js`, billed to `importworker`).
+  importer: { gzip: 79.85 * 1000 },
   // 2026-10-01: NEW (lane 9). `importWorker-*.js` 104.06 (three.js core, the GLB/glTF, STL, OBJ+MTL
   // and PLY loaders, meshopt's simplifier, the weld and the crease: the parse-to-prepared pipeline
   // that used to block the main thread for seconds; and GLTFExporter for the bake's mesh half),
@@ -643,7 +650,12 @@ const BASELINE = {
   // `threeMf-*.js` 7.96 (three's 3MF loader, fflate's unzip and `miniDom.ts`: 3MF moved off the main
   // thread, fetched only for a 3MF), the main build's copy of it for the no-Worker fallback 7.91, and
   // `zip-*.js` 1.56 (fetched only for a zip). A GLB or STL import fetches none of the three.
-  importworker: { gzip: 139.68 * 1000 },
+  // 2026-10-03 (compressed stored mesh): 139.68 -> 140.34 (ede417c4 measured 141.82 the same minute).
+  // NEW `meshoptEncoder-*.js` 8.13, meshoptimizer's encoder with its inlined wasm, fetched on a Save
+  // by the bake's writer; one file, since the worker's copy and the engine fallback's are the same
+  // bytes. `importWorker-*.js` 107.83 -> 98.22: the bake writes with the encoder now, so GLTFExporter
+  // left the worker (the float writer stays in the engine, for the relay's `liteMesh`).
+  importworker: { gzip: 140.34 * 1000 },
   // 2026-10-01: NEW. `occt-import-js-*.wasm` 3110.91 (OpenCascade, 7.6 MB raw), `stepWorker-*.js`
   // 21.95 (the worker with occt's glue) and `stepReader-*.js` 0.42. Fetched only when a STEP file is
   // dropped; every other import, and every player who never imports a robot, pays nothing.

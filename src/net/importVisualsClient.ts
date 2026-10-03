@@ -7,8 +7,9 @@
  *  · OWNER. This seat holds an imported robot, the room's server relays (`importVisuals` in
  *    `SERVER_CAPS`), so after the roster says so this uploads the robot's top picture — and, in a
  *    game with a 3D view, its mesh — in paced 24 KiB chunks. The mesh is the library's if it fits
- *    the relay's 1 MiB, else a lighter copy made once by the importer engine and cached on the
- *    library record; if even that does not fit, the picture alone goes.
+ *    the relay's 1 MiB and the room's validator takes it (a float GLB from before the store was
+ *    compressed), else a float copy made once by the importer engine and cached on the library
+ *    record; if even that does not fit, the picture alone goes.
  *  · VIEWER. Another seat's robot is imported and the room says its assets are ready: ask for the
  *    picture (and, in BIOBUZZ with the 3D view on, the mesh), reassemble it, VALIDATE IT AGAIN (the
  *    same checks the room made: bytes off the wire are untrusted, and on a LAN they come from
@@ -151,7 +152,12 @@ export const libraryOwnAssets: OwnAssets = {
     const lib = await library();
     const full = await lib.meshFor(id);
     if (!full) return null;
-    if (full.size <= VISUAL_MAX_BYTES.mesh) return new Uint8Array(await full.arrayBuffer());
+    // the stored mesh goes as it is only when the room would take it: a mesh saved since the store
+    // was compressed (quantised, meshopt) never is, however small, so it is re-written as float
+    if (full.size <= VISUAL_MAX_BYTES.mesh) {
+      const bytes = new Uint8Array(await full.arrayBuffer());
+      if ((await loadCheck())?.validateMeshGlb(bytes) === null) return bytes;
+    }
     const cached = await lib.meshLiteFor(id);
     if (cached) return new Uint8Array(await cached.arrayBuffer());
     try {
