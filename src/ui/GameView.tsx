@@ -1296,9 +1296,12 @@ function Hud({
                   role="img"
                   aria-label={`Flywheel ${hud.flywheel.setpoint} rpm${hud.flywheel.presets > 1 ? `, speed ${hud.flywheel.preset + 1} of ${hud.flywheel.presets}` : ''}, ${hud.flywheel.ready ? 'ready' : 'spinning up'}.`}
                 >
-                  <span className="sub-hud-lbl" aria-hidden="true">
+                  {/* `keep`: this item has no glyph, so where the HUD drops the words (a phone in
+                      landscape) its STATE stays and only the rpm goes (`.sub-hud-rpm`) */}
+                  <span className="sub-hud-lbl keep" aria-hidden="true">
                     {hud.flywheel.presets > 1 ? `SPEED ${hud.flywheel.preset + 1} · ` : ''}
-                    {hud.flywheel.setpoint} RPM · {hud.flywheel.ready ? 'READY' : 'SPIN UP'}
+                    <span className="sub-hud-rpm">{hud.flywheel.setpoint} RPM · </span>
+                    {hud.flywheel.ready ? 'READY' : 'SPIN UP'}
                   </span>
                 </span>
               )}

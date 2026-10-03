@@ -392,6 +392,7 @@ import {
 } from '../src/net/imported';
 import { SERVER_CAPS } from '../src/net/protocol';
 import { rememberStandardRobot, sameBuild, standardRobotChoices, standardRobotFor } from '../src/settings';
+import { SETTINGS_KEEPS_IMPORTS, keepImportsFromOlderClient, keepsImports, sameButDropped } from '../src/net/settingsKeep';
 import { pendingPracticeUploads, savePracticeRun } from '../src/net/practiceRuns';
 import { pendingLanUploads, saveLanRunLocal } from '../src/net/lanRuns';
 import { sanitizeReplay } from '../src/net/sanitize';
@@ -556,7 +557,7 @@ import type { SolidShape } from '../src/sim/artifactSolids';
 import { heldSlotPos } from '../src/sim/physics';
 import { turretWorldPos } from '../src/sim/robot';
 import { decodeImportLaunchZ, decodeImportMouth, DECODE_IMPORT_LAUNCH_MIN } from '../src/sim/importedMech';
-import { libraryEntryFor, planShareAdd, sameImportedRobot } from '../src/robotImport/libraryIds';
+import { editSaveId, libraryEntryFor, planShareAdd, sameImportedRobot } from '../src/robotImport/libraryIds';
 import { DECODE_TUTORIAL } from '../src/games/decode/tutorial';
 import { defaultImportedMech, mechHandles, validateImportedMech } from '../src/games/importMechChecks';
 import { BB_DEFAULT_SPEC } from '../src/games/biobuzz/coerce';
@@ -29523,6 +29524,103 @@ const dumperSetup = (): RobotSetup => {
   }
 }
 
+// ---- AN OLDER BUILD'S SETTINGS SAVE KEEPS THE ACCOUNT'S IMPORTED ROBOT (`src/net/settingsKeep.ts`) ----
+// main and alpha rebuild the robot field by field and `/api/user/settings` stored what it was sent,
+// so one save from them deleted the import everywhere. The server now merges a cap-less save. The
+// older build is simulated by what its `coerceSettings` was MEASURED to send back (2026-10-02, the
+// real main and alpha coercers on a blob from this branch): the robot minus `imported` (and minus
+// DECODE's `launcher`/`hoodDeg`/`flywheel`), no `lastStandardSpec` anywhere.
+{
+  const IMP_D = { v: 1 as const, id: '0123456789abcdef', heightIn: 12, hull: [{ x: -7, y: -8 }, { x: 9, y: -8 }, { x: 9, y: 8 }, { x: -7, y: 8 }] };
+  const IMP_B = { ...IMP_D, id: 'fedcba9876543210', heightIn: 14 };
+  type Blob = Record<string, unknown> & { spec?: Record<string, unknown>; loadouts?: Record<string, Record<string, unknown>> };
+  const json = (x: unknown): Blob => JSON.parse(JSON.stringify(x));
+  /** a blob this branch writes: BIOBUZZ archived with an import, DECODE active with one (a fixed launcher) */
+  const fresh = (): Blob => {
+    let s = coerceSettings({ game: 'biobuzz' });
+    s = rememberStandardRobot(s, { ...s, spec: coerceSpec({ ...s.spec, imported: IMP_B }, undefined, 'biobuzz') });
+    s = switchGame(s, 'decode');
+    s = rememberStandardRobot(s, { ...s, spec: coerceSpec({ ...s.spec, launcher: 'fixed', hoodDeg: 70, imported: IMP_D }, undefined, 'decode') });
+    return json(s);
+  };
+  const strip = (spec: unknown): Record<string, unknown> => {
+    const o = { ...(spec as Record<string, unknown>) };
+    for (const k of ['imported', 'launcher', 'hoodDeg', 'flywheel']) delete o[k];
+    return o;
+  };
+  /** what an older build sends back for `b` */
+  const older = (b: Blob): Blob => {
+    const o = json(b);
+    o.spec = strip(o.spec);
+    delete o.lastStandardSpec;
+    for (const g of Object.keys(o.loadouts ?? {})) {
+      o.loadouts![g].spec = strip(o.loadouts![g].spec);
+      delete o.loadouts![g].lastStandardSpec;
+    }
+    return o;
+  };
+  const st = fresh();
+  check('settings keep: the blob this branch writes holds both imports and both standard robots (the premise)',
+    isImportedSpec(st.spec) && (st.spec as { launcher?: string }).launcher === 'fixed' && !!st.lastStandardSpec && isImportedSpec(st.loadouts?.biobuzz?.spec) && !!st.loadouts?.biobuzz?.lastStandardSpec);
+  check('settings keep: this build\'s settings save says it keeps imports (`caps` on the POST body)',
+    /body: JSON\.stringify\(\{ settings, caps: \[SETTINGS_KEEPS_IMPORTS\] \}\)/.test(readFileSync('src/net/api.ts', 'utf8')));
+  check('settings keep: only a save whose caps name the import cap is taken as sent',
+    keepsImports([SETTINGS_KEEPS_IMPORTS]) && keepsImports(['x', 'robotImport']) && !keepsImports(undefined) && !keepsImports([]) && !keepsImports('robotImport') && !keepsImports({ 0: 'robotImport' }));
+
+  const sent = older(st);
+  const before = JSON.stringify([st, sent]);
+  const kept = keepImportsFromOlderClient(st, sent) as Blob;
+  check('settings keep: an older build\'s save of the SAME robot keeps the stored one whole: the import, and the fixed launcher it dropped too',
+    JSON.stringify(kept.spec) === JSON.stringify(st.spec), JSON.stringify(kept.spec).slice(0, 120));
+  check('settings keep: ...and its last standard robot', JSON.stringify(kept.lastStandardSpec) === JSON.stringify(st.lastStandardSpec));
+  check('settings keep: ...and the archived game\'s import and its last standard robot',
+    JSON.stringify(kept.loadouts?.biobuzz?.spec) === JSON.stringify(st.loadouts?.biobuzz?.spec) && JSON.stringify(kept.loadouts?.biobuzz?.lastStandardSpec) === JSON.stringify(st.loadouts?.biobuzz?.lastStandardSpec));
+  check('settings keep: ...while everything else the older build sent stands (a toggle it changed is not reverted)',
+    keepImportsFromOlderClient(st, { ...sent, practiceDummies: !st.practiceDummies }).practiceDummies === !st.practiceDummies);
+  check('settings keep: neither argument is mutated', JSON.stringify([st, sent]) === before);
+  const back = coerceSettings(json(kept));
+  check('settings keep: the merged blob reads back through this branch\'s coerceSettings with both imports',
+    back.spec.imported?.id === IMP_D.id && back.spec.launcher === 'fixed' && !!back.lastStandardSpec && switchGame(back, 'biobuzz').spec.imported?.id === IMP_B.id);
+
+  // a deliberate change on the older build is respected
+  const preset = { ...older(st), spec: { ...strip(st.spec), length: 14, width: 15, driveRpm: 300 } };
+  const p = keepImportsFromOlderClient(st, preset) as Blob;
+  check('settings keep: another robot picked on the older build (a preset keeps the name) stays picked: no import, no stale standard robot',
+    !isImportedSpec(p.spec) && p.spec?.length === 14 && p.lastStandardSpec === undefined);
+  check('settings keep: ...and the OTHER game\'s import is still kept', isImportedSpec(p.loadouts?.biobuzz?.spec));
+  const slid = { ...older(st), spec: { ...strip(st.spec), driveRpm: (st.spec?.driveRpm as number) + 10 } };
+  check('settings keep: one slider moved on the older build is a change too', !isImportedSpec((keepImportsFromOlderClient(st, slid) as Blob).spec));
+  // the older build switched game: the DECODE import is archived in ITS loadouts now
+  const sw = json(switchGame(coerceSettings(older(st)), 'chain'));
+  const swKept = keepImportsFromOlderClient(st, sw) as Blob;
+  check('settings keep: an older build that switched game: the import is re-attached where it now lives (loadouts.decode)',
+    sw.game === 'chain' && !isImportedSpec(swKept.spec) && JSON.stringify(swKept.loadouts?.decode?.spec) === JSON.stringify(st.spec) && isImportedSpec(swKept.loadouts?.biobuzz?.spec));
+  // a game the older build did not send at all
+  const noBb = older(st);
+  delete noBb.loadouts!.biobuzz;
+  check('settings keep: a game the older build sent nothing for keeps its stored loadout with its import',
+    isImportedSpec((keepImportsFromOlderClient(st, noBb) as Blob).loadouts?.biobuzz?.spec));
+  // nothing to keep
+  const plain = json(coerceSettings({ game: 'decode' }));
+  const plainSent = older(plain);
+  check('settings keep: a store with no import changes nothing (the incoming blob is returned as is)', keepImportsFromOlderClient(plain, plainSent) === plainSent);
+  const inc = older(st);
+  check('settings keep: no stored blob (a first save) changes nothing', keepImportsFromOlderClient(null, inc) === inc && keepImportsFromOlderClient('junk', inc) === inc);
+  check('settings keep: sameButDropped refuses a robot that carries an import, one without a name or size, and a different value',
+    !sameButDropped(st.spec, st.spec) && !sameButDropped({ drivetrain: 'tank' }, st.spec) && !sameButDropped({ ...strip(st.spec), massLb: -1 }, st.spec) && sameButDropped(strip(st.spec), st.spec));
+  // ⚠️ the documented limit: an older build REWRITES a BIOBUZZ fixed launcher (it reads 'fixed' as a
+  // turret and re-derives the mass), so that save really did change the robot and is not undone
+  const bbFixed = (() => {
+    let s = coerceSettings({ game: 'biobuzz' });
+    const spec = coerceSpec({ ...s.spec, bbMech: { launcher: { kind: 'fixed', mount: 'front', hoodDeg: 77 }, lift: null }, imported: IMP_B }, undefined, 'biobuzz');
+    s = { ...s, spec };
+    return json(s);
+  })();
+  const rewritten = { ...older(bbFixed), spec: { ...strip(bbFixed.spec), bbMech: { launcher: { kind: 'turret', mount: 'front', hoodDeg: 77 }, lift: null } } };
+  check('settings keep: (limit) a BIOBUZZ fixed launcher an older build turned into a turret is a changed robot, and is not re-attached',
+    (bbFixed.spec?.bbMech as { launcher?: { kind?: string } }).launcher?.kind === 'fixed' && !isImportedSpec((keepImportsFromOlderClient(bbFixed, rewritten) as Blob).spec));
+}
+
 /**
  * IMPORTED ROBOTS IN A REAL `Room` — who may be seated, who may watch, what the match is built from.
  *
@@ -30785,6 +30883,169 @@ function impPlayCheck(g: GameId): void {
     URL.revokeObjectURL = realRevoke;
     if (hadImage) g.Image = prevImage;
     else delete g.Image;
+  }
+}
+
+/**
+ * ---- AN OUT-OF-DATE LIBRARY COPY IS NOT DRAWN (`importedAssets` "AN OUT-OF-DATE COPY IS NOT DRAWN") ----
+ * The account syncs the active robot's spec, never its model: after an edit on device A, device B's
+ * library still holds the old model under the same id, and drew it on the new hull. A source says
+ * what it holds (`describe`), and a reader that passes the robot it draws gets null for another
+ * version of it: the footprint, as for a robot this device does not have.
+ */
+{
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 6; i++) await new Promise<void>((r) => setTimeout(r, 0));
+  };
+  const g = globalThis as unknown as { Image?: unknown };
+  const hadImage = 'Image' in g;
+  const prevImage = g.Image;
+  const realCreate = URL.createObjectURL;
+  const realRevoke = URL.revokeObjectURL;
+  let n = 0;
+  URL.createObjectURL = (): string => `blob:stale/${++n}`;
+  URL.revokeObjectURL = (): void => undefined;
+  class StubImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    decoding = '';
+    set src(_v: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  g.Image = StubImage;
+  try {
+    resetImportedAssetsForTests();
+    const OLD: ImportedRobot = { v: 1, id: '5a5a5a5a5a5a5a5a', hull: [{ x: -8, y: -8 }, { x: 9, y: -8 }, { x: 9, y: 8 }, { x: -8, y: 8 }], heightIn: 14 };
+    const NEW: ImportedRobot = { ...OLD, hull: [{ x: -8, y: -8 }, { x: 11, y: -8 }, { x: 11, y: 8 }, { x: -8, y: 8 }] };
+    let held: ImportedRobot = OLD; // what this device's library record says
+    setImportedAssetSource({
+      top: async () => new Blob(['top'], { type: 'image/png' }),
+      mesh: async () => new Blob(['mesh'], { type: 'model/gltf-binary' }),
+      describe: async () => held,
+    });
+    importedTopImage(OLD.id, NEW);
+    await flush();
+    check('stale copy: a library picture made for an OLDER version of the robot is not drawn for the new one (the footprint is)',
+      importedTopImage(OLD.id, NEW) === null && importedTopUrl(OLD.id, NEW) === null);
+    check('stale copy: ...while it IS drawn for the version it was made for, and for a reader that passes no robot',
+      importedTopImage(OLD.id, OLD) !== null && importedTopImage(OLD.id, { ...OLD, id: 'ffffffffffffffff' }) !== null && importedTopImage(OLD.id) !== null);
+    check('stale copy: the mesh likewise: null for the new version, the blob for its own',
+      (await importedMeshBlob(OLD.id, NEW)) === null && (await importedMeshBlob(OLD.id, OLD)) !== null);
+    // the file is imported again: the record now holds the new version, and the library save invalidates
+    held = NEW;
+    invalidateImportedAssets(OLD.id);
+    importedTopImage(OLD.id, NEW);
+    await flush();
+    check('stale copy: once the newest file is imported (the record replaced, the cache invalidated) the new version is drawn',
+      importedTopImage(OLD.id, NEW) !== null && (await importedMeshBlob(OLD.id, NEW)) !== null);
+    // a LENT look (the editor's draft, a room's relay) is current by construction
+    held = OLD;
+    registerImportedAssets('6b6b6b6b6b6b6b6b', { top: new Blob(['draft']), mesh: new Blob(['draft-mesh']) });
+    importedTopImage('6b6b6b6b6b6b6b6b', NEW);
+    await flush();
+    check('stale copy: a lent picture or mesh is drawn for any version (never compared)',
+      importedTopImage('6b6b6b6b6b6b6b6b', NEW) !== null && (await importedMeshBlob('6b6b6b6b6b6b6b6b', NEW)) !== null);
+    // a source that does not describe (a test, an older seam) is drawn as before
+    setImportedAssetSource({ top: async () => new Blob(['top']), mesh: async () => null });
+    importedTopImage('7c7c7c7c7c7c7c7c', NEW);
+    await flush();
+    check('stale copy: a source that does not describe what it holds is drawn as before', importedTopImage('7c7c7c7c7c7c7c7c', NEW) !== null);
+    // every reader passes the robot it draws
+    const rd = (f: string): string => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+    check('stale copy: the 2D sprite, both SVG previews and the 3D mesh slot pass the robot they draw',
+      /importedTopImage\(imp\.id, imp\)/.test(rd('src/render/drawImported.ts')) &&
+        /useImportedTopUrl\(imp\?\.id, imp\)/.test(rd('src/games/biobuzz/RobotPreview.tsx')) &&
+        /useImportedTopUrl\(imp\?\.id, imp\)/.test(rd('src/games/chain/RobotPreview.tsx')) &&
+        /importedMeshBlob\(id, imp\)/.test(rd('src/games/biobuzz/scene/renderImported.ts')) &&
+        /function slotKey\(imp: ImportedRobot\)/.test(rd('src/games/biobuzz/scene/renderImported.ts')) &&
+        /describe: \(id\) => import\('\.\.\/robotImport\/library'\)\.then\(\(lib\) => lib\.descriptorFor\(id\)\)/.test(rd('src/render/importedAssets.ts')));
+    const menu = rd('src/ui/Menu.tsx');
+    const panel = rd('src/robotImport/ui/ImportedRobots.tsx');
+    check('stale copy: the robot page compares the record with the active robot, draws the footprint in the hero, says so in one line, and offers the file instead of Edit',
+      /const importedStale = !!importedEntry && !!spec\.imported && !sameImportedRobot\(importedEntry\.spec\.imported, spec\.imported\)/.test(menu) &&
+        /importedEntry && !importedStale \? library\.thumbs\[importedEntry\.id\]/.test(menu) &&
+        /stale=\{importedStale\}/.test(menu) &&
+        /entry && stale \? <p className="ds-hint warn">\{COPY\.staleText\}<\/p>/.test(panel) &&
+        /entry && stale \? \(\s*<button type="button" className="ds-btn small" onClick=\{onImportFile\}>/.test(panel));
+    check('stale copy: picking the card that answers for the active robot changes nothing (an old copy cannot be re-applied over the new spec)',
+      /onPick=\{\(e\) => \(answersFor\(e, importedId\) \? undefined : applySpec\(\{ \.\.\.e\.spec \}\)\)\}/.test(menu) &&
+        /libraryEntryFor\(importLibrary\.entries, mySpec\.imported\?\.id\)\?\.id === e\.id \? undefined : pickSpec/.test(rd('src/ui/Lobby.tsx')));
+  } finally {
+    resetImportedAssetsForTests();
+    URL.createObjectURL = realCreate;
+    URL.revokeObjectURL = realRevoke;
+    if (hadImage) g.Image = prevImage;
+    else delete g.Image;
+  }
+}
+
+/**
+ * ---- LOOKING DOES NOT CREATE THE LIBRARY (`src/robotImport/library.ts` `dbExists`) ----
+ * The renderers ask the library the first time any imported robot is drawn, and `indexedDB.open`
+ * creates a database that is not there: a viewer who never imported anything got an empty
+ * `decodesim.robots`. A stub IndexedDB counts opens and creations, both ways of asking.
+ */
+{
+  const g = globalThis as unknown as { indexedDB?: unknown };
+  const had = 'indexedDB' in g;
+  const prev = g.indexedDB;
+  const lib = await import('../src/robotImport/library');
+  try {
+    // (1) `databases()` says there is none: nothing is opened at all
+    let opens = 0;
+    g.indexedDB = {
+      databases: async () => [{ name: 'something-else' }],
+      open: () => {
+        opens++;
+        throw new Error('must not open');
+      },
+    };
+    const top = await lib.topFor('9a9a9a9a9a9a9a9a');
+    const mesh = await lib.meshFor('9a9a9a9a9a9a9a9a');
+    const desc = await lib.descriptorFor('9a9a9a9a9a9a9a9a');
+    const list = await lib.listRobots('decode');
+    const drafts = await lib.listDrafts('decode');
+    const got = await lib.getRobot('9a9a9a9a9a9a9a9a');
+    check('library: with no database on this device, every READ answers "nothing here" without opening one',
+      opens === 0 && top === null && mesh === null && desc === null && list.ok && list.value.length === 0 && drafts.ok && drafts.value.length === 0 && !got.ok && got.error === 'not-found',
+      `opens ${opens}`);
+    // (2) no `databases()`: an open WITHOUT a version whose upgrade from 0 is aborted
+    let created = 0;
+    let aborted = 0;
+    let versioned = 0;
+    g.indexedDB = {
+      open: (_name: string, version?: number) => {
+        if (version !== undefined) versioned++;
+        const req: Record<string, unknown> = { transaction: { abort: () => aborted++ } };
+        setTimeout(() => {
+          created++;
+          (req.onupgradeneeded as ((e: unknown) => void) | undefined)?.({ oldVersion: 0 });
+          setTimeout(() => (req.onerror as (() => void) | undefined)?.(), 0); // the abort's AbortError
+        }, 0);
+        return req;
+      },
+    };
+    const top2 = await lib.topFor('8b8b8b8b8b8b8b8b');
+    const list2 = await lib.listRobots('decode');
+    check('library: ...and where `databases()` is missing, the look opens without a version and ABORTS the creation (no versioned open)',
+      top2 === null && list2.ok && list2.value.length === 0 && versioned === 0 && aborted === created && created >= 2, `created ${created} aborted ${aborted} versioned ${versioned}`);
+    // (3) a WRITE is what creates it
+    let writeOpens = 0;
+    g.indexedDB = {
+      databases: async () => [],
+      open: (_name: string, version?: number) => {
+        if (version !== undefined) writeOpens++;
+        const req: Record<string, unknown> = {};
+        setTimeout(() => (req.onerror as (() => void) | undefined)?.(), 0);
+        return req;
+      },
+    };
+    await lib.putDraft({ key: 'decode:new', game: 'decode', updated: 0 });
+    check('library: a write (a draft, a save) is what opens and creates the database', writeOpens === 1, `opens ${writeOpens}`);
+  } finally {
+    if (had) g.indexedDB = prev;
+    else delete g.indexedDB;
   }
 }
 
@@ -32842,6 +33103,34 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
       /const rid = await answeringId\(db, id\)/.test(rd('src/robotImport/library.ts')) &&
       /planShareAdd\(spec\.imported, settings\.spec\.imported/.test(rd('src/robotImport/ui/ImportEditor.tsx')));
   check('imports/library ids: a duplicate is a robot of its own and does not answer for the original’s share file', /const \{ sharedFrom: _from, \.\.\.rest \} = src/.test(rd('src/robotImport/library.ts')));
+
+  /**
+   * AN EDIT NEVER RE-KEYS THE ACTIVE ROBOT (`editSaveId`). Device B added A's file BEFORE rule 2,
+   * so its copy has an id of its own (`copy`, sharedFrom X). Rule 1 finds it for the synced X, so
+   * the robot page offers it for editing, and the editor saved under the COPY's id, which then
+   * became active and synced: A's robot was "not on this device" again.
+   */
+  check('imports/library ids: editing this device’s pre-rule copy of the active robot saves under the ACTIVE id',
+    editSaveId(copy.id, X.id, [copy]) === X.id);
+  check('imports/library ids: ...a record that HAS the active id keeps it, and a copy that answers for nothing active keeps its own',
+    editSaveId(X.id, X.id, [copy, own]) === X.id &&
+      editSaveId(copy.id, X.id, [copy, own]) === copy.id && // the record with X answers for X, not the copy
+      editSaveId(copy.id, null, [copy]) === copy.id &&
+      editSaveId(copy.id, 'cccccccccccccccc', [copy]) === copy.id);
+  {
+    // played out on B: the edit saves under X, the copy is retired, and the account's id never moves
+    let acct: ImportedRobot = X;
+    const devB2: Row[] = [copy];
+    const id = editSaveId(copy.id, acct.id, devB2);
+    const edited = { ...X, heightIn: 15, id };
+    devB2.splice(devB2.findIndex((e) => e.id === copy.id), 1, row(edited));
+    acct = edited; // the editor's save makes it the active robot, which syncs
+    check('imports/library ids: ...played out: the account keeps X, B’s library answers for it, the old copy is gone',
+      acct.id === X.id && libraryEntryFor(devB2, acct.id)?.id === X.id && devB2.length === 1 && libraryEntryFor(devA, acct.id) !== null);
+  }
+  check('imports/library ids: the editor saves through editSaveId and retires the old record',
+    /const id = cur\.doc\.editId && listed\?\.ok \? editSaveId\(cur\.doc\.editId, settings\.spec\.imported\?\.id, listed\.value\) : cur\.doc\.id;/.test(rd('src/robotImport/ui/ImportEditor.tsx')) &&
+      /if \(id !== cur\.doc\.id\) await deleteRobot\(cur\.doc\.id\);/.test(rd('src/robotImport/ui/ImportEditor.tsx')));
   check('imports/library ids: libraryIds.ts imports types only (the robot page and the lobby are in `main`)',
     rd('src/robotImport/libraryIds.ts').split('\n').filter((l) => /^import /.test(l)).every((l) => /^import type /.test(l)));
 }
@@ -33300,6 +33589,51 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
     put(r2, o2, 'top', png, ID_A, 1);
     check('visuals/relay: a frame that never came refuses the upload as soon as the next one does', refusals(o2).join() === 'put:seq' && r2.stats().reserved === 0);
     r2.dispose();
+  }
+
+  // ---- a re-upload keeps the last good look until it validates ------------------------------------------
+  // A reconnect sends the look again. That upload used to replace the ready one at its FIRST frame, so a
+  // junk, oversized or interrupted second upload left every viewer with nothing where it had a good look.
+  {
+    let now = 1000;
+    fakes.clear();
+    allows = true;
+    liveMatch = false;
+    const budget = SV.localVisualBudget(IV.VISUAL_PROCESS_BYTES);
+    const relay = new SV.VisualRelay(host, budget, () => now);
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    put(relay, a, 'top', png);
+    const junk = new Uint8Array(png.length).fill(7);
+    put(relay, a, 'top', junk);
+    check('visuals/keep: a junk re-upload is refused, and the last good look stays ready and reserved (only its bytes)',
+      refusals(a).join() === 'put:format' && relay.stats().ready === 1 && relay.stats().reserved === png.length && budget.used() === png.length, refusals(a).join());
+    get(relay, b, 'a', ID_A, 'top');
+    drain(relay);
+    check('visuals/keep: ...and a viewer that asks after it still gets the good one, identical', same(received(b, 'a', 'top').bytes, png));
+    // half a re-upload, then silence: swept, and the good one stays
+    a.got.length = 0;
+    put(relay, a, 'top', png, ID_A, 2); // frames 0 and 1, never 2
+    check('visuals/keep: while a re-upload travels the old look is still served (both are reserved)',
+      relay.stats().ready === 1 && relay.stats().reserved === 2 * png.length);
+    now += IV.VISUAL_PUT_STALE_MS + 1;
+    relay.sweepStale(now);
+    check('visuals/keep: an interrupted re-upload is swept after the stale time and the good look stays',
+      relay.stats().ready === 1 && relay.stats().reserved === png.length && budget.used() === png.length);
+    // a GOOD re-upload (another picture) replaces it, announced again, and the old bytes are freed
+    const png2 = pngBytes(140, 120, { noise: true, seed: 77 });
+    a.got.length = 0;
+    const announced = msgs(b, 'visualReady').length;
+    put(relay, a, 'top', png2);
+    check('visuals/keep: a good re-upload replaces it once it validates: announced again, the old bytes freed',
+      relay.stats().ready === 1 && relay.stats().reserved === png2.length && budget.used() === png2.length && msgs(b, 'visualReady').length === announced + 1);
+    b.got.length = 0;
+    get(relay, b, 'a', ID_A, 'top');
+    drain(relay);
+    check('visuals/keep: ...and the new one is what a viewer gets now', same(received(b, 'a', 'top').bytes, png2));
+    // the room's cap counts the asset a re-upload replaces: a full room still takes the replacement
+    relay.dispose();
+    check('visuals/keep: dispose frees the ready look and any upload on its way', budget.used() === 0 && relay.stats().reserved === 0);
   }
 
   // ---- refusals ----------------------------------------------------------------------------------
@@ -34119,6 +34453,72 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
     await sleepMs(120);
     check('visuals/client: ...but only twice', tx.count('visualPut') === 4 * n);
     cli.reset();
+  }
+
+  // ---- THE OWNER IS TOLD WHY ITS LOOK IS NOT IN THE ROOM (`ownLookTrouble`, the lobby's one line) ----------------
+  {
+    const roster = (spec: typeof DEFAULT_SPEC) => [{ clientId: 'me', name: 'me', alliance: 'red', startIndex: 0, ready: true, spec, assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer];
+    const tx = new FakeTx();
+    const cli = mkClient({ own: own(png, null) });
+    let told = 0;
+    const off = cli.subscribeOwnLook(() => told++);
+    cli.bind(tx);
+    cli.setOffered(true);
+    cli.onWelcome('me');
+    cli.noteRoster('me', roster(impSpec(ID)));
+    await until(() => tx.count('visualPut') === IV.visualFrames(png.length));
+    check('visuals/owner: nothing to say while the upload is on its way', cli.ownLookTrouble() === null);
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'budget', message: IV.VISUAL_REFUSAL_COPY.budget });
+    const t = cli.ownLookTrouble();
+    check('visuals/owner: ⚠️ a room that refuses the look for space is said, once, in one line',
+      t?.reason === 'budget' && t.kind === 'top' && told === 1 && IVC.ownLookLine(t) === 'Couldn’t share your robot’s look: this room is out of space.', JSON.stringify(t));
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'dup', message: '' });
+    check('visuals/owner: an id taken and a file the room cannot use have their own lines; a mesh says 3D model',
+      IVC.ownLookLine({ kind: 'top', reason: 'dup' }) === 'Couldn’t share your robot’s look: another robot here has its id.' &&
+        IVC.ownLookLine({ kind: 'top', reason: 'format' }) === 'Couldn’t share your robot’s look: the room can’t use the file.' &&
+        IVC.ownLookLine({ kind: 'mesh', reason: 'budget' }) === 'Couldn’t share your 3D model: this room is out of space.');
+    check('visuals/owner: every line fits the robot line it stands in (64 characters, one line)',
+      (['room', 'id', 'size', 'format', 'budget', 'seq', 'dup', 'missing', 'stale'] as const).every((reason) =>
+        (['top', 'mesh'] as const).every((kind) => IVC.ownLookLine({ kind, reason }).length <= 64 && !/ - /.test(IVC.ownLookLine({ kind, reason })))));
+    cli.onWelcome('me'); // a reconnect: it starts over, and so does what was said
+    check('visuals/owner: a new seat (a reconnect) clears it, and the upload starts over', cli.ownLookTrouble() === null && (await until(() => tx.count('visualPut') === 2 * IV.visualFrames(png.length))));
+    cli.handle({ t: 'visualReady', owner: 'me', id: ID, kind: 'top', bytes: png.length });
+    check('visuals/owner: a confirmed upload says nothing', cli.ownLookTrouble() === null);
+    off();
+    cli.reset();
+
+    // a model that is not on this device, and one that is OUT OF DATE here (edited on another device)
+    const tx2 = new FakeTx();
+    const gone = mkClient({ own: own(null, null) });
+    gone.bind(tx2);
+    gone.setOffered(true);
+    gone.onWelcome('me');
+    gone.noteRoster('me', roster(impSpec(ID)));
+    check('visuals/owner: a robot whose model is not on this device says so', await until(() => gone.ownLookTrouble()?.reason === 'missing') && tx2.count('visualPut') === 0);
+    gone.reset();
+    const tx3 = new FakeTx();
+    const older = { ...impSpec(ID).imported!, heightIn: 11 };
+    let asked = 0;
+    const staleCli = mkClient({ own: { top: async () => (asked++, png), mesh: async () => null, describe: async () => older } });
+    staleCli.bind(tx3);
+    staleCli.setOffered(true);
+    staleCli.onWelcome('me');
+    staleCli.noteRoster('me', roster(impSpec(ID)));
+    check('visuals/owner: ⚠️ an OUT-OF-DATE model here is never sent (it would put the old model on the new hull on every screen), and it is said',
+      (await until(() => staleCli.ownLookTrouble()?.reason === 'stale')) && tx3.count('visualPut') === 0 && asked === 0);
+    staleCli.reset();
+    const tx4 = new FakeTx();
+    const fresh = mkClient({ own: { top: async () => png, mesh: async () => null, describe: async () => ({ ...impSpec(ID).imported! }) } });
+    fresh.bind(tx4);
+    fresh.setOffered(true);
+    fresh.onWelcome('me');
+    fresh.noteRoster('me', roster(impSpec(ID)));
+    check('visuals/owner: ...while a model made for the robot the seat holds is sent as before',
+      await until(() => tx4.count('visualPut') === IV.visualFrames(png.length)), String(tx4.count('visualPut')));
+    fresh.reset();
+    const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8').replace(/\r\n/g, '\n');
+    check('visuals/owner: the custom-room lobby shows it in the robot line\'s place (nothing moves)',
+      /\{sendImport && ownLook \? \(\s*<p className="ds-sub" role="status">\s*\{ownLookLine\(ownLook\)\}/.test(lobby));
   }
 
   // ---- a viewer does not believe what it is sent ----------------------------------------------------------------------------

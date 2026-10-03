@@ -70,6 +70,20 @@ export function sameImportedRobot(a: ImportedRobot | null | undefined, b: Import
   return same({ ...a, id: '' }, { ...b, id: '' });
 }
 
+/**
+ * The id an EDIT of library robot `editId` saves under. Its own, except for a copy that answers for
+ * the account's active robot through `sharedFrom` (rule 1): a copy added from a share file BEFORE
+ * rule 2 got a fresh id of its own, and saving it under that id made the edit the active robot under
+ * a NEW id, which synced, and the device the robot came from then said "Model not on this device"
+ * (the ping-pong rule 2 exists to stop, reached by editing). That copy saves under the ACTIVE id, and
+ * the old record is retired by the caller. A record that HAS the active id, or that answers for
+ * nothing active, keeps its own.
+ */
+export function editSaveId<E extends LibraryIdRow>(editId: string, activeId: string | null | undefined, entries: readonly E[]): string {
+  if (!activeId || editId === activeId) return editId;
+  return libraryEntryFor(entries, activeId)?.id === editId ? activeId : editId;
+}
+
 /** what adding a share file does on this device (see THE RULE above) */
 export type ShareAddPlan<E extends LibraryIdRow> =
   /** the account's active robot: saved under `id` (the active one); `retire` is an older copy of it here under another id */

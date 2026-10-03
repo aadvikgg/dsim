@@ -391,6 +391,19 @@ leaderboard's substance. What comes off the page is the WATCH BUTTON: `userMatch
 `viewerId` and nulls `replayId` on a row that reader may not watch, so the button is absent rather
 than present and answering 403. The flag rides along on the participant fan-out's existing
 `profiles` join, so the gate costs no extra query there.
+**SETTINGS SYNC: AN OLDER BUILD'S SAVE IS MERGED, NOT STORED AS SENT** (2026-10-02,
+`src/net/settingsKeep.ts`, `repo.saveSettingsFromClient`). `profiles.settings` is the blob the client
+sends, and a build that predates a field rebuilds the blob without it, so ONE save from main or
+pre-import alpha deleted the account's imported robot on every device. This build sends
+`{ settings, caps: ['robotImport'] }`; a save without the cap is merged per game with the stored blob
+in one transaction (`select … for update`): the stored IMPORTED robot is kept when the incoming one
+is it minus what the older build cannot read (every field sent equals the stored one), with its
+`lastStandardSpec`; a game the older build sent nothing for keeps its stored loadout if it holds an
+import; anything the older build CHANGED stands. A save WITH the cap is stored as sent, so a new
+build that drops the import on purpose is never "repaired". Backward-compatible both ways (an older
+server ignores `caps`). `npm run dbtest` "settings:" drives the write on PGlite; smoke "settings
+keep:" holds the rules, including the one robot an older build rewrites rather than strips (a
+BIOBUZZ fixed launcher reads as a turret there) and so is not re-attached.
 ⚠️ **THE FLAG COULD NOT LIVE IN `profiles.settings`.** That blob is client-shaped,
 client-validated and opaque to the server — nothing in SQL reads it — so a privacy bit stored
 there would be enforced only by asking the client, which is not enforcement. It is a real column,

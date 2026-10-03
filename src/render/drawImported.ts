@@ -74,7 +74,7 @@ export interface ImportedBodyOptions {
 export function drawImportedBody(ctx: CanvasRenderingContext2D, r: RobotState, o: ImportedBodyOptions): boolean {
   const imp = r.spec.imported;
   if (!imp) return false;
-  const img = o.silhouette ? null : importedTopImage(imp.id);
+  const img = o.silhouette ? null : importedTopImage(imp.id, imp);
   if (img) {
     drawTopImage(ctx, imp, img);
     return true;

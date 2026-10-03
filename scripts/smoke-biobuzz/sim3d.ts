@@ -3481,6 +3481,56 @@ export function sim3dChecks(check: Check): void {
     }
 
     /**
+     * ── AN IMPORTED ROBOT'S FLAT CAD TOP IS A DECK TOO (`importTopIsBroad`, engineImpl.ts) ──────
+     * An import's bands are convex PRISMS, which Rapier builds as `ConvexPolyhedron`: the shape the
+     * narrow-hull rule kept for the field's decimated CAD hulls. A POLLEN on an import's flat top was
+     * kicked, and with no rolling law off the floor it rolled for the whole run and off the edge
+     * (measured: 2–3 in/s for 7 s). It rests now, on the top and on a band's ledge, like the standard
+     * deck above, and still falls when the robot drives away; a band that is a thin TOWER is narrow
+     * (the Box Tube rule) and the ball rolls off it.
+     */
+    {
+      const HULL = [{ x: -8, y: -8 }, { x: 8, y: -8 }, { x: 8, y: 8 }, { x: -8, y: 8 }];
+      const FLAT = { v: 1 as const, id: 'abababababababab', hull: HULL, heightIn: 12 };
+      const BANDS = { ...FLAT, id: 'cdcdcdcdcdcdcdcd', heightIn: 15, bands: [{ z0: 0, z1: 6, hull: HULL }, { z0: 6, z1: 15, hull: [{ x: -6, y: -6 }, { x: 4, y: -6 }, { x: 4, y: 6 }, { x: -6, y: 6 }] }] };
+      const THIN = { ...FLAT, id: 'efefefefefefefef', heightIn: 16, bands: [{ z0: 0, z1: 6, hull: HULL }, { z0: 6, z1: 16, hull: [{ x: -1, y: -1 }, { x: 0.3, y: -1 }, { x: 0.3, y: 1 }, { x: -1, y: 1 }] }] };
+      const drop = (imported: unknown, dx: number, dy: number, z: number, drive = false): { z: number; off: number; n: number } => {
+        const w = mkWorld3d('free', 94, { intakeMount: 'front', imported } as Partial<RobotSpec>);
+        w.balls.length = 0;
+        const r = w.robots[0];
+        r.fieldCentric = false;
+        r.pos = { x: 0, y: -30 };
+        r.heading = 0;
+        r.vel = { x: 0, y: 0 };
+        r.angVel = 0;
+        const id = 9002;
+        w.balls.push({ id, pos: { x: r.pos.x + dx, y: r.pos.y + dy }, vel: { x: 0, y: 0 }, z, vz: 0, r: BB_POLLEN_R, color: 'yellow', state: { kind: 'ground' } } as unknown as Artifact);
+        const still = new Map([[0, cmd({})]]);
+        const fwd = new Map([[0, cmd({ driveY: 1, leftDrive: 1, rightDrive: 1 })]]);
+        for (let t = 0; t < 420; t++) step3d(w, C.SIM_DT, t < 90 || !drive ? still : fwd);
+        const b = w.balls.find((x) => x.id === id)!;
+        const out = { z: b.z, off: Math.hypot(b.pos.x - r.pos.x - dx, b.pos.y - r.pos.y - dy), n: w.balls.length };
+        disposeEngineFor(w);
+        return out;
+      };
+      const top = drop(FLAT, -3, 3, FLAT.heightIn + 2);
+      const band = drop(BANDS, -1, 0, BANDS.heightIn + 2);
+      const ledge = drop(BANDS, 6.2, 0, 6 + 2);
+      const away = drop(FLAT, -3, 3, FLAT.heightIn + 2, true);
+      const thin = drop(THIN, -0.35, 0, THIN.heightIn + 2);
+      check(
+        'imported robot 3d: a POLLEN set down on an import’s flat CAD top RESTS where it landed (on the top band and on a lower band’s ledge), like the standard deck',
+        Math.abs(top.z - FLAT.heightIn) < 0.1 && top.off < 0.05 &&
+          Math.abs(band.z - BANDS.heightIn) < 0.1 && band.off < 0.05 &&
+          Math.abs(ledge.z - 6) < 0.1 && ledge.off < 0.05 && top.n === 1,
+        `top z=${top.z.toFixed(2)} moved ${top.off.toFixed(3)}; band z=${band.z.toFixed(2)} moved ${band.off.toFixed(3)}; ledge z=${ledge.z.toFixed(2)} moved ${ledge.off.toFixed(3)}`,
+      );
+      check('imported robot 3d: ...it falls when the robot drives away from under it, and a thin tower band is no shelf (the ball rolls off it)',
+        away.z < 0.1 && away.n === 1 && thin.z < 0.1 && thin.n === 1,
+        `drove away z=${away.z.toFixed(2)}; thin tower z=${thin.z.toFixed(2)}`);
+    }
+
+    /**
      * ── THE BOX TUBE TOWER IS SOLID, AND IT IS NOT A SHELF (2026-09-22) ─────────────────────
      * The stowed tower stands 7 in above the deck, so it is two collider boxes
      * (`bbBoxTubeEnvelopes`). As square boxes they were a SHELF: a POLLEN dropped on the 1.3-in

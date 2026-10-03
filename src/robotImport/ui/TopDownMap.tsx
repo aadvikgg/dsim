@@ -182,6 +182,11 @@ export function TopDownMap({
   const pts = hull.map((p) => `${(-p.y).toFixed(3)},${(-p.x).toFixed(3)}`).join(' ');
   return (
     <div className="ds-import-map-wrap">
+      {/* ABOVE the map, not on it: the front edge is where an intake's handles sit, and a handle
+          (32 px under a finger) covered the label */}
+      <span className="ds-import-map-front" aria-hidden="true">
+        ▲ {COPY.frontMark}
+      </span>
       <div className="ds-import-map" ref={box} role="group" aria-label={ariaLabel}>
         <svg viewBox={`${-half} ${-half} ${span} ${span}`} aria-hidden="true">
           <rect className="cube" x={-9} y={-9} width={18} height={18} />
@@ -199,9 +204,6 @@ export function TopDownMap({
             </g>
           ) : null}
         </svg>
-        <span className="ds-import-map-front" aria-hidden="true">
-          ▲ {COPY.frontMark}
-        </span>
         {handles.map((h) => (
           <button
             key={h.key}

@@ -227,11 +227,10 @@
   stroke: var(--ds-ink);
   stroke-width: 0.12;
 }
+/* the front mark is a caption ABOVE the map (`TopDownMap.tsx`): on the map it sat where the
+   front intake's handles do, and a 32-px touch handle covered it */
 .ds-import-map-front {
-  position: absolute;
-  top: var(--ds-s-1);
-  left: 50%;
-  transform: translateX(-50%);
+  align-self: center;
   font-family: var(--ds-font-mono);
   font-size: var(--ds-t-xs);
   letter-spacing: var(--ds-track-caps);

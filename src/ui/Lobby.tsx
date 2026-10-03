@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { GameSettings } from '../game';
 import type { Alliance, GameSettings as GS, RobotSpec } from '../types';
 import { START_POSES } from '../config';
@@ -32,7 +32,7 @@ import { ConsoleHead } from './ConsoleHead';
 import { useEscape } from './useEscape';
 import { DISCORD_REGION } from '../net/discordActivity';
 import { roomTakesImportedRobots, roomTakesImportVisuals, serverCaps } from '../net/api';
-import { importVisuals } from '../net/importVisualsClient';
+import { importVisuals, ownLookLine } from '../net/importVisualsClient';
 import { IMPORT_FELL_BACK, isImportedSpec } from '../net/imported';
 import { standardRobotFor } from '../settings';
 import { activeZenithAuto } from '../auto/library';
@@ -136,6 +136,10 @@ const SLOW_CONNECT_MS = 5000;
 const IN_PROGRESS_RETRY_S = 10;
 /** debounce on writing the Discord identity back to `settings.spec` (see the effect) */
 const IDENTITY_SAVE_MS = 500;
+
+/** why this seat's own imported look is not reaching the room (the relay client's), for one line */
+const subscribeOwnLook = (cb: () => void): (() => void) => importVisuals.subscribeOwnLook(cb);
+const ownLookNow = () => importVisuals.ownLookTrouble();
 
 /** The lobby is a full-screen surface, so it cannot use AppShell's side panel.
  * Keep the actual room UI and the shared FriendsPanel as siblings here instead.
@@ -315,6 +319,9 @@ export function Lobby({
     };
   }, [importedActive, hasImports]);
   const sendImport = importedActive && !isRecord && importOk === true;
+  // an imported look the room refused (out of space, a junk file, an id taken) or never got: said in
+  // the robot's own line, so the owner learns why the others see an outline
+  const ownLook = useSyncExternalStore(subscribeOwnLook, ownLookNow, ownLookNow);
   /** the spec this client puts on the wire: the active robot, or the standard one standing in for an import */
   const wireSpec = (s: GS): RobotSpec => (isImportedSpec(s.spec) && !sendImport ? standardRobotFor(s) : s.spec);
   /** the tier the host's next "Add a bot" seats. Remembered for the session only: it is a
@@ -1538,10 +1545,18 @@ export function Lobby({
             {/* WHAT YOU ARE BRINGING, said once. When it is one of your saved robots, the lit
                 card below says it; this line is for a build that is not saved, which no card
                 can show. It used to print over the lit card too, in a second vocabulary. */}
-            {!settings.savedRobots.some(isMine) && (
-              <p className="ds-sub">
-                {mySpec.name} · {buildWords(mySpec, settings.game).join(' · ')}
+            {/* ...and when this seat's imported LOOK did not reach the room, why, in that same line's
+                place (`ownLookLine`), so the section does not move when it arrives */}
+            {sendImport && ownLook ? (
+              <p className="ds-sub" role="status">
+                {ownLookLine(ownLook)}
               </p>
+            ) : (
+              !settings.savedRobots.some(isMine) && (
+                <p className="ds-sub">
+                  {mySpec.name} · {buildWords(mySpec, settings.game).join(' · ')}
+                </p>
+              )
             )}
             <div className="ds-opts robots">
               {settings.savedRobots.map((r, i) => (
@@ -1573,7 +1588,9 @@ export function Lobby({
                           </span>
                         ) : undefined
                       }
-                      onPick={() => pickSpec({ ...e.spec })}
+                      // the card that answers for the robot already picked is a no-op: re-applying
+                      // an out-of-date library copy would put its older spec back
+                      onPick={() => (libraryEntryFor(importLibrary.entries, mySpec.imported?.id)?.id === e.id ? undefined : pickSpec({ ...e.spec }))}
                     />
                   ))
                 : null}

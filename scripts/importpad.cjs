@@ -9,6 +9,12 @@
  *
  * The one step a pad cannot do is pick a file (an OS dialog): the run hands the editor the STL
  * fixture through its file input, then puts the mouse away for good.
+ *
+ * Then the ROBOT PAGE, by pad again: the import is saved (Y on Review), and the library row, the
+ * Imported robot panel and its dialogs (Rename, Duplicate, Export, Delete, a copy's ✕) are walked
+ * and asserted, the export lands as a file (the download is caught, never a dialog), and the page's
+ * OUT-OF-DATE state is staged (the synced spec moved under the record) and checked: the line, the
+ * footprint in the hero, Import the file in Edit's place, and the lit card a no-op.
  */
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
@@ -44,6 +50,13 @@ const A = 0, B = 1, X = 2, Y = 3, LB = 4, RB = 5, UP = 12, DOWN = 13, LEFT = 14,
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ width: 1440, height: 900, show: false, useContentSize: true, webPreferences: { backgroundThrottling: false, offscreen: true } });
   win.webContents.setAudioMuted(true);
+  // an export is a download: caught here and written beside the shots, never a save dialog
+  const downloads = [];
+  win.webContents.session.on('will-download', (_e, item) => {
+    const to = path.join(OUT, item.getFilename());
+    item.setSavePath(to);
+    item.once('done', (_ev, state) => downloads.push({ to, state }));
+  });
   const js = (s) => win.webContents.executeJavaScript(s);
   let failures = 0;
   const check = (name, ok, detail = '') => {
@@ -186,6 +199,93 @@ app.whenReady().then(async () => {
     check('keys: Escape closes the dialog and hands focus back to Discard', await js(`!document.querySelector('.ds-modal') && /Discard/.test(document.activeElement?.textContent ?? '')`), await active());
   } else check('keys: a Discard button in the foot', false);
   await shot('keys-drivetrain');
+
+  // ── THE ROBOT PAGE, BY PAD: the library row, the Imported robot panel, its dialogs ──
+  await js(PAD);
+  await sleep(300);
+  const until = (expr, ms = 15000) => js(`(async () => { for (let t = 0; t < ${ms}; t += 100) { try { if (${expr}) return true; } catch {} await new Promise((r) => setTimeout(r, 100)); } return false; })()`);
+  const focus = (expr) => js(`(() => { const e = ${expr}; if (!e) return false; e.scrollIntoView({ block: 'center' }); e.focus(); return document.activeElement === e; })()`);
+  const btnIn = (scope, text) => `[...document.querySelectorAll(${JSON.stringify(scope)})].find((b) => b.textContent.trim() === ${JSON.stringify(text)})`;
+  const panelBtn = (text) => btnIn('.ds-panel .ds-btn', text);
+  await js(`__press(${RB})`);
+  await js(`__press(${RB})`);
+  check('pad: RB twice from Drivetrain: Review', (await tab()) === '4', await tab());
+  await js(`__press(${Y})`);
+  check('pad: Y on Review saves the robot and lands on the robot page', await until(`location.pathname.endsWith('/configure/robot') && [...document.querySelectorAll('.ds-panel-title')].some((h) => h.textContent.trim() === 'Imported robot')`));
+  await sleep(600);
+  const cards = () => js(`document.querySelectorAll('.ds-robot-card .ds-badge').length ? [...document.querySelectorAll('.ds-robot-card')].filter((c) => c.querySelector('.ds-badge')?.textContent === 'Imported').length : 0`);
+  check('library row: one imported card, lit (it is the active robot), with its picture', (await cards()) === 1 &&
+    (await js(`!!document.querySelector('.ds-robot-card.on .ds-import-thumb') || !!document.querySelector('.ds-robot-card.on svg')`)));
+  check('library row: the hero shows the import (its picture) and the Imported badge', await js(`!!document.querySelector('.ds-hero .ds-import-hero-img') && /Imported/.test(document.querySelector('.ds-hero-name')?.textContent ?? '')`));
+  await shot('robot-saved');
+  // the lit card is the active robot: A on it changes nothing (an old copy cannot be re-applied)
+  const specNow = () => js(`localStorage.getItem('decodesim.settings.v1')`);
+  const s0 = await specNow();
+  await focus(`document.querySelector('.ds-robot-card.on')`);
+  await js(`__press(${A})`);
+  await sleep(300);
+  check('library row: A on the lit card is a no-op (the settings are untouched)', (await specNow()) === s0);
+  // d-pad reachability: from the card, DOWN reaches the panel's actions
+  let reached = false;
+  for (let i = 0; i < 12 && !reached; i++) {
+    await js(`__press(${DOWN})`);
+    reached = await js(`!!document.activeElement?.closest('.ds-panel') && document.activeElement.classList.contains('ds-btn') && [...document.querySelectorAll('.ds-panel-title')].some((h) => h.textContent.trim() === 'Imported robot' && h.closest('.ds-panel').contains(document.activeElement))`);
+  }
+  check('panel: the d-pad reaches the Imported robot panel’s actions from the library row', reached, await active());
+  // Rename: A opens it with focus inside, B closes it and hands focus back
+  await focus(panelBtn('Rename'));
+  await js(`__press(${A})`);
+  check('panel: A on Rename opens the dialog with focus inside it', await until(`!!document.activeElement?.closest('.ds-modal') && !!document.querySelector('.ds-modal input')`, 4000));
+  await shot('dialog-rename');
+  await js(`__press(${B})`);
+  check('panel: B closes Rename and hands focus back to it', await until(`!document.querySelector('.ds-modal') && document.activeElement?.textContent.trim() === 'Rename'`, 4000), await active());
+  // Duplicate: a second card
+  await focus(panelBtn('Duplicate'));
+  await js(`__press(${A})`);
+  check('panel: A on Duplicate adds a second card, named "… copy"', await until(`[...document.querySelectorAll('.ds-robot-card')].some((c) => /copy/.test(c.textContent))`, 6000));
+  // the copy's ✕: B cancels, A on the dialog's Delete removes it
+  await focus(`[...document.querySelectorAll('.ds-opt-slot')].find((s) => /copy/.test(s.textContent))?.querySelector('.ds-opt-del')`);
+  await js(`__press(${A})`);
+  check('library row: A on a card’s ✕ asks first (a dialog naming the robot)', await until(`!!document.querySelector('.ds-modal') && /copy/.test(document.querySelector('.ds-dialog-title')?.textContent ?? '')`, 4000));
+  await shot('dialog-delete-copy');
+  await js(`__press(${B})`);
+  check('library row: B cancels it (the copy stays, focus back on its ✕)', await until(`!document.querySelector('.ds-modal') && document.activeElement?.classList.contains('ds-opt-del')`, 4000) && (await cards()) === 2, await active());
+  await js(`__press(${A})`);
+  await until(`!!document.querySelector('.ds-modal')`, 4000);
+  await focus(btnIn('.ds-modal .ds-btn', 'Delete'));
+  await js(`__press(${A})`);
+  check('library row: A on the dialog’s Delete removes the copy, the active robot stays', await until(`![...document.querySelectorAll('.ds-robot-card')].some((c) => /copy/.test(c.textContent))`, 6000) && (await cards()) === 1 &&
+    (await js(`[...document.querySelectorAll('.ds-panel-title')].some((h) => h.textContent.trim() === 'Imported robot')`)));
+  // Export: a real file, caught
+  await focus(panelBtn('Export file'));
+  await js(`__press(${A})`);
+  for (let i = 0; i < 60 && !downloads.length; i++) await sleep(100);
+  const dl = downloads[0];
+  check('panel: A on Export file writes the share file (a .glb, caught, no dialog)', !!dl && dl.state === 'completed' && /\.glb$/.test(dl.to) && fs.statSync(dl.to).size > 1000, dl ? `${dl.state} ${dl.to}` : 'no download');
+  // Delete (the ACTIVE robot): it asks, says what you will drive instead, and B closes it
+  await focus(panelBtn('Delete'));
+  await js(`__press(${A})`);
+  check('panel: A on Delete asks first and names the robot you will drive instead', await until(`!!document.querySelector('.ds-modal') && /You’ll drive/.test(document.querySelector('.ds-modal')?.textContent ?? '')`, 4000));
+  await shot('dialog-delete-active');
+  await js(`__press(${B})`);
+  check('panel: B closes it, nothing deleted', await until(`!document.querySelector('.ds-modal')`, 4000) && (await cards()) === 1);
+  // ── OUT OF DATE: the synced spec moves under this device's record (an edit on another device) ──
+  await js(`(() => { const k = 'decodesim.settings.v1'; const s = JSON.parse(localStorage.getItem(k)); const h = s.spec.imported.heightIn; s.spec.imported.heightIn = h <= 17.5 ? h + 0.5 : h - 0.5; localStorage.setItem(k, JSON.stringify(s)); return true; })()`);
+  await win.loadURL(BASE + '/decode/configure/robot');
+  await sleep(1200);
+  await js(PAD);
+  check('stale: the panel says the model here is out of date, in one line, with the way to update it', await until(`/out of date/.test(document.querySelector('.ds-panel .ds-hint.warn')?.textContent ?? '') && /newest exported file/.test(document.querySelector('.ds-panel .ds-hint.warn')?.textContent ?? '')`, 6000));
+  check('stale: the hero shows the footprint, not the old picture', await js(`!document.querySelector('.ds-hero .ds-import-hero-img') && !!document.querySelector('.ds-hero svg')`));
+  check('stale: Edit is replaced by Import the file, in the panel head', await js(`(() => { const h = [...document.querySelectorAll('.ds-panel-title')].find((t) => t.textContent.trim() === 'Imported robot')?.closest('.ds-panel-h'); const b = h?.querySelector('.ds-btn'); return !!b && b.textContent.trim() === 'Import the file'; })()`));
+  await shot('robot-stale');
+  const s1 = await specNow();
+  await focus(`document.querySelector('.ds-robot-card.on')`);
+  await js(`__press(${A})`);
+  await sleep(300);
+  check('stale: A on the (out-of-date) lit card does not put the old spec back', (await specNow()) === s1);
+  await focus(`[...document.querySelectorAll('.ds-panel-h .ds-btn')].find((b) => b.textContent.trim() === 'Import the file')`);
+  await js(`__press(${A})`);
+  check('stale: A on Import the file opens the importer', await until(`location.pathname.endsWith('/configure/robot/import')`, 4000));
 
   console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
   app.exit(failures ? 1 : 0);

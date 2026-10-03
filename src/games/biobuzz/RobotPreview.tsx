@@ -579,7 +579,7 @@ export function BiobuzzRobotPreview({
 /** the builder preview of an IMPORTED BIOBUZZ robot — see `ui/FootprintSvg.tsx` */
 function ImportedBiobuzzPreview({ spec, size, fluid, caption }: { spec: RobotSpec; size: number; fluid: boolean; caption: boolean }) {
   const imp = spec.imported;
-  const image = useImportedTopUrl(imp?.id);
+  const image = useImportedTopUrl(imp?.id, imp);
   if (!imp) return null;
   const launcher = bbLauncherOf(spec, BB_HOOD_DEFAULT_DEG);
   const r = turretRadius(spec);

@@ -1035,7 +1035,7 @@ export function syncElements(world: World, engine: Engine3d): void {
 import { BB_HALF_X, BB_HALF_Y } from '../config';
 import { hiveDetentHold, hiveTiltAngle } from './hive3d';
 import { tiltQuatX } from './math3';
-import { GROUP_NECTAR } from './groups';
+import { GROUP_CHASSIS, GROUP_NECTAR } from './groups';
 
 /**
  * Drive both hive trays' KINEMATIC rotation from `hiveTiltAngle` -- the Day 1 fallback
@@ -1595,6 +1595,63 @@ function elementVibeSeed(id: number, tick: number, rngState: number): { x: numbe
   return { x: dcos(angle) * mag, y: dsin(angle) * mag };
 }
 
+/**
+ * ⚠️ **AN IMPORTED ROBOT'S FLAT TOP IS A DECK, LIKE THE STANDARD ONE** (robot import, 2026-10-02).
+ * An import's chassis is its CAD height bands, each a convex PRISM (`import3dShapes`, `bodies.ts`),
+ * and Rapier builds a prism as a `ConvexPolyhedron` — the shape type the narrow-hull rule below
+ * reserves for the field's decimated CAD hulls. So a POLLEN set down on an import's flat top got the
+ * "vibration" kick, and off the floor there is no rolling law to stop it again (the kick only fires
+ * on an element that reads at rest, so the give-up count never grew): measured, it rolled at
+ * 2–3 in/s for the whole 7 s and off the edge, where on the standard deck (`Cuboid`) it rests.
+ *
+ * A prism is told from a field hull by its groups: every robot chassis collider carries
+ * `GROUP_CHASSIS`, no field static does, and a STANDARD robot builds no `ConvexPolyhedron` at all
+ * (boxes, cylinders, rounded boxes), so this answers only for an import and a standard robot is
+ * untouched. It is broad when its plan is at least the element's diameter across at its narrowest
+ * (`planWidth` + the contact skin on each side): a band that is a thin lift tower is narrow, the
+ * Box Tube rule, and the ball still rolls off it.
+ */
+function importTopIsBroad(other: InstanceType<Rapier3d['Collider']>, ballR: number): boolean {
+  if (other.collisionGroups() >>> 0 !== GROUP_CHASSIS) return false;
+  const v = (other.shape as unknown as { vertices?: Float32Array }).vertices;
+  if (!v || v.length < 9) return false;
+  return planWidth(v) + 2 * other.contactSkin() >= 2 * ballR;
+}
+
+/** the narrowest plan width (in) of a point set (x, y, z triples): its 2D hull's minimum over edges
+ *  of the farthest point from that edge's line. Pure arithmetic, so the same answer everywhere. */
+function planWidth(v: Float32Array): number {
+  const pts: { x: number; y: number }[] = [];
+  for (let i = 0; i + 2 < v.length; i += 3) pts.push({ x: v[i], y: v[i + 1] });
+  pts.sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }): number =>
+    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: { x: number; y: number }[] = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 1e-12) lower.pop();
+    lower.push(p);
+  }
+  const upper: { x: number; y: number }[] = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 1e-12) upper.pop();
+    upper.push(p);
+  }
+  const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+  if (hull.length < 3) return 0;
+  let best = Infinity;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % hull.length];
+    const len = Math.sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+    if (len < 1e-9) continue;
+    let far = 0;
+    for (const p of hull) far = Math.max(far, Math.abs(cross(a, b, p)) / len);
+    best = Math.min(best, far);
+  }
+  return Number.isFinite(best) ? best : 0;
+}
+
 export function groundRoll3d(world: World, engine: Engine3d, dt: number): void {
   const RAPIER = rapier3d();
   for (const b of world.balls) {
@@ -1703,7 +1760,10 @@ export function groundRoll3d(world: World, engine: Engine3d, dt: number): void {
         // ...and a ROUNDED box is narrow too: the one kind built is a Box Tube tower
         // (`BbMechEnvelope.narrow`), whose 1.3-in top carried a balanced POLLEN indefinitely
         const st = other.shapeType();
-        if (st === RAPIER.ShapeType.ConvexPolyhedron || st === RAPIER.ShapeType.Cylinder || st === RAPIER.ShapeType.RoundCuboid) {
+        // ...and an IMPORTED robot's prism wide enough to carry the ball is a deck (`importTopIsBroad`)
+        if (st === RAPIER.ShapeType.ConvexPolyhedron && importTopIsBroad(other, b.r)) {
+          touchingBroad = true;
+        } else if (st === RAPIER.ShapeType.ConvexPolyhedron || st === RAPIER.ShapeType.Cylinder || st === RAPIER.ShapeType.RoundCuboid) {
           touchingNarrow = true;
         } else {
           touchingBroad = true;

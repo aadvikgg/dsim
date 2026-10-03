@@ -38,7 +38,10 @@ import {
   visualFrames,
   visualSpan,
   type VisualKind,
+  type VisualRefusal,
 } from './importVisuals';
+import { sameImportedRobot } from '../robotImport/libraryIds';
+import type { ImportedRobot } from '../types';
 import { getShowOthersImported, subscribeShowOthersImported } from './importVisualsPref';
 import { encodeMsg, type LobbyPlayer, type ServerMsg } from './protocol';
 import type { Transport } from './transport';
@@ -64,14 +67,52 @@ function loadCheck(): Promise<VisualCheck | null> {
   return checkLoading;
 }
 
+const REFUSALS: readonly VisualRefusal[] = ['room', 'id', 'size', 'format', 'budget', 'seq', 'dup', 'none', 'busy'];
+const isVisualRefusal = (x: unknown): x is VisualRefusal => REFUSALS.includes(x as VisualRefusal);
+
 /** where the owner's own bytes come from: the device library, or a test */
 export interface OwnAssets {
   top(id: string): Promise<Uint8Array | null>;
   /** already small enough for the relay, or null (the picture alone is shared) */
   mesh(id: string): Promise<Uint8Array | null>;
   /** does this device hold a robot with this id itself? Then a relayed look is never lent for it:
-   *  the device's own copy is what it draws (absent ⇒ no) */
-  has?(id: string): Promise<boolean>;
+   *  the device's own copy is what it draws (absent ⇒ no). With `imp`, only a copy of THAT version
+   *  counts: an out-of-date copy is not drawn (`render/importedAssets.ts`), so the relayed look is */
+  has?(id: string, imp?: ImportedRobot): Promise<boolean>;
+  /** the descriptor of the robot this device's assets for `id` were made for (null: none). An
+   *  owner uploads only a look made for the robot its seat holds (absent ⇒ not compared) */
+  describe?(id: string): Promise<ImportedRobot | null>;
+}
+
+/**
+ * WHY THIS SEAT'S OWN LOOK IS NOT REACHING THE ROOM, for the one line the custom-room lobby shows
+ * (`Lobby.tsx`, in place of the robot's build line, so nothing moves). A room refusal (`budget`,
+ * `format`, `dup`, ...), an upload the room never confirmed, a model this device does not have, or one
+ * that is out of date here. Null while the look is on its way, shared, or not this seat's business.
+ */
+export interface OwnLookTrouble {
+  kind: VisualKind;
+  reason: VisualRefusal | 'missing' | 'stale';
+}
+
+/** the line for `OwnLookTrouble` (docs/area/ui.md copy rules: what failed, and why, in one line) */
+export function ownLookLine(t: OwnLookTrouble): string {
+  const what = t.kind === 'mesh' ? 'Couldn’t share your 3D model' : 'Couldn’t share your robot’s look';
+  switch (t.reason) {
+    case 'budget':
+      return `${what}: this room is out of space.`;
+    case 'format':
+    case 'size':
+      return `${what}: the room can’t use the file.`;
+    case 'dup':
+      return `${what}: another robot here has its id.`;
+    case 'missing':
+      return `${what}: it isn’t on this device.`;
+    case 'stale':
+      return `${what}: the copy here is out of date.`;
+    default:
+      return `${what}: the upload didn’t finish.`;
+  }
 }
 
 /**
@@ -86,11 +127,20 @@ export interface OwnAssets {
  */
 const library = (): Promise<typeof import('../robotImport/library')> => import('../robotImport/library');
 export const libraryOwnAssets: OwnAssets = {
-  async has(id) {
+  async has(id, imp) {
     try {
-      return !!(await (await library()).topFor(id));
+      const lib = await library();
+      if (!(await lib.topFor(id))) return false;
+      return !imp || sameImportedRobot(await lib.descriptorFor(id), imp);
     } catch {
       return false;
+    }
+  },
+  async describe(id) {
+    try {
+      return await (await library()).descriptorFor(id);
+    } catch {
+      return null;
     }
   },
   async top(id) {
@@ -162,8 +212,15 @@ export class ImportVisualsClient {
   private selfId = '';
   /** the robot id this seat holds (from the roster), or null */
   private ownId: string | null = null;
+  /** ...and the robot itself, as the room has it (an owner uploads only a look made for it) */
+  private ownImp: ImportedRobot | null = null;
   /** other seats' imported robots: owner client id → robot id */
   private readonly roster = new Map<string, string>();
+  /** ...and each one's descriptor, so a stale copy in this device's library does not stand in for it */
+  private readonly rosterImp = new Map<string, ImportedRobot>();
+  /** why this seat's own look is not in the room (`OwnLookTrouble`), and who wants to know */
+  private trouble: OwnLookTrouble | null = null;
+  private readonly troubleListeners = new Set<() => void>();
   /** what the room says it holds: `${owner}|${kind}` → robot id */
   private readonly ready = new Map<string, string>();
   /** this seat's own assets the room has confirmed: `${id}|${kind}` */
@@ -225,6 +282,7 @@ export class ImportVisualsClient {
     this.noUpload.clear();
     this.uploadTries.clear();
     this.cancelUpload();
+    this.setTrouble(null);
     this.poke();
   }
 
@@ -232,15 +290,26 @@ export class ImportVisualsClient {
   noteRoster(selfId: string, players: readonly LobbyPlayer[]): void {
     if (selfId) this.selfId = selfId;
     this.roster.clear();
+    this.rosterImp.clear();
+    const was = this.ownImp;
     this.ownId = null;
+    this.ownImp = null;
     for (const p of players) {
-      const id = (p.spec as { imported?: { id?: unknown } } | undefined)?.imported?.id;
+      const imp = (p.spec as { imported?: ImportedRobot } | undefined)?.imported;
+      const id = imp?.id;
       if (typeof id !== 'string' || !VISUAL_ID_RX.test(id)) continue;
-      if (p.clientId === this.selfId) this.ownId = id;
-      else this.roster.set(p.clientId, id);
+      if (p.clientId === this.selfId) {
+        this.ownId = id;
+        this.ownImp = imp!;
+      } else {
+        this.roster.set(p.clientId, id);
+        this.rosterImp.set(p.clientId, imp!);
+      }
     }
     // an upload for a robot this seat no longer holds is a waste of the owner's frames
     if (this.upload && this.upload.id !== this.ownId) this.cancelUpload();
+    // another robot (or none): what was said about the last one's look no longer applies
+    if (!this.ownImp || !was || !sameImportedRobot(was, this.ownImp) || was.id !== this.ownImp.id) this.setTrouble(null);
     this.poke();
   }
 
@@ -254,7 +323,9 @@ export class ImportVisualsClient {
     this.offered = false;
     this.selfId = '';
     this.ownId = null;
+    this.ownImp = null;
     this.roster.clear();
+    this.rosterImp.clear();
     this.ready.clear();
     this.mine.clear();
     this.noUpload.clear();
@@ -262,6 +333,7 @@ export class ImportVisualsClient {
     this.incoming.clear();
     this.asks.clear();
     this.dropDelivered();
+    this.setTrouble(null);
   }
 
   private dropDelivered(): void {
@@ -283,6 +355,7 @@ export class ImportVisualsClient {
     if (m.owner === this.selfId) {
       // the room holds our upload
       this.mine.add(`${m.id}|${m.kind}`);
+      if (this.trouble?.kind === m.kind) this.setTrouble(null);
       if (this.upload && this.upload.id === m.id && this.upload.kind === m.kind) {
         this.cancelUpload();
         this.poke();
@@ -302,6 +375,7 @@ export class ImportVisualsClient {
         this.uploadTries.set(key, (this.uploadTries.get(key) ?? 0) + 1);
       } else {
         this.noUpload.add(key);
+        if (m.id === this.ownId) this.noteTrouble(m.kind, isVisualRefusal(m.reason) ? m.reason : 'seq');
       }
       if (this.upload && this.upload.id === m.id && this.upload.kind === m.kind) this.cancelUpload();
       this.poke();
@@ -353,8 +427,14 @@ export class ImportVisualsClient {
     this.upload = up;
     void loadCheck(); // in step with the library read below
     let bytes: Uint8Array | null = null;
+    // ⚠️ ONLY A LOOK MADE FOR THE ROBOT THIS SEAT HOLDS: after an edit on another device this
+    // device's library can hold the OLD model under the same id, and sending it would put the old
+    // model on the new hull on every other screen (`render/importedAssets.ts` refuses it here too)
+    const want = this.ownImp;
+    let stale = false;
     try {
-      bytes = kind === 'top' ? await this.own.top(id) : await this.own.mesh(id);
+      if (want && this.own.describe) stale = !sameImportedRobot(await this.own.describe(id), want);
+      if (!stale) bytes = kind === 'top' ? await this.own.top(id) : await this.own.mesh(id);
     } catch {
       bytes = null;
     }
@@ -362,9 +442,14 @@ export class ImportVisualsClient {
     const check = bytes ? await loadCheck() : null;
     if (this.upload !== up) return; // cancelled while the validators loaded
     if (!bytes || !check || check.validateVisual(kind, bytes)) {
-      // nothing to share (a robot opened on another device, an unusable file): the outline it is
+      // nothing to share (a robot opened on another device, an out-of-date copy, an unusable file):
+      // the outline it is, and the lobby says why. A mesh too big even when made lighter is not
+      // trouble: the picture is shared and the 3D view shows the placeholder.
       this.noUpload.add(key);
       this.upload = null;
+      if (stale) this.noteTrouble(kind, 'stale');
+      else if (kind === 'top' && !bytes) this.noteTrouble(kind, 'missing');
+      else if (bytes) this.noteTrouble(kind, 'format');
       this.poke();
       return;
     }
@@ -391,6 +476,7 @@ export class ImportVisualsClient {
         if (this.upload !== up) return;
         this.noUpload.add(key);
         this.cancelUpload();
+        this.noteTrouble(kind, 'seq');
       }, CONFIRM_MS);
     };
     sendNext();
@@ -483,7 +569,8 @@ export class ImportVisualsClient {
     if (hasRelayedAsset(owner, id, kind) || relayedIdTakenByOther(owner, id)) return;
     let mine = false;
     try {
-      mine = (await this.own.has?.(id)) ?? false;
+      // a copy of THIS version only: an out-of-date one here is not drawn, so the relayed look is
+      mine = (await this.own.has?.(id, this.rosterImp.get(owner))) ?? false;
     } catch {
       mine = false;
     }
@@ -533,6 +620,39 @@ export class ImportVisualsClient {
     }
     // back on, or the 3D view came up: what was never asked for may be asked for now
     this.poke();
+  }
+
+  // ---- this seat's own look, for the lobby's line ---------------------------------------------
+
+  /** why this seat's own look is not in the room, or null (`OwnLookTrouble`) */
+  ownLookTrouble(): OwnLookTrouble | null {
+    return this.trouble;
+  }
+
+  /** told whenever `ownLookTrouble()` changes; returns the unsubscribe */
+  subscribeOwnLook(cb: () => void): () => void {
+    this.troubleListeners.add(cb);
+    return () => {
+      this.troubleListeners.delete(cb);
+    };
+  }
+
+  /** the first trouble stands (the picture's, which every viewer needs, before the mesh's) */
+  private noteTrouble(kind: VisualKind, reason: OwnLookTrouble['reason']): void {
+    if (this.trouble && (this.trouble.kind === 'top' || kind === 'mesh')) return;
+    this.setTrouble({ kind, reason });
+  }
+
+  private setTrouble(t: OwnLookTrouble | null): void {
+    if (this.trouble === t || (this.trouble && t && this.trouble.kind === t.kind && this.trouble.reason === t.reason)) return;
+    this.trouble = t;
+    for (const cb of [...this.troubleListeners]) {
+      try {
+        cb();
+      } catch {
+        /* a listener's throw is its own */
+      }
+    }
   }
 
   /** TEST SEAM: what this client is doing */

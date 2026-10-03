@@ -29,7 +29,7 @@ import { Marquee } from './Marquee';
 import { OptRow, ToggleRow } from './OptRow';
 import { BuiltinMechRows } from './builderMechs';
 import { useLibrary } from '../robotImport/ui/useLibrary';
-import { libraryEntryFor } from '../robotImport/libraryIds';
+import { answersFor, libraryEntryFor, sameImportedRobot } from '../robotImport/libraryIds';
 import { ImportedPanel, ImportedRow, useImportedActions, useRobotNotice } from '../robotImport/ui/ImportedRobots';
 import { FootprintSvg } from './FootprintSvg';
 import { polyBounds as importBox } from '../sim/imported';
@@ -435,7 +435,10 @@ export function Menu({ settings, onChange, onImport }: Props) {
   // the record that answers for the active robot HERE: its own id, or a copy added from a share
   // file that carried it (the account syncs the spec, not the model — `libraryIds.ts`)
   const importedEntry = libraryEntryFor(library.entries, importedId);
-  const importedThumb = importedEntry ? library.thumbs[importedEntry.id] : undefined;
+  // ...and whether that record is an OLDER version of it (the robot was edited on another device and
+  // the account synced the new spec): then its model and pictures are not this robot's any more
+  const importedStale = !!importedEntry && !!spec.imported && !sameImportedRobot(importedEntry.spec.imported, spec.imported);
+  const importedThumb = importedEntry && !importedStale ? library.thumbs[importedEntry.id] : undefined;
   // the shooter-specific build controls (intake preset, flywheel inertia, color
   // sorter) are DECODE concepts — hidden for the Chain Reaction shell, whose real
   // intakes/config arrive with its rules. The shared chassis controls
@@ -656,7 +659,9 @@ export function Menu({ settings, onChange, onImport }: Props) {
             <ImportedRow
               view={library}
               activeId={importedEntry?.id ?? importedId}
-              onPick={(e) => applySpec({ ...e.spec })}
+              // the card that answers for the active robot IS it: picking it again changes nothing,
+              // and applying an out-of-date copy's spec would put the old version back on the account
+              onPick={(e) => (answersFor(e, importedId) ? undefined : applySpec({ ...e.spec }))}
               onDelete={importActions.requestDelete}
               onImport={() => onImport?.()}
               onDropFiles={(files) => {
@@ -716,6 +721,7 @@ export function Menu({ settings, onChange, onImport }: Props) {
             spec={spec}
             entry={importedEntry}
             loaded={library.entries !== null}
+            stale={importedStale}
             error={importActions.error}
             onEdit={() => importedEntry && onImport?.(importedEntry.id)}
             onRename={() => importedEntry && importActions.requestRename(importedEntry)}

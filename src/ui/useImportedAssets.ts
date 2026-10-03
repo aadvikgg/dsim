@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import { ANY_ID, importedAssetVersion, importedTopUrl, subscribeImportedAssets } from '../render/importedAssets';
+import type { ImportedRobot } from '../types';
 
 /**
  * REACT'S VIEW OF `render/importedAssets.ts`. A canvas in the match redraws every frame and simply
@@ -24,7 +25,8 @@ export function useImportedAssetVersion(id: string | undefined): number {
 }
 
 /** the import's top-down picture as an object URL (`importedTopUrl`), or null until it is ready */
-export function useImportedTopUrl(id: string | undefined): string | null {
+export function useImportedTopUrl(id: string | undefined, imp?: ImportedRobot | null): string | null {
   useImportedAssetVersion(id);
-  return id ? importedTopUrl(id) : null;
+  // with the robot being drawn, so an out-of-date library copy is not shown (`importedTopUrl`)
+  return id ? importedTopUrl(id, imp) : null;
 }

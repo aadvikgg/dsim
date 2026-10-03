@@ -29,6 +29,7 @@ export const PAGE_COPY = {
   missingBig: 'Model not on this device',
   missingText: 'It drives as its footprint here. Import its exported file to see the model.',
   missingAction: 'Import the file',
+  staleText: 'The model on this device is out of date. Import the robot’s newest exported file to update it.',
   renameTitle: 'Rename robot',
   robotName: 'Robot name',
   cancel: 'Cancel',
