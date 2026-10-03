@@ -1,6 +1,6 @@
 # HANDOFF — 2026-10-03b (BIOBUZZ 3D: the online "invisible bump" against walls)
 
-**State: on `alpha` (pushed); `dsim-alpha` redeploy noted below. NOT on `main`, production not deployed (server + client change: `SIM_PATCH` 3).** `npm test` (5531), `build`, `server:check`, `docaudit`, `bundleaudit` pass. GUI checked offscreen in Electron: BIOBUZZ 3D Free Drive, driving into and along walls, no console errors.
+**State: on `alpha` (c91e709a); `dsim-alpha` DEPLOYED from it 2026-10-03 03:21Z (health ok, one machine). NOT on `main`, production not deployed (server + client change: `SIM_PATCH` 3).** `npm test` (5531), `build`, `server:check`, `docaudit`, `bundleaudit` pass. GUI checked offscreen in Electron: BIOBUZZ 3D Free Drive, driving into and along walls, no console errors.
 
 - **Owner:** "sometimes in online games, when I drive against the wall, there seems to be an invisible bump. It happens rarely."
 - **Where it is:** BIOBUZZ only. Online BIOBUZZ is always 3D; a real-`Room` probe at 66 ms found DECODE online clean (worst 0.29 in over 10 min of wall driving) and BIOBUZZ 3D (FULL) with reconcile snaps at walls up to ~1 in / 8°, one or two a minute.
