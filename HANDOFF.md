@@ -1,3 +1,24 @@
+# HANDOFF — 2026-10-02f (robot import finished on `feat/robot-import`: polish lane, hand loading, the kits measured)
+
+**State: everything on the 2026-10-02e list is done and pushed to `origin/feat/robot-import`; not on `alpha`/`main`, not deployed.** `npm test` (both suites), `build`, `server:check`, `dbtest`, `test:workers`, `test:mm`, `uiaudit`, `docaudit`, `bundleaudit` pass; `shiftaudit`: the full run found one shift (`/configure/audio`, a fold body laid out mid-probe) that a re-run of that page did not reproduce; the seeded pass alone, twice, 476 states each, 0 shifts. Server code changed (sim, coercer, settings merge), so merging to alpha needs `./scripts/fly-deploy.sh --alpha`. Merging into alpha is the owner's call (the branch was kept off alpha on request).
+
+- **Polish lane merged** (`robot-import-polish2`, 7 commits) plus one fix it never built: `engineImpl.ts` passed the optional `b.r` to `importTopIsBroad` (tsc failed). Alpha merged in twice (moderation notices, satellite fixes, 2v2 balance).
+- **Hand loading** (`intake: 'none'`, DECODE only; `docs/area/decode.md` "NO INTAKE"). Chassis-only footprint and solids, every capture path gated on `noIntake`, held slots inside the chassis (15–18 in). The human player hands one artifact per `HP_HAND_LOAD_S` (0.4 s) to a still robot partly in its own loading zone, teleop/free drive, box first then the zone's floor (manual G432 allows it for any robot; the sim does it only for robots without an intake, so every other build steps byte-identically). Builder "Hand loaded", no INTAKE touch button, no intake span in the import editor, a tutorial load step. 15 smoke checks.
+- **The kits measured on their CAD** (an opus agent; images and scripts in this session's scratchpad `hood/`): DECODE guide exits at **90° ±2°**, 13.0 in up, at the launcher end; BIOBUZZ at **68° ±3°**, launcher at the BACK (opposite the sweeper).
+  - DECODE kit card: `intake: 'none'`, frame 17 in. The hood stays 70°, now documented as EFFECTIVE: a 90° no-spin arc cannot score, the real artifact curves toward the launcher from the pinch's spin, and `stepFlightBall` has no spin. The kit's own auto still scores 3/3 from against the goal.
+  - BIOBUZZ: `BB_FIXED_HOOD_DEFAULT_DEG` 77 → 68, StarterBot launcher `back`, width 16.75. Its band is 41–46 in, against the wall (where the kit's own auto shoots). `bbFixedBand` now caps by the footprint side that faces the wall (it used the rear even for a back launcher). Bench (`--builds preset:starterbot --tiers hard --seeds 5`): solo 166.2 → **117.8**, 2v2 153.5 → **142.4**.
+- **BIOBUZZ 2D**: an imported fixed launcher's head stood its axis on the placed lip; `bbFixedAxisLocal` is now the one axis both drawings use.
+- **Settings merge** (`settingsKeep.ts`): an older build's save now also keeps a STANDARD DECODE robot with a fixed launcher/hood/wheel or no intake (alpha's coercer rewrites `none` to sloped with the size clamped; measured, and compared as "not read").
+- **shiftaudit** seeds an imported robot (the STL fixture, Save) and audits the robot page and the editor's four steps in both themes. It runs in an in-memory session, offscreen, waits for fonts and for the save's writes, and skips a sample when anything scrolled or a node left the DOM (each seen once on a fresh session). Narrow runs go from PowerShell: Git Bash rewrites `DSIM_PAGES=/configure/...` into a Windows path.
+
+**Open / for the owner:**
+- Merge `feat/robot-import` into alpha and redeploy dsim-alpha? (asked in the session).
+- Spin in the DECODE flight stage would let the kit fly its real 90° and the release point sit at its real place (13.0 in up, 3.2 in behind the front; the sim releases a standard fixed launcher at the turret point). BIOBUZZ topspin would dip its arc too.
+- BIOBUZZ flywheel presets still need a pad button. A fitted Chain STAND anchor may still turn a robot a quarter (legal, at the stand).
+- The importer assumes the CAD front view for the DECODE kit (it has no intake to detect from), which puts the launcher at the back; the editor says "Assumed" and Fix turns it.
+- Worktrees from the lanes (`agent-a1bf18765ae314259` polish2 etc.) are merged and can be removed.
+
+
 # HANDOFF — 2026-10-02e (robot import: real FTC CAD imports; polish lane interrupted)
 
 **State: `feat/robot-import` has swerve (alpha), integration fixes, fixed shooters/hoods and real-CAD import merged.** Shared suite 3702 pass (`--shards=4`); tsc and `server:check` clean on the merge. Not on `alpha`/`main`, feature not deployed (alpha server runs alpha `79a14c80`, swerve included).
