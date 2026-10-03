@@ -2053,10 +2053,21 @@ spans no edge (a Box Tube may sit on the corner beside it), carries POLLEN only,
   a setback off the release, until 2026-10-02); `release = axis − facing · setback` either way.
 - **Nothing is solved.** It releases from the head's own muzzle (`bbFixedLocal` reads
   `bbMuzzleLocal` at the hood angle) at the wheel's speed NOW, carrying `bbPointVel`. Stage 5b,
-  3D stage 11 and the shot path all ask `bbFixedShotEnters`; aim assist turns the chassis
-  (`bbFixedAimHeading`, `BB_FIXED_AIM_TOL` 0.04 — tighter than a dumper's, which re-solves) and
-  releases only a shot that lands. Out of band nothing is released; with aim assist off the shot
-  leaves and misses.
+  3D stage 11 and the shot path all ask `bbFixedShotEnters`; aim assist turns the chassis onto
+  `bbFixedAimHeading` with DECODE's controller (`fixedAimTurn`, no dead band — see
+  `docs/area/decode.md`, "Fixed shooters") and releases only a shot that lands. Out of band
+  nothing is released; with aim assist off the shot leaves and misses.
+- ⚠️ **THE AIM HEADING LEADS THE CHASSIS'S TRANSLATION, NOT ITS SPIN** (2026-10-02). It led
+  `bbPointVel` at the muzzle, so the aim moved 0.047 s per rad/s of the chassis's own spin, against
+  it: under the old 4.5 × 6.1 rad/s P loop a −1.29 feedback a tick, and a tank reverses its spin
+  inside a tick. The card in 2D shook ±1.27 rad/s at 30 Hz, the heading 0.05–0.09 rad either side
+  of the line, for as long as fire was held (3D overshot 0.10 and settled). Now every build settles
+  without crossing, and the release still carries the real spin. Feed: 18 ticks per 0.30 s
+  (`flyFeedDue`; it was 18 or 19, 3.2/s over ten shots, now 3.33). Smoke: `fixed aim:`.
+- **Dumpers keep their P-controller** (`BB_AIM_GAIN` 4.5, dead band `BB_AIM_TOL` 0.14), measured
+  2026-10-02 and left alone: no lead, so no shake, but they overshoot — 30° off, mecanum/swerve
+  cross by 0.03 (2D) to 0.14 (3D swerve); 69° off, 0.15–0.20 (2D) and 0.27–0.33 (3D) — then park
+  inside the dead band.
 - **One setpoint in this game**: both kit robots run one, and the pad has no free button (D-DOWN is
   unbound on purpose), so `coerceBiobuzzSpec` folds a presets wheel to its first speed.
 - **The band** (`bbFixedBand`: the fire gate's own predicate at every inch on the mouth axis,

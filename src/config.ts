@@ -1942,6 +1942,13 @@ export const FLY_RAMP_INERTIA_SLOW = 0.5;
 export const FLY_SHOT_DROP = 0.1;
 /** at `flywheelInertia` 1 the per-shot drop is cut by this much (a heavier wheel stores more). */
 export const FLY_SHOT_DROP_INERTIA_CUT = 0.75;
+/**
+ * slack (s) on a fixed shooter's feed clock (`flyFeedDue`): `world.time` is a running sum of 1/60,
+ * so twelve ticks after a feed it can sit a few ulps short of `fireReadyAt = t + 0.2`, and the
+ * next feed slipped a whole tick — measured, most 0.20-s feeds took 13 ticks (4.68/s, not 5) and
+ * 0.30-s ones 18 or 19. A microsecond is far under a tick and far over the rounding.
+ */
+export const FLY_FEED_TIME_EPS = 1e-6;
 /** setpoint, wheel and feeder bounds the coercer clamps to. 6000 rpm is a 1:1 FTC motor's free
  * speed; 48–140 mm spans the kit wheels; three presets is what a bumper-and-trigger driver uses. */
 export const FLY_RPM_MIN = 500;
@@ -1979,12 +1986,31 @@ export const DECODE_HOOD_FALLBACK_DEG = 45;
  * arc that lands where the real one does instead of the guide's angle.
  */
 export const DECODE_KIT_HOOD_DEG = 70;
-/** a FIXED launcher with aim assist releases a held fire only once the chassis is within this of
- * the aim heading (rad, ~3.4°: the 11-in opening seen from ~6 ft). */
-export const DECODE_FIXED_AIM_TOL = 0.06;
-/** the chassis-turn P gain aim assist uses on a fixed launcher (rotate command per rad of error),
- * BIOBUZZ's `BB_AIM_GAIN`. */
-export const DECODE_FIXED_AIM_GAIN = 4.5;
+/**
+ * a FIXED launcher with aim assist releases a held fire once the shot along the chassis would land
+ * within this fraction of `GOAL_OPENING_RADIUS` of the goal centre sideways: the release tolerance
+ * is that offset's ANGLE at the muzzle's distance (`decodeFixedAimTol`): 0.11 rad at 50 in, 0.055
+ * at 100. It replaced a flat 0.06 rad, the opening's half-width seen from about 8 ft, so twice as
+ * tight as the goal at the kit's own 40–60 in band.
+ */
+export const DECODE_FIXED_AIM_OPENING_FRAC = 0.5;
+/** ...and never wider than this (rad), however close: the arc is not a straight line at point blank */
+export const DECODE_FIXED_AIM_TOL_MAX = 0.25;
+
+/**
+ * THE CHASSIS-AIM CONTROLLER (`src/sim/aimTurn.ts`) a FIXED launcher's aim assist turns with, in
+ * both games. The commanded spin is the least of the chassis's top turn rate, the rate it can still
+ * stop from inside the remaining error (`√(2·a·|err|)`, `a` this fraction of its braking authority
+ * `MOTOR_BRAKE_MULT · turnAccel`), and `FIXED_AIM_SETTLE_RATE · |err|`.
+ */
+export const FIXED_AIM_DECEL_FRAC = 0.5;
+/**
+ * the last stage's rate (1/s): within ~0.25 rad the heading error closes as e^(−15 t), a quarter of
+ * it per 60-Hz tick, so it settles without crossing zero. Matched to the deceleration term above —
+ * at the hand-over `2a/K²` both ask the motors for exactly their braking authority — so the slowest
+ * chassis can follow it too.
+ */
+export const FIXED_AIM_SETTLE_RATE = 15;
 
 // ----------------------------------------------------------------- goal ----
 /** GOAL footprint: a right triangle tucked into the far corner with its legs
