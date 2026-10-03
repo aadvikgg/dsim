@@ -1,3 +1,13 @@
+# HANDOFF — 2026-10-03f (imported-robot mesh quality, done)
+
+**State: on `alpha`; client only (the one server-side file touched, `visualCheck.ts`, changed a comment), no deploy needed. Not on `main`.** `npm test`, `build`, `server:check`, `uiaudit`, `docaudit`, `bundleaudit` pass. Checked in the dev preview: import, Detail re-read, test drive in BIOBUZZ 3D Ultra with the compressed mesh, no console errors.
+
+- **Compressed stored mesh** (lane `mesh-meshopt`, merged): quantised + meshopt GLB (`engine/storedGlb.ts`, encoder a lazy chunk), 250k triangles by default (REV 2.08 MiB, goBILDA 2.41 MiB, were ~70k at 3.6 MiB); `liteMesh` always writes a float GLB in the import worker, so rooms and older clients see nothing new.
+- **STEP colours** (lane `step-colours`, merged): occt drops the name and colour of any multi-body part placed in an assembly; a reader-side hint puts them back. Grey area REV 10.6 % → 0, goBILDA 31.2 % → 0.
+- **One simplifier call per body** (63fb7051): touching bodies in one call locked each other and blocked `Prune`; goBILDA p90 30.8 → 0.45 mm, one-colour 44 → 0.45 mm, twice as fast. Small bodies dropped first at a 0.2 % shape cap.
+- **Detail choice** in the Model step: Standard 250k / Maximum 400k, re-reads the in-memory files.
+- **Open:** goBILDA mecanum rollers still faceted at 250k (Maximum helps); relayed mesh still ~20k triangles (raising it needs validator extension checks + a caps gate); BIOBUZZ first measurement has a ~400 ms main-thread task (the roller search, a candidate for the measure worker). Lane worktrees `agent-a5cdb155a82e7e8e9`, `agent-a643fe409398b690b` and their branches can be removed.
+
 # HANDOFF — 2026-10-03e (imported-robot mesh quality, part 1)
 
 **State: on `alpha` (ede417c4), client only (no server change, no deploy needed). Not on `main`.** `npm test`, `build`, `bundleaudit`, `docaudit` pass.
