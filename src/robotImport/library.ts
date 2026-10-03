@@ -11,7 +11,7 @@
  * plain sentence the UI can show. The database name is registered in `src/storageKeys.ts`.
  */
 import { ROBOT_LIBRARY_DB } from '../storageKeys';
-import type { GameId } from '../types';
+import type { GameId, ImportedRobot } from '../types';
 import type { LibraryEntry, LibraryRobot } from './types';
 import { libraryEntryFor } from './libraryIds';
 
@@ -125,7 +125,68 @@ function request<T>(r: IDBRequest<T>): Promise<T> {
   });
 }
 
-async function withDb<T>(fn: (db: IDBDatabase) => Promise<LibraryResult<T>>): Promise<LibraryResult<T>> {
+/**
+ * ⚠️ LOOKING MUST NOT CREATE THE DATABASE. `indexedDB.open` creates a database that is not there,
+ * and the renderers ask the library for a picture the first time ANY imported robot is drawn: a
+ * viewer in a custom room who never imported anything got an empty `decodesim.robots` (four
+ * stores) for looking at somebody else's robot, and so did every visit to Configure ▸ Robot. So a
+ * READ asks whether the database exists first and answers "nothing here" when it does not; only a
+ * write (a save, a draft) creates it.
+ *
+ * `indexedDB.databases()` answers where it exists (Chromium, Safari 14+, Firefox 126+). Elsewhere
+ * the database is opened WITHOUT a version: a missing one comes back as an upgrade from version 0,
+ * and aborting that upgrade leaves it missing. Either way the answer `'no'` is not cached (another
+ * tab may create it), and `'yes'` becomes the open connection.
+ */
+async function dbExists(): Promise<'yes' | 'no' | 'unavailable'> {
+  if (!libraryAvailable()) return 'unavailable';
+  const idb = indexedDB as IDBFactory & { databases?: () => Promise<{ name?: string }[]> };
+  if (typeof idb.databases === 'function') {
+    try {
+      return (await idb.databases()).some((d) => d.name === ROBOT_LIBRARY_DB) ? 'yes' : 'no';
+    } catch {
+      /* a browser that has the method and refuses it: ask the other way */
+    }
+  }
+  return new Promise((resolve) => {
+    let req: IDBOpenDBRequest;
+    try {
+      req = idb.open(ROBOT_LIBRARY_DB);
+    } catch {
+      return resolve('unavailable');
+    }
+    let answered = false;
+    const answer = (a: 'yes' | 'no' | 'unavailable'): void => {
+      if (!answered) resolve(a);
+      answered = true;
+    };
+    req.onupgradeneeded = (e) => {
+      if ((e as IDBVersionChangeEvent).oldVersion !== 0) return;
+      // it was not there: abort the version change, which takes the new database away again
+      answer('no');
+      try {
+        req.transaction?.abort();
+      } catch {
+        /* already finishing */
+      }
+    };
+    req.onsuccess = () => {
+      req.result.close();
+      answer('yes');
+    };
+    // the abort above lands here as an AbortError, after the answer
+    req.onerror = () => answer('unavailable');
+    req.onblocked = () => answer('yes');
+  });
+}
+
+async function withDb<T>(fn: (db: IDBDatabase) => Promise<LibraryResult<T>>, absent?: () => LibraryResult<T>): Promise<LibraryResult<T>> {
+  // a READ (`absent` given) of a database this device never made is answered without making it
+  if (absent && !dbPromise) {
+    const there = await dbExists();
+    if (there === 'no') return absent();
+    if (there === 'unavailable') return err('unavailable');
+  }
   const db = await openDb();
   if (!db) return err('unavailable');
   try {
@@ -133,6 +194,12 @@ async function withDb<T>(fn: (db: IDBDatabase) => Promise<LibraryResult<T>>): Pr
   } catch (e) {
     return err(classify(e));
   }
+}
+
+/** for a READ: open the database only if it exists (see `dbExists`); null when it does not */
+async function dbIfThere(): Promise<IDBDatabase | null> {
+  if (!dbPromise && (await dbExists()) !== 'yes') return null;
+  return openDb();
 }
 
 const entryOf = (r: LibraryRobot | LibraryEntry): LibraryEntry => ({
@@ -154,7 +221,7 @@ export function listRobots(game?: GameId): Promise<LibraryResult<LibraryEntry[]>
     const rows = (await request(game ? store.index('game').getAll(game) : store.getAll())) as LibraryEntry[];
     rows.sort((a, b) => b.updated - a.updated || (a.id < b.id ? -1 : 1));
     return ok(rows.map(entryOf));
-  });
+  }, () => ok([]));
 }
 
 /** one robot with its blobs */
@@ -167,7 +234,7 @@ export function getRobot(id: string): Promise<LibraryResult<LibraryRobot>> {
     const [mesh, top, thumb, meshLite] = (await Promise.all([...KINDS, LITE].map((k) => request(files.get(fileKey(id, k)))))) as (Blob | undefined)[];
     if (!mesh || !top || !thumb) return err('not-found');
     return ok({ ...entryOf(entry), mesh, top, thumb, ...(meshLite ? { meshLite } : {}) });
-  });
+  }, () => err('not-found'));
 }
 
 /** add or replace a robot (and its three blobs) in one transaction */
@@ -202,7 +269,7 @@ export function renameRobot(id: string, name: string): Promise<LibraryResult<Lib
     store.put(next);
     const e = await done(tx);
     return e ? err(e) : ok(next);
-  });
+  }, () => err('not-found'));
 }
 
 /** a copy under a new id, named "<name> copy" */
@@ -235,7 +302,7 @@ export function deleteRobot(id: string): Promise<LibraryResult<void>> {
     if (e) return err(e);
     topCache.clear();
     return ok(undefined);
-  });
+  }, () => ok(undefined));
 }
 
 /**
@@ -253,7 +320,7 @@ async function answeringId(db: IDBDatabase, id: string): Promise<string> {
 }
 
 async function fileFor(id: string, kind: FileKind | typeof LITE): Promise<Blob | null> {
-  const db = await openDb();
+  const db = await dbIfThere(); // a look, so it never creates the database (see `dbExists`)
   if (!db) return null;
   try {
     const rid = await answeringId(db, id);
@@ -288,6 +355,25 @@ export function topFor(id: string): Promise<Blob | null> {
 /** the card thumbnail */
 export function thumbFor(id: string): Promise<Blob | null> {
   return fileFor(id, 'thumb');
+}
+
+/**
+ * The descriptor (`spec.imported`) of the record that answers for `id` here, or null. The account
+ * syncs the active robot's SPEC, so after an edit on another device this device's record (its mesh
+ * and pictures) can be an OLDER version of the robot under the same id. A reader compares this with
+ * the robot it is about to draw or send (`sameImportedRobot`) and uses the files only on a match:
+ * the old model on the new hull is wrong in a way the footprint is not.
+ */
+export async function descriptorFor(id: string): Promise<ImportedRobot | null> {
+  const db = await dbIfThere();
+  if (!db) return null;
+  try {
+    const rid = await answeringId(db, id);
+    const entry = (await request(db.transaction(ROBOTS, 'readonly').objectStore(ROBOTS).get(rid))) as LibraryEntry | undefined;
+    return entry?.spec.imported ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ---- drafts: an import the editor has not saved yet (lane 4) ---------------------------------
@@ -328,7 +414,7 @@ export function getDraft(key: string): Promise<LibraryResult<{ state: DraftRecor
     if (!state) return ok(null);
     const model = await request(tx.objectStore(DRAFT_MODELS).get(key));
     return ok(model === undefined ? null : { state, model });
-  });
+  }, () => ok(null));
 }
 
 /** the drafts for one game, without their models; prunes the stale ones */
@@ -347,7 +433,7 @@ export function listDrafts(game: GameId): Promise<LibraryResult<DraftRecord[]>> 
     }
     const e = await done(tx);
     return e ? err(e) : ok(keep);
-  });
+  }, () => ok([]));
 }
 
 /** remove a draft and its model */
@@ -358,7 +444,7 @@ export function deleteDraft(key: string): Promise<LibraryResult<void>> {
     tx.objectStore(DRAFT_MODELS).delete(key);
     const e = await done(tx);
     return e ? err(e) : ok(undefined);
-  });
+  }, () => ok(undefined));
 }
 
 /** the lighter mesh for a room's relay (`liteMesh`), when one has been made for this robot */
@@ -376,5 +462,5 @@ export function putMeshLite(id: string, blob: Blob): Promise<LibraryResult<void>
     tx.objectStore(FILES).put(blob, fileKey(rid, LITE));
     const e = await done(tx);
     return e ? err(e) : ok(undefined);
-  });
+  }, () => err('not-found'));
 }

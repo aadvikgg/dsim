@@ -406,6 +406,7 @@ import { probeBoxFor, probeGains } from '../../src/games/biobuzz/scene/renderSur
 import { buildBiobuzzRobots, updateBiobuzzRobots } from '../../src/games/biobuzz/scene/renderRobots';
 import {
   IMPORTED_MESH_TEMPLATE_CAP,
+  cloneImportedMesh,
   importedMeshKey,
   importedMeshesSettled,
   importedMeshSlots,
@@ -2027,6 +2028,19 @@ function importedRobotChecks(check: Check): void {
     check(`imported 3D: at most ${IMPORTED_MESH_TEMPLATE_CAP} unworn templates stay resident, and the evicted ones are freed`,
       importedMeshSlots().length <= IMPORTED_MESH_TEMPLATE_CAP + 1 && freed[0] && !freed[freed.length - 1],
       `${importedMeshSlots().length} slots, freed ${freed.map((f) => (f ? 1 : 0)).join('')}`);
+    // A SLOT IS ONE DESCRIPTOR. The robot edited on another device arrives as the SAME id with another
+    // hull; this device's library still holds the old model, and a slot keyed by id alone wore it on
+    // the new hull. Its own slot loads through `importedMeshBlob(id, imp)` (which refuses a stale copy).
+    {
+      const oldSpec = mk('d1d1d1d1d1d1d1d1');
+      installImportedMeshForTests(oldSpec, new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial()));
+      const newSpec = { ...oldSpec, imported: { ...oldSpec.imported!, heightIn: oldSpec.imported!.heightIn - 1 } };
+      const kOld = importedMeshKey(oldSpec);
+      const kNew = importedMeshKey(newSpec);
+      check('imported 3D: a mesh slot answers for one DESCRIPTOR: the same id with another hull does not wear the mesh parsed for the old one',
+        kOld.endsWith(':mesh') && kNew.endsWith(':hull') && kOld.split('#')[0] === kNew.split('#')[0] && cloneImportedMesh(newSpec) === null,
+        `${kOld} / ${kNew}`);
+    }
 
     // ── THE MECHANISMS SIT WHERE THE SIM PUTS THEM (lane 2's accessors) ─────────────────────
     // a PLACED import: an off-centre mouth, two placed heads at their own heights, a placed base

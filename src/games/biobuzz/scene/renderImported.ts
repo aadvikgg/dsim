@@ -49,6 +49,8 @@ export const IMPORTED_MESH_TEMPLATE_CAP = 6;
 
 interface MeshSlot {
   id: string;
+  /** the robot this slot's mesh is for: a slot answers for one DESCRIPTOR, not just an id */
+  imp: ImportedRobot;
   state: 'loading' | 'ready' | 'none';
   root: THREE.Group | null;
   /** robot groups currently wearing a clone of `root` */
@@ -59,15 +61,39 @@ interface MeshSlot {
   settled: Promise<void>;
 }
 
-/** keyed `${id}@${importedMeshVersion(id)}` */
+/** keyed `${id}@${importedMeshVersion(id)}#${digest of the descriptor}` (`slotKey`) */
 const slots = new Map<string, MeshSlot>();
 let stamp = 0;
 /** every geometry, material and texture a TEMPLATE owns: a robot group must never free them */
 const SHARED = new WeakSet<object>();
 const listeners = new Set<(id: string) => void>();
 
-function slotKey(id: string): string {
-  return `${id}@${importedMeshVersion(id)}`;
+/**
+ * ⚠️ A SLOT IS ONE DESCRIPTOR, NOT ONE ID. After the robot is edited on another device the synced
+ * spec keeps its id while its hull moves, and this device's library may still hold the OLD model
+ * (`render/importedAssets.ts`, "AN OUT-OF-DATE COPY IS NOT DRAWN"). Keyed by id alone, the slot
+ * parsed for the old descriptor answered for the new one and the old model was drawn on the new
+ * hull; keyed by the descriptor too, the new one loads through `importedMeshBlob(id, imp)`, which
+ * refuses the stale copy, and the robot is its placeholder until the model is re-imported.
+ */
+const digests = new WeakMap<ImportedRobot, string>();
+function digestOf(imp: ImportedRobot): string {
+  let d = digests.get(imp);
+  if (d === undefined) {
+    const s = JSON.stringify({ ...imp, id: '' });
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    d = (h >>> 0).toString(16);
+    digests.set(imp, d);
+  }
+  return d;
+}
+
+function slotKey(imp: ImportedRobot): string {
+  return `${imp.id}@${importedMeshVersion(imp.id)}#${digestOf(imp)}`;
 }
 
 function notify(id: string): void {
@@ -91,7 +117,7 @@ export function onImportedMeshChange(cb: (id: string) => void): () => void {
 // a re-registered draft, a relayed mesh or a new source moves the mesh version, which names a NEW
 // slot; the stale one is dropped as soon as nothing wears it, and listeners re-key
 subscribeImportedAssets((id) => {
-  for (const [k, s] of slots) if ((id === ANY_ID || s.id === id) && k !== slotKey(s.id)) dropIfUnused(k, s);
+  for (const [k, s] of slots) if ((id === ANY_ID || s.id === id) && k !== slotKey(s.imp)) dropIfUnused(k, s);
   notify(id);
 });
 
@@ -164,9 +190,11 @@ export function prepareImportedMesh(scene: THREE.Object3D): THREE.Group {
   return root;
 }
 
-async function load(id: string, k: string, s: MeshSlot): Promise<void> {
+async function load(imp: ImportedRobot, k: string, s: MeshSlot): Promise<void> {
+  const id = imp.id;
   try {
-    const blob = await importedMeshBlob(id);
+    // with the descriptor: a library copy made for another version of this robot answers null
+    const blob = await importedMeshBlob(id, imp);
     if (!blob) {
       s.state = 'none';
     } else {
@@ -188,12 +216,12 @@ async function load(id: string, k: string, s: MeshSlot): Promise<void> {
 }
 
 function ensureSlot(imp: ImportedRobot): MeshSlot {
-  const k = slotKey(imp.id);
+  const k = slotKey(imp);
   let s = slots.get(k);
   if (!s) {
-    s = { id: imp.id, state: 'loading', root: null, users: 0, used: 0, settled: Promise.resolve() };
+    s = { id: imp.id, imp, state: 'loading', root: null, users: 0, used: 0, settled: Promise.resolve() };
     slots.set(k, s);
-    s.settled = load(imp.id, k, s);
+    s.settled = load(imp, k, s);
     evict();
   }
   s.used = ++stamp;
@@ -220,7 +248,7 @@ export function importedMeshKey(spec: RobotSpec): string {
   const imp = spec.imported;
   if (!imp) return '';
   const s = ensureSlot(imp);
-  return `${slotKey(imp.id)}:${s.state === 'ready' ? 'mesh' : 'hull'}`;
+  return `${slotKey(imp)}:${s.state === 'ready' ? 'mesh' : 'hull'}`;
 }
 
 /**
@@ -234,7 +262,7 @@ export function cloneImportedMesh(spec: RobotSpec): THREE.Group | null {
   const s = ensureSlot(imp);
   if (s.state !== 'ready' || !s.root) return null;
   const g = s.root.clone(true);
-  g.userData.importSlot = slotKey(imp.id);
+  g.userData.importSlot = slotKey(imp);
   s.users++;
   return g;
 }
@@ -248,7 +276,7 @@ export function releaseImportedMesh(group: THREE.Object3D): void {
     const s = slots.get(k);
     if (s && s.users > 0) s.users--;
   });
-  for (const [k, s] of slots) if (k !== slotKey(s.id)) dropIfUnused(k, s);
+  for (const [k, s] of slots) if (k !== slotKey(s.imp)) dropIfUnused(k, s);
   evict();
 }
 
@@ -266,10 +294,10 @@ export function importedMeshSlots(): [string, string, number][] {
 export function installImportedMeshForTests(spec: RobotSpec, scene: THREE.Object3D): void {
   const imp = spec.imported;
   if (!imp) return;
-  const k = slotKey(imp.id);
+  const k = slotKey(imp);
   const old = slots.get(k);
   if (old?.root) disposeTemplate(old.root);
-  slots.set(k, { id: imp.id, state: 'ready', root: prepareImportedMesh(scene), users: old?.users ?? 0, used: ++stamp, settled: Promise.resolve() });
+  slots.set(k, { id: imp.id, imp, state: 'ready', root: prepareImportedMesh(scene), users: old?.users ?? 0, used: ++stamp, settled: Promise.resolve() });
   notify(imp.id);
 }
 

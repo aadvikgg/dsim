@@ -557,7 +557,7 @@ import type { SolidShape } from '../src/sim/artifactSolids';
 import { heldSlotPos } from '../src/sim/physics';
 import { turretWorldPos } from '../src/sim/robot';
 import { decodeImportLaunchZ, decodeImportMouth, DECODE_IMPORT_LAUNCH_MIN } from '../src/sim/importedMech';
-import { libraryEntryFor, planShareAdd, sameImportedRobot } from '../src/robotImport/libraryIds';
+import { editSaveId, libraryEntryFor, planShareAdd, sameImportedRobot } from '../src/robotImport/libraryIds';
 import { DECODE_TUTORIAL } from '../src/games/decode/tutorial';
 import { defaultImportedMech, mechHandles, validateImportedMech } from '../src/games/importMechChecks';
 import { BB_DEFAULT_SPEC } from '../src/games/biobuzz/coerce';
@@ -30887,6 +30887,169 @@ function impPlayCheck(g: GameId): void {
 }
 
 /**
+ * ---- AN OUT-OF-DATE LIBRARY COPY IS NOT DRAWN (`importedAssets` "AN OUT-OF-DATE COPY IS NOT DRAWN") ----
+ * The account syncs the active robot's spec, never its model: after an edit on device A, device B's
+ * library still holds the old model under the same id, and drew it on the new hull. A source says
+ * what it holds (`describe`), and a reader that passes the robot it draws gets null for another
+ * version of it: the footprint, as for a robot this device does not have.
+ */
+{
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 6; i++) await new Promise<void>((r) => setTimeout(r, 0));
+  };
+  const g = globalThis as unknown as { Image?: unknown };
+  const hadImage = 'Image' in g;
+  const prevImage = g.Image;
+  const realCreate = URL.createObjectURL;
+  const realRevoke = URL.revokeObjectURL;
+  let n = 0;
+  URL.createObjectURL = (): string => `blob:stale/${++n}`;
+  URL.revokeObjectURL = (): void => undefined;
+  class StubImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    decoding = '';
+    set src(_v: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  g.Image = StubImage;
+  try {
+    resetImportedAssetsForTests();
+    const OLD: ImportedRobot = { v: 1, id: '5a5a5a5a5a5a5a5a', hull: [{ x: -8, y: -8 }, { x: 9, y: -8 }, { x: 9, y: 8 }, { x: -8, y: 8 }], heightIn: 14 };
+    const NEW: ImportedRobot = { ...OLD, hull: [{ x: -8, y: -8 }, { x: 11, y: -8 }, { x: 11, y: 8 }, { x: -8, y: 8 }] };
+    let held: ImportedRobot = OLD; // what this device's library record says
+    setImportedAssetSource({
+      top: async () => new Blob(['top'], { type: 'image/png' }),
+      mesh: async () => new Blob(['mesh'], { type: 'model/gltf-binary' }),
+      describe: async () => held,
+    });
+    importedTopImage(OLD.id, NEW);
+    await flush();
+    check('stale copy: a library picture made for an OLDER version of the robot is not drawn for the new one (the footprint is)',
+      importedTopImage(OLD.id, NEW) === null && importedTopUrl(OLD.id, NEW) === null);
+    check('stale copy: ...while it IS drawn for the version it was made for, and for a reader that passes no robot',
+      importedTopImage(OLD.id, OLD) !== null && importedTopImage(OLD.id, { ...OLD, id: 'ffffffffffffffff' }) !== null && importedTopImage(OLD.id) !== null);
+    check('stale copy: the mesh likewise: null for the new version, the blob for its own',
+      (await importedMeshBlob(OLD.id, NEW)) === null && (await importedMeshBlob(OLD.id, OLD)) !== null);
+    // the file is imported again: the record now holds the new version, and the library save invalidates
+    held = NEW;
+    invalidateImportedAssets(OLD.id);
+    importedTopImage(OLD.id, NEW);
+    await flush();
+    check('stale copy: once the newest file is imported (the record replaced, the cache invalidated) the new version is drawn',
+      importedTopImage(OLD.id, NEW) !== null && (await importedMeshBlob(OLD.id, NEW)) !== null);
+    // a LENT look (the editor's draft, a room's relay) is current by construction
+    held = OLD;
+    registerImportedAssets('6b6b6b6b6b6b6b6b', { top: new Blob(['draft']), mesh: new Blob(['draft-mesh']) });
+    importedTopImage('6b6b6b6b6b6b6b6b', NEW);
+    await flush();
+    check('stale copy: a lent picture or mesh is drawn for any version (never compared)',
+      importedTopImage('6b6b6b6b6b6b6b6b', NEW) !== null && (await importedMeshBlob('6b6b6b6b6b6b6b6b', NEW)) !== null);
+    // a source that does not describe (a test, an older seam) is drawn as before
+    setImportedAssetSource({ top: async () => new Blob(['top']), mesh: async () => null });
+    importedTopImage('7c7c7c7c7c7c7c7c', NEW);
+    await flush();
+    check('stale copy: a source that does not describe what it holds is drawn as before', importedTopImage('7c7c7c7c7c7c7c7c', NEW) !== null);
+    // every reader passes the robot it draws
+    const rd = (f: string): string => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+    check('stale copy: the 2D sprite, both SVG previews and the 3D mesh slot pass the robot they draw',
+      /importedTopImage\(imp\.id, imp\)/.test(rd('src/render/drawImported.ts')) &&
+        /useImportedTopUrl\(imp\?\.id, imp\)/.test(rd('src/games/biobuzz/RobotPreview.tsx')) &&
+        /useImportedTopUrl\(imp\?\.id, imp\)/.test(rd('src/games/chain/RobotPreview.tsx')) &&
+        /importedMeshBlob\(id, imp\)/.test(rd('src/games/biobuzz/scene/renderImported.ts')) &&
+        /function slotKey\(imp: ImportedRobot\)/.test(rd('src/games/biobuzz/scene/renderImported.ts')) &&
+        /describe: \(id\) => import\('\.\.\/robotImport\/library'\)\.then\(\(lib\) => lib\.descriptorFor\(id\)\)/.test(rd('src/render/importedAssets.ts')));
+    const menu = rd('src/ui/Menu.tsx');
+    const panel = rd('src/robotImport/ui/ImportedRobots.tsx');
+    check('stale copy: the robot page compares the record with the active robot, draws the footprint in the hero, says so in one line, and offers the file instead of Edit',
+      /const importedStale = !!importedEntry && !!spec\.imported && !sameImportedRobot\(importedEntry\.spec\.imported, spec\.imported\)/.test(menu) &&
+        /importedEntry && !importedStale \? library\.thumbs\[importedEntry\.id\]/.test(menu) &&
+        /stale=\{importedStale\}/.test(menu) &&
+        /entry && stale \? <p className="ds-hint warn">\{COPY\.staleText\}<\/p>/.test(panel) &&
+        /entry && stale \? \(\s*<button type="button" className="ds-btn small" onClick=\{onImportFile\}>/.test(panel));
+    check('stale copy: picking the card that answers for the active robot changes nothing (an old copy cannot be re-applied over the new spec)',
+      /onPick=\{\(e\) => \(answersFor\(e, importedId\) \? undefined : applySpec\(\{ \.\.\.e\.spec \}\)\)\}/.test(menu) &&
+        /libraryEntryFor\(importLibrary\.entries, mySpec\.imported\?\.id\)\?\.id === e\.id \? undefined : pickSpec/.test(rd('src/ui/Lobby.tsx')));
+  } finally {
+    resetImportedAssetsForTests();
+    URL.createObjectURL = realCreate;
+    URL.revokeObjectURL = realRevoke;
+    if (hadImage) g.Image = prevImage;
+    else delete g.Image;
+  }
+}
+
+/**
+ * ---- LOOKING DOES NOT CREATE THE LIBRARY (`src/robotImport/library.ts` `dbExists`) ----
+ * The renderers ask the library the first time any imported robot is drawn, and `indexedDB.open`
+ * creates a database that is not there: a viewer who never imported anything got an empty
+ * `decodesim.robots`. A stub IndexedDB counts opens and creations, both ways of asking.
+ */
+{
+  const g = globalThis as unknown as { indexedDB?: unknown };
+  const had = 'indexedDB' in g;
+  const prev = g.indexedDB;
+  const lib = await import('../src/robotImport/library');
+  try {
+    // (1) `databases()` says there is none: nothing is opened at all
+    let opens = 0;
+    g.indexedDB = {
+      databases: async () => [{ name: 'something-else' }],
+      open: () => {
+        opens++;
+        throw new Error('must not open');
+      },
+    };
+    const top = await lib.topFor('9a9a9a9a9a9a9a9a');
+    const mesh = await lib.meshFor('9a9a9a9a9a9a9a9a');
+    const desc = await lib.descriptorFor('9a9a9a9a9a9a9a9a');
+    const list = await lib.listRobots('decode');
+    const drafts = await lib.listDrafts('decode');
+    const got = await lib.getRobot('9a9a9a9a9a9a9a9a');
+    check('library: with no database on this device, every READ answers "nothing here" without opening one',
+      opens === 0 && top === null && mesh === null && desc === null && list.ok && list.value.length === 0 && drafts.ok && drafts.value.length === 0 && !got.ok && got.error === 'not-found',
+      `opens ${opens}`);
+    // (2) no `databases()`: an open WITHOUT a version whose upgrade from 0 is aborted
+    let created = 0;
+    let aborted = 0;
+    let versioned = 0;
+    g.indexedDB = {
+      open: (_name: string, version?: number) => {
+        if (version !== undefined) versioned++;
+        const req: Record<string, unknown> = { transaction: { abort: () => aborted++ } };
+        setTimeout(() => {
+          created++;
+          (req.onupgradeneeded as ((e: unknown) => void) | undefined)?.({ oldVersion: 0 });
+          setTimeout(() => (req.onerror as (() => void) | undefined)?.(), 0); // the abort's AbortError
+        }, 0);
+        return req;
+      },
+    };
+    const top2 = await lib.topFor('8b8b8b8b8b8b8b8b');
+    const list2 = await lib.listRobots('decode');
+    check('library: ...and where `databases()` is missing, the look opens without a version and ABORTS the creation (no versioned open)',
+      top2 === null && list2.ok && list2.value.length === 0 && versioned === 0 && aborted === created && created >= 2, `created ${created} aborted ${aborted} versioned ${versioned}`);
+    // (3) a WRITE is what creates it
+    let writeOpens = 0;
+    g.indexedDB = {
+      databases: async () => [],
+      open: (_name: string, version?: number) => {
+        if (version !== undefined) writeOpens++;
+        const req: Record<string, unknown> = {};
+        setTimeout(() => (req.onerror as (() => void) | undefined)?.(), 0);
+        return req;
+      },
+    };
+    await lib.putDraft({ key: 'decode:new', game: 'decode', updated: 0 });
+    check('library: a write (a draft, a save) is what opens and creates the database', writeOpens === 1, `opens ${writeOpens}`);
+  } finally {
+    if (had) g.indexedDB = prev;
+    else delete g.indexedDB;
+  }
+}
+
+/**
  * ---- IMPORTED ROBOTS, 2D: every game's sprite draws an import from its HULL ----
  *
  * Run against a recording context: the first clip after the robot's transform must be the hull
@@ -32643,6 +32806,34 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
       /const rid = await answeringId\(db, id\)/.test(rd('src/robotImport/library.ts')) &&
       /planShareAdd\(spec\.imported, settings\.spec\.imported/.test(rd('src/robotImport/ui/ImportEditor.tsx')));
   check('imports/library ids: a duplicate is a robot of its own and does not answer for the original’s share file', /const \{ sharedFrom: _from, \.\.\.rest \} = src/.test(rd('src/robotImport/library.ts')));
+
+  /**
+   * AN EDIT NEVER RE-KEYS THE ACTIVE ROBOT (`editSaveId`). Device B added A's file BEFORE rule 2,
+   * so its copy has an id of its own (`copy`, sharedFrom X). Rule 1 finds it for the synced X, so
+   * the robot page offers it for editing, and the editor saved under the COPY's id, which then
+   * became active and synced: A's robot was "not on this device" again.
+   */
+  check('imports/library ids: editing this device’s pre-rule copy of the active robot saves under the ACTIVE id',
+    editSaveId(copy.id, X.id, [copy]) === X.id);
+  check('imports/library ids: ...a record that HAS the active id keeps it, and a copy that answers for nothing active keeps its own',
+    editSaveId(X.id, X.id, [copy, own]) === X.id &&
+      editSaveId(copy.id, X.id, [copy, own]) === copy.id && // the record with X answers for X, not the copy
+      editSaveId(copy.id, null, [copy]) === copy.id &&
+      editSaveId(copy.id, 'cccccccccccccccc', [copy]) === copy.id);
+  {
+    // played out on B: the edit saves under X, the copy is retired, and the account's id never moves
+    let acct: ImportedRobot = X;
+    const devB2: Row[] = [copy];
+    const id = editSaveId(copy.id, acct.id, devB2);
+    const edited = { ...X, heightIn: 15, id };
+    devB2.splice(devB2.findIndex((e) => e.id === copy.id), 1, row(edited));
+    acct = edited; // the editor's save makes it the active robot, which syncs
+    check('imports/library ids: ...played out: the account keeps X, B’s library answers for it, the old copy is gone',
+      acct.id === X.id && libraryEntryFor(devB2, acct.id)?.id === X.id && devB2.length === 1 && libraryEntryFor(devA, acct.id) !== null);
+  }
+  check('imports/library ids: the editor saves through editSaveId and retires the old record',
+    /const id = cur\.doc\.editId && listed\?\.ok \? editSaveId\(cur\.doc\.editId, settings\.spec\.imported\?\.id, listed\.value\) : cur\.doc\.id;/.test(rd('src/robotImport/ui/ImportEditor.tsx')) &&
+      /if \(id !== cur\.doc\.id\) await deleteRobot\(cur\.doc\.id\);/.test(rd('src/robotImport/ui/ImportEditor.tsx')));
   check('imports/library ids: libraryIds.ts imports types only (the robot page and the lobby are in `main`)',
     rd('src/robotImport/libraryIds.ts').split('\n').filter((l) => /^import /.test(l)).every((l) => /^import type /.test(l)));
 }

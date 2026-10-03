@@ -601,7 +601,7 @@ export function ChainRobotPreview({
 /** the builder preview of an IMPORTED Chain Reaction robot — see `ui/FootprintSvg.tsx` */
 function ImportedChainPreview({ spec, size, caption }: { spec: RobotSpec; size: number; caption: boolean }) {
   const imp = spec.imported;
-  const image = useImportedTopUrl(imp?.id);
+  const image = useImportedTopUrl(imp?.id, imp);
   if (!imp) return null;
   const mode = spec.scoreMode ?? CHAIN_DEFAULT_SCORE_MODE;
   const turrets = mode === 'turret' || mode === 'twinturret' ? [{ ...turretLocal(spec), r: turretRadius(spec) }] : [];

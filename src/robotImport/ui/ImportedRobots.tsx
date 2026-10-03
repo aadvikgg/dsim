@@ -123,6 +123,7 @@ export function ImportedPanel({
   spec,
   entry,
   loaded,
+  stale = false,
   error,
   onEdit,
   onRename,
@@ -136,6 +137,10 @@ export function ImportedPanel({
   entry: LibraryEntry | null;
   /** the library has been read (so a null `entry` means "not here", not "not yet") */
   loaded: boolean;
+  /** `entry` is an OLDER version of this robot (edited on another device since this device's copy
+   *  was made): its model is not drawn, Edit would save the old version over the new one, and the
+   *  way back is the newest exported file (`sameImportedRobot`, `docs/area/robot-import.md`) */
+  stale?: boolean;
   error: string | null;
   onEdit: () => void;
   onRename: () => void;
@@ -151,7 +156,13 @@ export function ImportedPanel({
     <section className="ds-panel">
       <div className="ds-panel-h">
         <h2 className="ds-panel-title">{COPY.panelTitle}</h2>
-        {entry ? (
+        {/* AN OUT-OF-DATE COPY IS NOT EDITED: saving it would put the old version back on the
+            account. The head's one action becomes the way to update it, in the same place. */}
+        {entry && stale ? (
+          <button type="button" className="ds-btn small" onClick={onImportFile}>
+            {COPY.missingAction}
+          </button>
+        ) : entry ? (
           <button type="button" className="ds-btn small" onClick={onEdit}>
             {COPY.panelEdit}
           </button>
@@ -168,6 +179,9 @@ export function ImportedPanel({
           </div>
         ) : (
           <>
+            {/* one line, and it arrives with the record itself (the same render that adds the File
+                row), so nothing below moves after the panel has settled */}
+            {entry && stale ? <p className="ds-hint warn">{COPY.staleText}</p> : null}
             <dl className="ds-facts">
               {entry ? (
                 <>

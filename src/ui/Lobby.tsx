@@ -1573,7 +1573,9 @@ export function Lobby({
                           </span>
                         ) : undefined
                       }
-                      onPick={() => pickSpec({ ...e.spec })}
+                      // the card that answers for the robot already picked is a no-op: re-applying
+                      // an out-of-date library copy would put its older spec back
+                      onPick={() => (libraryEntryFor(importLibrary.entries, mySpec.imported?.id)?.id === e.id ? undefined : pickSpec({ ...e.spec }))}
                     />
                   ))
                 : null}

@@ -1,5 +1,7 @@
 import { STORED_MESH_TO_ROBOT, TOP_IMAGE_PX } from '../robotImport/types';
 import { robotToTopPixel, topImageFrame, topPixelToRobot, type TopImageFrame } from '../robotImport/topFrame';
+import { sameImportedRobot } from '../robotImport/libraryIds';
+import type { ImportedRobot } from '../types';
 
 /**
  * IMPORTED ROBOT VISUALS — the one place a renderer asks for an imported robot's pictures
@@ -28,6 +30,15 @@ import { robotToTopPixel, topImageFrame, topPixelToRobot, type TopImageFrame } f
  *    left, +z up (`scene/renderRobots.ts` poses a group by `rotation.z = heading`), so the scene
  *    puts this matrix on the mesh's root node: x = gltf.z/0.0254, y = gltf.x/0.0254,
  *    z = gltf.y/0.0254 — a proper rotation times a scale, so winding and normals survive.
+ *
+ * ── AN OUT-OF-DATE COPY IS NOT DRAWN ───────────────────────────────────────────────────────────
+ * The account syncs the active robot's SPEC, never its model, so after the robot is edited on one
+ * device another device's library still holds the OLD model under the same id. Drawn, it is the old
+ * model on the new hull. So a source may `describe` what it holds (the library: the record's
+ * `spec.imported`), each asset remembers the descriptor it came with (`made`), and a reader that
+ * passes the robot it is drawing gets `null` when the two are not the same robot
+ * (`sameImportedRobot`) and draws the footprint, as for a robot this device does not have. A LENT
+ * blob (the editor's draft, a room's relay) is current by construction and is never compared.
  *
  * ── THE CACHE ───────────────────────────────────────────────────────────────────────────────
  * Small and capped (`IMPORTED_TOP_CAP` pictures, `IMPORTED_MESH_CAP` mesh lookups), least
@@ -69,6 +80,9 @@ export function topImageTransform(f: ImportedTopFrame): [number, number, number,
 export interface ImportedAssetSource {
   top(id: string): Promise<Blob | null>;
   mesh(id: string): Promise<Blob | null>;
+  /** the descriptor of the robot whose assets `id` answers with (null: none here). Absent: the
+   *  source is not asked, and its assets are drawn for any robot with that id. */
+  describe?(id: string): Promise<ImportedRobot | null>;
 }
 
 /**
@@ -82,6 +96,7 @@ export interface ImportedAssetSource {
 export const LIBRARY_ASSET_SOURCE: ImportedAssetSource = {
   top: (id) => import('../robotImport/library').then((lib) => lib.topFor(id)),
   mesh: (id) => import('../robotImport/library').then((lib) => lib.meshFor(id)),
+  describe: (id) => import('../robotImport/library').then((lib) => lib.descriptorFor(id)),
 };
 
 let source: ImportedAssetSource | null = LIBRARY_ASSET_SOURCE;
@@ -215,6 +230,9 @@ interface TopEntry {
   state: 'loading' | 'ready' | 'missing';
   img: HTMLImageElement | null;
   url: string | null;
+  /** the descriptor the picture was made for (the source's `describe`); undefined: not known, or
+   *  lent, and drawn for any robot with this id */
+  made?: ImportedRobot | null;
   /** resolves when this load is over: decoded, missing, or the entry was dropped meanwhile */
   settled: Promise<void>;
 }
@@ -266,14 +284,32 @@ function topBlob(id: string): Promise<Blob | null> {
   }
 }
 
+/** what the source says it holds for `id` (undefined: it does not say, so nothing is compared) */
+function describeOf(id: string): Promise<ImportedRobot | null | undefined> {
+  const s = source;
+  if (!s?.describe) return Promise.resolve(undefined);
+  try {
+    return s.describe(id).catch(() => null);
+  } catch {
+    return Promise.resolve(null);
+  }
+}
+
+/** may an asset made for `made` be drawn for `imp`? (see "AN OUT-OF-DATE COPY IS NOT DRAWN") */
+function current(made: ImportedRobot | null | undefined, imp: ImportedRobot | null | undefined): boolean {
+  return made === undefined || !imp || sameImportedRobot(made, imp);
+}
+
 function startTop(id: string): TopEntry {
   let done!: () => void;
   const entry: TopEntry = { state: 'loading', img: null, url: null, settled: new Promise<void>((r) => (done = r)) };
   tops.set(id, entry);
   evictTops();
-  void topBlob(id).then((blob) => {
+  const lent = !!registered.get(id)?.top;
+  void Promise.all([topBlob(id), lent ? undefined : describeOf(id)]).then(([blob, made]) => {
     // a load that finishes for an entry that was evicted or replaced meanwhile is discarded
     if (tops.get(id) !== entry) return done();
+    if (made !== undefined) entry.made = made;
     if (!blob) {
       entry.state = 'missing';
       return done();
@@ -332,49 +368,58 @@ function topEntry(id: string): TopEntry | null {
  * starts the load, and `subscribeImportedAssets` fires when it lands. Draw it through
  * `importedTopFrame` / `topImageTransform`.
  */
-export function importedTopImage(id: string): HTMLImageElement | null {
+export function importedTopImage(id: string, imp?: ImportedRobot | null): HTMLImageElement | null {
   const e = topEntry(id);
-  return e && e.state === 'ready' ? e.img : null;
+  return e && e.state === 'ready' && current(e.made, imp) ? e.img : null;
 }
 
 /** the same picture as an object URL for an SVG `<image href>` — valid while it stays cached */
-export function importedTopUrl(id: string): string | null {
+export function importedTopUrl(id: string, imp?: ImportedRobot | null): string | null {
   const e = topEntry(id);
-  return e && e.state === 'ready' ? e.url : null;
+  return e && e.state === 'ready' && current(e.made, imp) ? e.url : null;
 }
 
 // ─────────────────────────────────────────────────────────────────── meshes ──
 
-/** LRU of mesh lookups (the blob itself, never a decode — the 3D scene keeps its own template) */
-const meshes = new Map<string, Promise<Blob | null>>();
+/** LRU of mesh lookups (the blob itself, never a decode — the 3D scene keeps its own template),
+ *  each with the descriptor it was made for (`made`, as `TopEntry.made`); `plain` is the blob alone,
+ *  one promise per lookup, for a reader that does not pass a descriptor */
+interface MeshHit {
+  blob: Blob | null;
+  made?: ImportedRobot | null;
+}
+const meshes = new Map<string, { raw: Promise<MeshHit>; plain: Promise<Blob | null> }>();
 
 /**
  * The stored GLB for `id` (frame: `IMPORTED_MESH_TO_ROBOT`), or `null` when this device does not
  * have it. A registered in-memory blob wins over the source. Cached (`IMPORTED_MESH_CAP`); a miss
  * is NOT cached, so a mesh that arrives later is found by the next ask.
  */
-export function importedMeshBlob(id: string): Promise<Blob | null> {
+export function importedMeshBlob(id: string, imp?: ImportedRobot | null): Promise<Blob | null> {
   const lent = registered.get(id)?.mesh;
   if (lent) return Promise.resolve(lent);
+  const pick = (h: MeshHit): Blob | null => (current(h.made, imp) ? h.blob : null);
   const hit = meshes.get(id);
   if (hit) {
     meshes.delete(id);
     meshes.set(id, hit);
-    return hit;
+    return imp ? hit.raw.then(pick) : hit.plain;
   }
   if (!source || !id) return Promise.resolve(null);
-  let p: Promise<Blob | null>;
+  let blob: Promise<Blob | null>;
   try {
-    p = source.mesh(id).catch(() => null);
+    blob = source.mesh(id).catch(() => null);
   } catch {
-    p = Promise.resolve(null);
+    blob = Promise.resolve(null);
   }
-  meshes.set(id, p);
+  const raw = Promise.all([blob, describeOf(id)]).then(([b, made]): MeshHit => (made === undefined ? { blob: b } : { blob: b, made }));
+  const entry = { raw, plain: raw.then((h) => h.blob) };
+  meshes.set(id, entry);
   while (meshes.size > IMPORTED_MESH_CAP) meshes.delete(meshes.keys().next().value as string);
-  void p.then((b) => {
-    if (!b && meshes.get(id) === p) meshes.delete(id);
+  void raw.then((h) => {
+    if (!h.blob && meshes.get(id) === entry) meshes.delete(id);
   });
-  return p;
+  return imp ? raw.then(pick) : entry.plain;
 }
 
 /** TEST ONLY: empty every cache, the registry and the versions (revoking URLs); the source goes

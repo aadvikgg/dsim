@@ -9,7 +9,7 @@ import type { ImportProgress, NormalisedModel, PreparedModel } from '../engine/i
 import type { LoadStage } from '../engine/load';
 import { defaultImportSetup, orientKey, transformParts } from '../geometry';
 import { deleteRobot, getRobot, listRobots, newRobotId, putRobot } from '../library';
-import { planShareAdd } from '../libraryIds';
+import { editSaveId, planShareAdd } from '../libraryIds';
 import { readShareFile, type SharePayload } from '../shareFile';
 import { STORED_MESH_TO_ROBOT, type ImportSetup, type LibraryRobot } from '../types';
 import { defaultMechFor, mechHandlesFor, mechRobotToModel, validateMechFor } from './placement';
@@ -525,13 +525,18 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
 
   const save = (): void =>
     void run(async () => {
-      const spec = finalSpec();
+      const built = finalSpec();
       const b = await ensureBaked();
       const cur = draftRef.current;
-      if (!spec || !b || !cur?.doc.source) return;
+      if (!built || !b || !cur?.doc.source) return;
+      // ⚠️ AN EDIT NEVER RE-KEYS THE ACTIVE ROBOT: this device's pre-rule copy of it (saved under an
+      // id of its own) saves under the ACTIVE id, and the old record goes (`editSaveId`)
+      const listed = cur.doc.editId ? await listRobots(game) : null;
+      const id = cur.doc.editId && listed?.ok ? editSaveId(cur.doc.editId, settings.spec.imported?.id, listed.value) : cur.doc.id;
+      const spec: RobotSpec = id === cur.doc.id || !built.imported ? built : { ...built, imported: { ...built.imported, id } };
       const now = Date.now();
       const r = await putRobot({
-        id: cur.doc.id,
+        id,
         game,
         spec,
         mesh: b.mesh,
@@ -546,11 +551,13 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
         setActionError(r.message);
         return;
       }
+      if (id !== cur.doc.id) await deleteRobot(cur.doc.id);
       await dropDraft(key);
       if (cur.model) engRef.current?.releaseModel(cur.model);
       // the draft's lent pictures go, and the renderers read the library's copy from now on
       unregisterImportedAssets(cur.doc.id);
       invalidateImportedAssets(cur.doc.id);
+      if (id !== cur.doc.id) invalidateImportedAssets(id);
       libraryChanged();
       postRobotNotice(COPY.saved(spec.name));
       onSaved(spec);
