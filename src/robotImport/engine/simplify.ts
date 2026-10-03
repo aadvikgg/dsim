@@ -41,7 +41,12 @@ function extentOf(parts: readonly MeshPart[]): number {
  * keeps a shape); `simplify` runs first with a bounded error, and where it stalls short of the
  * target (thousands of disconnected fasteners do that) `simplifySloppy` finishes the job.
  */
-export async function simplifyParts(parts: readonly MeshPart[], budget: number, onProgress?: (frac: number) => void): Promise<SimplifyReport> {
+export async function simplifyParts(
+  parts: readonly MeshPart[],
+  budget: number,
+  onProgress?: (frac: number) => void,
+  opts: { consume?: boolean } = {},
+): Promise<SimplifyReport> {
   await MeshoptSimplifier.ready;
   const trisIn = triangleCount(parts);
   const eps = extentOf(parts) * 1e-6;
@@ -52,11 +57,17 @@ export async function simplifyParts(parts: readonly MeshPart[], budget: number, 
     doneTris += tris;
     onProgress?.(from + (span * doneTris) / Math.max(1, trisIn));
   };
-  const welded = parts.map((p) => {
-    const w = { part: p, ...weld(p, eps) };
+  // `consume`: the caller hands the parts over (`parts` is a mutable array only it held), and each
+  // one's arrays are let go as soon as its welded copy exists, instead of all of them living until
+  // the end beside their copies
+  const src = parts as (MeshPart | null)[];
+  const welded: { part: Pick<MeshPart, 'color' | 'name'>; positions: Float32Array; indices: Uint32Array }[] = [];
+  for (let i = 0; i < src.length; i++) {
+    const p = src[i]!;
+    welded.push({ part: { color: p.color, name: p.name }, ...weld(p, eps) });
     tick(triangleCount([p]), 0, 0.25);
-    return w;
-  });
+    if (opts.consume) src[i] = null;
+  }
   doneTris = 0;
   const weldedTris = welded.reduce((s, w) => s + w.indices.length / 3, 0);
   const out: MeshPart[] = [];

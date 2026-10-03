@@ -1,8 +1,8 @@
 /**
  * THE EDITOR'S IMPORT: dropped files → a prepared model, with the main thread left free. The heavy
- * work (parse, merge, weld, simplify, crease) runs in a fresh `importWorker.ts` per import; STEP is
- * read in its own worker first and 3MF on this thread (three's loader needs `DOMParser`), and their
- * parts then go to the import worker for the rest. Arrays travel TRANSFERRED both ways.
+ * work (parse, merge, weld, simplify, crease) runs in a fresh `importWorker.ts` per import, 3MF and a
+ * zip's model included; STEP is read in its own workers first, and its parts then go to the import
+ * worker for the rest. Arrays travel TRANSFERRED both ways.
  *
  * `signal` cancels: every worker this import started is terminated at once (an occt read or a
  * meshopt pass cannot be interrupted from inside), and the promise rejects with an `AbortError`.
@@ -14,7 +14,7 @@ import type { MeshPart } from '../geometry';
 import { bakeMeshHere } from './bakeMesh';
 import { ImportError, abortError } from './importError';
 import { partBuffers, type ImportProgress, type ImportRequest, type ImportResponse } from './importProtocol';
-import { checkFiles, loadModel, readRaw } from './load';
+import { loadModel, readStepFile, resolveFiles } from './load';
 import { WORKER_FORMATS } from './parse';
 import { simplifyModel, type PreparedModel } from './prepare';
 
@@ -43,7 +43,7 @@ async function onMainThread(files: File[], opts: ImportOptions): Promise<Prepare
   opts.onProgress?.({ stage: 'simplify', tris: loaded.trisIn });
   // a frame for the label to paint before the synchronous part of simplification
   await new Promise((r) => setTimeout(r, 30));
-  return simplifyModel(loaded, opts.budget);
+  return simplifyModel(loaded, opts.budget, undefined, { consume: true });
 }
 
 /**
@@ -74,20 +74,26 @@ export async function bakeMeshOff(parts: MeshPart[]): Promise<{ glb: ArrayBuffer
 
 /** read and prepare `input` (the editor's `readModel`); throws `ImportError` or `AbortError` */
 export async function importModel(input: readonly File[] | FileList, opts: ImportOptions): Promise<PreparedModel> {
-  const { files, file, format } = checkFiles(input);
+  const files = Array.from(input as ArrayLike<File>);
+  const r = await resolveFiles(files);
+  const name = r.zip ? r.zip.name : r.file.name;
   if (opts.signal?.aborted) throw abortError();
   const worker = spawn();
   if (!worker) return onMainThread(files, opts);
   let request: ImportRequest;
   let transfer: Transferable[] = [];
   try {
-    if (WORKER_FORMATS.includes(format)) {
-      request = { kind: 'files', files, primary: files.indexOf(file), format, budget: opts.budget };
+    if (r.format === 'step') {
+      // STEP in its own workers, then the merge and simplify in the import worker
+      const parsed = await readStepFile(r, (stage, frac) => opts.onProgress?.({ stage, frac }), opts.signal);
+      request = { kind: 'parts', name, format: 'step', parsed, budget: opts.budget };
+      transfer = partBuffers(parsed.parts);
+    } else if (!WORKER_FORMATS.includes(r.format)) {
+      throw new Error(`${r.format} has no reader`);
+    } else if (r.zip) {
+      request = { kind: 'zip', pick: r.zip, budget: opts.budget };
     } else {
-      // STEP (its own worker) or 3MF (here), then the merge and simplify in the import worker
-      const raw = await readRaw(files, (stage, frac) => opts.onProgress?.({ stage, frac }), { signal: opts.signal });
-      request = { kind: 'parts', name: raw.file.name, format: raw.format, parsed: raw.parsed, budget: opts.budget };
-      transfer = partBuffers(raw.parsed.parts);
+      request = { kind: 'files', files: r.files, primary: r.files.indexOf(r.file), format: r.format, budget: opts.budget };
     }
   } catch (e) {
     worker.terminate();
@@ -127,11 +133,11 @@ export async function importModel(input: readonly File[] | FileList, opts: Impor
       done();
       // a worker that never said a word did not load (a blocked module script, an old browser):
       // do it here instead. One that failed part-way ran out of something; say so.
-      if (!heard && request.kind === 'files') {
+      if (!heard && (request.kind === 'files' || request.kind === 'zip')) {
         console.warn('[import] the import worker did not start; reading on the main thread', e.message);
         onMainThread(files, opts).then(resolve, reject);
       } else {
-        reject(new ImportError('corrupt', `Couldn’t finish reading ${file.name} (${e.message || 'the reader stopped'}). Export it again, or with fewer parts, and retry.`));
+        reject(new ImportError('corrupt', `Couldn’t finish reading ${name} (${e.message || 'the reader stopped'}). Export it again, or with fewer parts, and retry.`));
       }
     };
     worker.postMessage(request, transfer);

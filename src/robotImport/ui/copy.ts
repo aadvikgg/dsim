@@ -40,14 +40,18 @@ export const COPY = {
   // ---- Model ----
   dropTitle: 'Choose a file or drop it here',
   choose: 'Choose a file',
-  dropFormats: 'GLB, glTF, STEP, STL, OBJ, 3MF or PLY, up to 400 MB',
+  dropFormats: 'GLB, glTF, STEP, STL, OBJ, 3MF or PLY, or a zip of one',
   sidecarHint: 'A glTF or OBJ comes with a .bin or .mtl file. Drop them together.',
   dropNow: 'Drop to import',
   phase: {
     read: (file: string) => `Reading ${file}…`,
+    unzip: (file: string) => `Unzipping ${file}…`,
     parse: (file: string) => `Reading ${file}…`,
     'step-wasm': 'Loading the STEP reader…',
+    'step-index': (file: string) => `Reading ${file}…`,
     'step-parse': (file: string) => `Reading ${file}…`,
+    stepLeft: (file: string, seconds: number) =>
+      `Reading ${file}, about ${seconds >= 90 ? `${Math.round(seconds / 60)} min` : `${Math.max(10, Math.round(seconds / 10) * 10)} s`} left…`,
     convert: 'Converting the model…',
     simplify: (n: string) => `Simplifying ${n} triangles…`,
     measure: 'Measuring…',
@@ -72,7 +76,15 @@ export const COPY = {
   detected: (v: string) => `Detected: ${v}`,
   front: 'Front',
   frontDetected: 'Detected',
+  frontFound: {
+    intake: 'Detected from the intake',
+    wheels: 'Detected from the wheels',
+    mass: 'Detected from the weight',
+  },
+  frontAssumed: 'Assumed: the CAD front view',
   frontTurned: (deg: number) => `Turned ${deg}° from detected`,
+  frontTurnedAssumed: (deg: number) => `Turned ${deg}° from the CAD front`,
+  frontAssumedNote: 'The model shows no clear front, so the CAD front view is its front. Check the arrow in the preview, and turn it if it points the wrong way.',
   turnLeft: 'Turn left',
   turnRight: 'Turn right',
   footprint: 'Footprint and wheels',
@@ -88,7 +100,6 @@ export const COPY = {
   handleAria: (label: string, x: number, y: number, z?: number) => `${label}, ${where(x, y, z)}`,
 
   // ---- errors the UI adds (the engine's own come as ImportError messages) ----
-  stepReader: 'Couldn’t load the STEP reader. Check your connection and try again, or export as GLB or STL.',
   engineFailed: 'Couldn’t load the importer. Check your connection, then try again.',
   wrongGame: (name: string, season: string, other: string) => `Couldn’t add ${name} to ${season}. It was set up for ${other}.`,
   setUpFor: (season: string) => `Set it up for ${season}`,

@@ -18,7 +18,7 @@ export interface DropError {
   extra?: { label: string; run: () => void };
 }
 
-export const ACCEPT = '.glb,.gltf,.bin,.step,.stp,.stl,.obj,.mtl,.3mf,.ply,.png,.jpg,.jpeg';
+export const ACCEPT = '.glb,.gltf,.bin,.step,.stp,.stl,.obj,.mtl,.3mf,.ply,.zip,.png,.jpg,.jpeg';
 
 /**
  * THE DROP BOX: one `.ds-opt-add` tile of a fixed height (`.ds-import-drop`) whose CONTENT swaps

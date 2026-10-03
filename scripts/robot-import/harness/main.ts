@@ -314,6 +314,20 @@ async function run(): Promise<void> {
     });
     (window as unknown as { __preview: unknown }).__preview = preview;
   }
+  // 3MF: the import worker's small DOM (`miniDom.ts`) against this page's own DOMParser, on the
+  // fixture and on a sample written to exercise the XML; `npm test` pins the small DOM's hashes
+  const { parseThreeMf } = await import('../../../src/robotImport/engine/threeMf');
+  const { threeMfSample, partsHash } = await import('../threeMfSample');
+  const mfSamples: [string, Uint8Array][] = [
+    ['robot.3mf', new Uint8Array(await (await fetch('/robot.3mf')).arrayBuffer())],
+    ['threeMfSample', threeMfSample()],
+  ];
+  for (const [label, bytes] of mfSamples) {
+    const native = partsHash(parseThreeMf(bytes.slice().buffer, 'auto'));
+    const mini = partsHash(parseThreeMf(bytes.slice().buffer, 'mini'));
+    results.push({ threeMf: label, native, mini, same: native === mini });
+    say(JSON.stringify(results[results.length - 1]));
+  }
   await post('results.json', JSON.stringify(results, null, 2));
   (window as unknown as { __harness: { done: boolean } }).__harness.done = true;
   say('done');

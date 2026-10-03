@@ -1,8 +1,8 @@
 /**
- * Files → parts, for the formats a WORKER can read: GLB, glTF, STL, OBJ (+ MTL) and PLY. The import
- * worker (`importWorker.ts`) runs these off the main thread; `load.ts` runs them on it as the
- * fallback, and adds the two that cannot move: 3MF (three's loader needs `DOMParser`, which a
- * worker does not have) and STEP (occt, in its own worker).
+ * Files → parts, for the formats a WORKER can read: GLB, glTF, STL, OBJ (+ MTL), PLY and 3MF. The
+ * import worker (`importWorker.ts`) runs these off the main thread; `load.ts` runs them on it as the
+ * fallback. STEP is read by occt in its own workers. 3MF is three's loader, which needs a
+ * `DOMParser`: a worker has none, so it gets `miniDom.ts`'s for the length of the parse.
  *
  * Every parser ends in the same place: `MeshPart`s in the SOURCE frame (world transforms applied,
  * the file's own units and axes). Textures are stripped before parsing: the importer keeps colours
@@ -17,9 +17,9 @@ import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
 import { triangleCount, type MeshPart } from '../geometry';
 import type { LengthUnit, ModelFormat } from '../types';
 import { ImportError, abortError } from './importError';
-import { mergeByColour, splitByVertexColour } from './meshOps';
+import { colourGroups, mergeByColour, splitByVertexColour } from './meshOps';
 
-export type LoadStage = 'read' | 'parse' | 'step-wasm' | 'step-parse' | 'convert';
+export type LoadStage = 'read' | 'unzip' | 'parse' | 'step-wasm' | 'step-index' | 'step-parse' | 'convert';
 /** a stage, and how far through it (0..1) when that is known */
 export type LoadProgress = (stage: LoadStage, frac?: number) => void;
 
@@ -46,10 +46,12 @@ export interface ParsedFiles {
   fileUnit: LengthUnit | null;
   /** set when the format knows its own count (STEP); else counted before merging */
   trisIn?: number;
+  /** the parts are already merged by colour (the glTF reader does it as it reads) */
+  merged?: boolean;
 }
 
 /** the formats `parseFiles` reads (and so the import worker can) */
-export const WORKER_FORMATS: readonly ModelFormat[] = ['glb', 'gltf', 'stl', 'obj', 'ply'];
+export const WORKER_FORMATS: readonly ModelFormat[] = ['glb', 'gltf', 'stl', 'obj', 'ply', '3mf'];
 
 /** the GLTFLoader's meshopt decoder, handed in: the main chunk shares the one three.js already
  *  loads, the worker fetches it only for a file that needs it */
@@ -78,7 +80,7 @@ export async function parseFiles(
       case 'glb':
       case 'gltf': {
         const r = await loadGltf(file, files, format, onProgress, decoder);
-        return { parts: r.parts, bytes: r.bytes, notes: r.notes, fileUnit: null };
+        return { parts: r.parts, bytes: r.bytes, notes: r.notes, fileUnit: null, merged: r.merged };
       }
       case 'stl': {
         const welded = await parseBinaryStlWelded(file, onProgress, signal);
@@ -116,6 +118,13 @@ export async function parseFiles(
         const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: new THREE.Color().setRGB(...DEFAULT_LINEAR) }));
         return { parts: partsFromObject(mesh, true), bytes: file.size, notes: [], fileUnit: null };
       }
+      case '3mf': {
+        onProgress?.('parse');
+        const buf = await file.arrayBuffer();
+        const { parseThreeMf, threeMfUnit } = await import('./threeMf');
+        const fileUnit = threeMfUnit(new Uint8Array(buf));
+        return { parts: parseThreeMf(buf), bytes: file.size, notes: [], fileUnit };
+      }
       default:
         throw new Error(`${format} is not read here`);
     }
@@ -132,7 +141,8 @@ export async function parseFiles(
  */
 export function assembleLoaded(name: string, format: ModelFormat, parsed: ParsedFiles): LoadedModel {
   const trisIn = parsed.trisIn || triangleCount(parsed.parts);
-  const parts = mergeByColour(parsed.parts.filter((p) => p.positions.length >= 9));
+  const kept = parsed.parts.filter((p) => p.positions.length >= 9);
+  const parts = parsed.merged ? kept : mergeByColour(kept);
   if (triangleCount(parts) === 0) {
     throw new ImportError('empty', `Couldn’t find any triangles in ${name}. Export the robot as a solid or a mesh and try again.`);
   }
@@ -314,8 +324,21 @@ async function loadGltf(
   format: 'glb' | 'gltf',
   onProgress: LoadProgress | undefined,
   decoder: DecoderSource,
-): Promise<{ parts: MeshPart[]; bytes: number; notes: string[] }> {
-  const notes: string[] = [];
+): Promise<{ parts: MeshPart[]; bytes: number; notes: string[]; merged: boolean }> {
+  // the file's bytes and the loader's buffer views live only inside `gltfScene`: once it returns,
+  // nothing holds them, and the merge below writes into arrays of their own
+  const { scene, bytes } = await gltfScene(file, files, format, onProgress, decoder);
+  const merged = mergedPartsFromObject(scene);
+  return { parts: merged ?? partsFromObject(scene, false), bytes, notes: [], merged: !!merged };
+}
+
+async function gltfScene(
+  file: File,
+  files: readonly File[],
+  format: 'glb' | 'gltf',
+  onProgress: LoadProgress | undefined,
+  decoder: DecoderSource,
+): Promise<{ scene: THREE.Object3D; bytes: number }> {
   let bytes = file.size;
   const loader = new GLTFLoader();
   let glb: ArrayBuffer;
@@ -342,7 +365,7 @@ async function loadGltf(
   }
   onProgress?.('parse');
   const gltf = await loader.parseAsync(glb, '');
-  return { parts: partsFromObject(gltf.scene, false), bytes, notes };
+  return { scene: gltf.scene, bytes };
 }
 
 /**
@@ -445,25 +468,7 @@ export function partsFromObject(root: THREE.Object3D, useVertexColours: boolean)
       }
       const flip = m.determinant() < 0;
       const positions = new Float32Array(pos.count * 3);
-      if (src) {
-        const e = m.elements;
-        for (let i = 0, j = 0; i < pos.count; i++, j += 3) {
-          const x = src[j];
-          const y = src[j + 1];
-          const z = src[j + 2];
-          const w = 1 / (e[3] * x + e[7] * y + e[11] * z + e[15]);
-          positions[j] = (e[0] * x + e[4] * y + e[8] * z + e[12]) * w;
-          positions[j + 1] = (e[1] * x + e[5] * y + e[9] * z + e[13]) * w;
-          positions[j + 2] = (e[2] * x + e[6] * y + e[10] * z + e[14]) * w;
-        }
-      } else {
-        for (let i = 0; i < pos.count; i++) {
-          v.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(m);
-          positions[3 * i] = v.x;
-          positions[3 * i + 1] = v.y;
-          positions[3 * i + 2] = v.z;
-        }
-      }
+      transformInto(pos, src, m, positions, 0, v);
       const nIdx = full ? full.length : pos.count;
       const groups = geo.groups.length && materials.length > 1 ? geo.groups : [{ start: 0, count: nIdx, materialIndex: 0 }];
       for (const g of groups) {
@@ -500,4 +505,166 @@ export function partsFromObject(root: THREE.Object3D, useVertexColours: boolean)
     }
   });
   return out;
+}
+
+/**
+ * `pos` moved by `m` into `out` from `at`: straight from the array when it is plain (`src`), with
+ * `Vector3.applyMatrix4`'s arithmetic in its order, else through `getX/getY/getZ`. The one place
+ * both readers below do it, so their floats are the same.
+ */
+function transformInto(
+  pos: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
+  src: ArrayLike<number> | null,
+  m: THREE.Matrix4,
+  out: Float32Array,
+  at: number,
+  v: THREE.Vector3,
+): void {
+  if (src) {
+    const e = m.elements;
+    for (let i = 0, j = 0; i < pos.count; i++, j += 3) {
+      const x = src[j];
+      const y = src[j + 1];
+      const z = src[j + 2];
+      const w = 1 / (e[3] * x + e[7] * y + e[11] * z + e[15]);
+      out[at + j] = (e[0] * x + e[4] * y + e[8] * z + e[12]) * w;
+      out[at + j + 1] = (e[1] * x + e[5] * y + e[9] * z + e[13]) * w;
+      out[at + j + 2] = (e[2] * x + e[6] * y + e[10] * z + e[14]) * w;
+    }
+  } else {
+    for (let i = 0; i < pos.count; i++) {
+      v.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(m);
+      out[at + 3 * i] = v.x;
+      out[at + 3 * i + 1] = v.y;
+      out[at + 3 * i + 2] = v.z;
+    }
+  }
+}
+
+/**
+ * `mergeByColour(partsFromObject(root, false))`, bit for bit, without the copy in between: the
+ * colours are grouped first (`colourGroups`), every group's arrays are allocated at their final
+ * size, and each mesh instance is written straight into its group. A geometry's arrays are let go
+ * the moment its last instance is written, so the scene, the parts and the merged parts are never
+ * all in memory at once. That copy is what kept a GLB's peak where it was when its reading moved
+ * into the import worker (`docs/area/robot-import.md`, Workers).
+ *
+ * Null when a mesh asks for vertex colours (its parts split by colour first): the caller then takes
+ * the two-step path.
+ */
+export function mergedPartsFromObject(root: THREE.Object3D, maxParts = 48): MeshPart[] | null {
+  root.updateMatrixWorld(true);
+  type Item = { mesh: THREE.Mesh; inst: number; start: number; size: number; posLen: number; color: [number, number, number]; name: string };
+  const items: Item[] = [];
+  const uses = new Map<THREE.BufferGeometry, number>();
+  const tmp = new THREE.Matrix4();
+  let splits = false;
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh || (obj as THREE.Points).isPoints || (obj as THREE.Line).isLine) return;
+    const geo = mesh.geometry as THREE.BufferGeometry;
+    const pos = geo.getAttribute('position');
+    if (!pos || pos.count < 3) return;
+    const index = geo.getIndex();
+    const instances = (mesh as THREE.InstancedMesh).isInstancedMesh ? (mesh as THREE.InstancedMesh).count : 1;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const nIdx = index ? index.count : pos.count;
+    const groups = geo.groups.length && materials.length > 1 ? geo.groups : [{ start: 0, count: nIdx, materialIndex: 0 }];
+    for (let n = 0; n < instances; n++) {
+      for (const g of groups) {
+        const end = Math.min(nIdx, g.start + g.count);
+        const len = Math.max(0, end - g.start);
+        const mat = materials[g.materialIndex ?? 0] ?? materials[0];
+        if (geo.getAttribute('color') && (mat as THREE.MeshStandardMaterial | undefined)?.vertexColors) splits = true;
+        const c = (mat as THREE.MeshStandardMaterial | undefined)?.color;
+        items.push({
+          mesh,
+          inst: n,
+          start: g.start,
+          size: len - (len % 3),
+          color: c ? [c.r, c.g, c.b] : [DEFAULT_LINEAR[0], DEFAULT_LINEAR[1], DEFAULT_LINEAR[2]],
+          name: mesh.name || obj.parent?.name || 'part',
+          posLen: pos.count * 3,
+        });
+        uses.set(geo, (uses.get(geo) ?? 0) + 1);
+      }
+    }
+  });
+  if (splits) return null;
+  const groups = colourGroups(
+    items.map((it) => it.color),
+    maxParts,
+  );
+  // each item's group and its offsets there, in the order `concatParts` appends them
+  const groupOf = new Int32Array(items.length);
+  const posAt = new Float64Array(items.length);
+  const idxAt = new Float64Array(items.length);
+  const out = groups.map((g, gi) => {
+    let nPos = 0;
+    let nIdx = 0;
+    for (const i of g) {
+      groupOf[i] = gi;
+      posAt[i] = nPos;
+      idxAt[i] = nIdx;
+      nPos += items[i].posLen;
+      nIdx += items[i].size;
+    }
+    return { positions: new Float32Array(nPos), indices: new Uint32Array(nIdx - (nIdx % 3)) };
+  });
+  const v = new THREE.Vector3();
+  // one instance's positions serve each of its groups, as they do in `partsFromObject`
+  let last: { mesh: THREE.Mesh; inst: number; at: number; group: number } | null = null;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const geo = it.mesh.geometry as THREE.BufferGeometry;
+    const pos = geo.getAttribute('position');
+    const index = geo.getIndex();
+    const m = new THREE.Matrix4().copy(it.mesh.matrixWorld);
+    if ((it.mesh as THREE.InstancedMesh).isInstancedMesh) {
+      (it.mesh as THREE.InstancedMesh).getMatrixAt(it.inst, tmp);
+      m.multiply(tmp);
+    }
+    const flip = m.determinant() < 0;
+    const dst = out[groupOf[i]];
+    const at = posAt[i];
+    if (last && last.mesh === it.mesh && last.inst === it.inst && last.group === groupOf[i]) {
+      dst.positions.copyWithin(at, last.at, last.at + pos.count * 3);
+    } else if (last && last.mesh === it.mesh && last.inst === it.inst) {
+      dst.positions.set(out[last.group].positions.subarray(last.at, last.at + pos.count * 3), at);
+    } else {
+      const plain = !(pos as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute && !pos.normalized && pos.itemSize === 3;
+      transformInto(pos, plain ? (pos as THREE.BufferAttribute).array : null, m, dst.positions, at, v);
+      last = { mesh: it.mesh, inst: it.inst, at, group: groupOf[i] };
+    }
+    const base = at / 3;
+    const ia = index ? index.array : null;
+    let o = idxAt[i];
+    for (let k = 0; k < it.size; k += 3) {
+      const a = ia ? ia[it.start + k] : it.start + k;
+      const b = ia ? ia[it.start + k + 1] : it.start + k + 1;
+      const c = ia ? ia[it.start + k + 2] : it.start + k + 2;
+      dst.indices[o++] = a + base;
+      dst.indices[o++] = (flip ? c : b) + base;
+      dst.indices[o++] = (flip ? b : c) + base;
+    }
+    // the last use of this geometry: let its arrays go (the merged copy is all that is kept)
+    const left = (uses.get(geo) ?? 1) - 1;
+    uses.set(geo, left);
+    if (left === 0) {
+      for (const name of Object.keys(geo.attributes)) geo.deleteAttribute(name);
+      geo.setIndex(null);
+    }
+  }
+  return groups.map((g, gi) => {
+    if (g.length === 1) return { positions: out[gi].positions, indices: out[gi].indices, color: items[g[0]].color, name: items[g[0]].name };
+    // the area-weighted colour, summed in `concatParts`'s order with its weights
+    const col = [0, 0, 0];
+    let w = 0;
+    for (const i of g) {
+      const weight = Math.max(1, items[i].posLen);
+      for (let k = 0; k < 3; k++) col[k] += items[i].color[k] * weight;
+      w += weight;
+    }
+    return { positions: out[gi].positions, indices: out[gi].indices, color: [col[0] / w, col[1] / w, col[2] / w], name: items[g[0]].name };
+  });
 }

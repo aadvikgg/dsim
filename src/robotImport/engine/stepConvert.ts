@@ -1,14 +1,31 @@
 /**
- * occt-import-js's result → plain parts, one per colour. Shared by the STEP worker and the Node
- * harness (which runs occt directly), so both measure exactly the same triangles.
+ * occt-import-js's result → plain parts, one per colour, and the messages of the STEP workers.
+ * Shared by the occt worker and the Node harness (which runs occt directly), so both measure
+ * exactly the same triangles.
  */
 import type { OcctParams, OcctResult } from 'occt-import-js';
+import type { ImportErrorCode } from './importError';
+import type { ZipEntry } from './zip';
 
-/** the triangulation every STEP import uses: millimetres, 0.1 % of the bounding box, 0.5 rad */
+/** the triangulation a file read WHOLE uses: millimetres, 0.1 % of the bounding box, 0.5 rad */
 export const STEP_PARAMS: OcctParams = {
   linearUnit: 'millimeter',
   linearDeflectionType: 'bounding_box_ratio',
   linearDeflection: 0.001,
+  angularDeflection: 0.5,
+};
+
+/**
+ * The triangulation of a file read IN PIECES (`stepSplit.ts`): ABSOLUTE, 0.5 mm and 0.5 rad. A
+ * bounding-box ratio is taken per top-level shape, and a piece's shape is only its share of the
+ * robot, so every piece would mesh to a different tolerance. 0.5 mm is what 0.1 % of an FTC robot's
+ * average extent comes to (the whole-file setting), and occt's time is its STEP parse, not this:
+ * measured on REV's starter bot, 2 mm and 1 rad cut a 24 MB piece's 29.3 s to 27.4 s.
+ */
+export const STEP_PIECE_PARAMS: OcctParams = {
+  linearUnit: 'millimeter',
+  linearDeflectionType: 'absolute_value',
+  linearDeflection: 0.5,
   angularDeflection: 0.5,
 };
 
@@ -20,11 +37,23 @@ export interface StepPart {
   name: string;
 }
 
-export type StepRequest = { bytes: ArrayBuffer; params: OcctParams };
+/** what one occt read gave: parts by colour, the triangles, and the B-rep faces it saw */
+export type StepParts = { kind: 'done'; parts: StepPart[]; trisIn: number; faces: number } | { kind: 'error'; message: string };
+
+/** the STEP worker's request: the file (or the zip holding it), read there, not on the main thread */
+export type StepRequest = { file: Blob; name: string; entry: ZipEntry | null };
+export type StepStage = 'unzip' | 'read' | 'step-wasm' | 'step-index' | 'step-parse';
 export type StepResponse =
-  | { kind: 'progress'; stage: 'step-wasm' | 'step-parse' }
-  | { kind: 'done'; parts: StepPart[]; trisIn: number }
-  | { kind: 'error'; message: string };
+  | { kind: 'progress'; stage: StepStage; frac?: number }
+  | { kind: 'done'; parts: StepPart[]; trisIn: number; notes: string[] }
+  | { kind: 'error'; code: ImportErrorCode | null; message: string };
+
+/** one occt worker's request (STEP text, transferred) and its answers */
+export type OcctRequest = { id: number; bytes: Uint8Array; params: OcctParams };
+export type OcctResponse =
+  | { kind: 'reading'; id: number }
+  | { kind: 'done'; id: number; parts: StepPart[]; trisIn: number; faces: number }
+  | { kind: 'error'; id: number; message: string };
 
 /**
  * CAD aluminium when a STEP body carries no colour. LINEAR, like every colour occt returns: OCCT's
@@ -33,15 +62,22 @@ export type StepResponse =
  */
 const DEFAULT_LINEAR: [number, number, number] = [0.48, 0.5, 0.52];
 
-export function stepToParts(res: OcctResult): StepResponse {
+/**
+ * `faces` counts the B-rep faces occt reported. Faces with no triangles is how occt says it ran out
+ * of heap: its mesher catches the failure per face and the read still "succeeds" (REV's 125 MB
+ * starter bot: 118,734 faces, zero triangles).
+ */
+export function stepToParts(res: OcctResult): StepParts {
   if (!res || !res.success) return { kind: 'error', message: 'occt could not read the file' };
   const groups = new Map<string, { color: [number, number, number]; pos: number[]; idx: number[]; name: string }>();
   let trisIn = 0;
+  let faces = 0;
   for (const m of res.meshes) {
     const P = m.attributes.position.array;
     const I = m.index.array;
     const nT = Math.floor(I.length / 3);
     trisIn += nT;
+    faces += m.brep_faces?.length ?? 0;
     const meshColor = m.color ?? DEFAULT_LINEAR;
     // triangle → colour, from the B-rep faces when they carry their own
     const triColor: ([number, number, number] | null)[] = new Array(nT).fill(null);
@@ -78,5 +114,5 @@ export function stepToParts(res: OcctResult): StepResponse {
     color: g.color,
     name: g.name,
   }));
-  return { kind: 'done', parts, trisIn };
+  return { kind: 'done', parts, trisIn, faces };
 }

@@ -128,7 +128,27 @@ export type ImportCheckCode =
   | 'rpm-high'
   | 'tank-rpm-clamped'
   | 'hull-simplified'
-  | 'mesh-simplified';
+  | 'mesh-simplified'
+  | 'front-assumed';
+
+/**
+ * Which way the robot faces, from its geometry (`detectFront`, `docs/area/robot-import.md`). Three
+ * cues, each a vote along the footprint's two axes: an INTAKE (low geometry across the robot that
+ * reaches out past the wheels further at one end than the other), the WHEELS set back from one
+ * end, and the MASS (surface area) sitting toward the other end. When they agree strongly enough the
+ * front is DETECTED; otherwise it is ASSUMED to be the CAD front view (`defaultFront`) and the
+ * editor says so.
+ */
+export interface FrontDetection {
+  /** the quarter turns (the setup's `yaw`, from the CAD front) that put the found front at +x */
+  yaw: QuarterTurns;
+  /** 0..1, how far the strongest direction is ahead of the rest */
+  confidence: number;
+  /** confidence ≥ `FRONT_MIN_CONFIDENCE`: the front was found, not assumed */
+  detected: boolean;
+  /** the cue that carried it: 'intake', 'wheels' or 'mass'; null when none did */
+  cue: 'intake' | 'wheels' | 'mass' | null;
+}
 
 /** one plain-language check, for the Review step (copy follows `docs/area/ui.md`) */
 export interface ImportCheck {
@@ -167,6 +187,8 @@ export interface ImportMeasurement {
   /** largest distance from a raw hull vertex to the reduced hull, inches */
   hullDeviation: number;
   wheels: WheelDetection;
+  /** which way the geometry says the robot faces (measured in this orientation, given as a yaw) */
+  front: FrontDetection;
   /** wheels in force: the override, else detected, else null */
   wheelsUsed: Vec2[] | null;
   wheelSource: 'manual' | 'detected' | 'none';

@@ -31858,6 +31858,303 @@ function impPlayCheck(g: GameId): void {
   }
 }
 
+/**
+ * ROBOT IMPORT: REAL CAD (`docs/area/robot-import.md`, "Real CAD"). The vendors' starter bots
+ * showed what synthetic robots did not: occt's 2 GB heap (a 125 MB STEP "succeeded" with zero
+ * triangles), 390–420 MB STEP files published zipped, a STEP published cut off, and fronts that
+ * no convention can promise. What is held here, all of it on the fixtures and in-memory robots:
+ * a STEP read in PIECES gives the triangles of the whole read (whole roots and split solids,
+ * colours included); every piece is a complete STEP file; the part-size filter measures parts as
+ * they are; a cut-off file is caught before occt; a zip is read through its directory; the import
+ * worker's small DOM gives three's 3MF loader the parts Chromium's `DOMParser` gives; the glTF
+ * reader's merge-as-it-reads is `mergeByColour(partsFromObject())` bit for bit; a consumed
+ * simplification is the same simplification; and the front is found, or said to be assumed.
+ */
+{
+  const split = await import('../src/robotImport/engine/stepSplit');
+  const conv = await import('../src/robotImport/engine/stepConvert');
+  const zip = await import('../src/robotImport/engine/zip');
+  const load = await import('../src/robotImport/engine/load');
+  const parse = await import('../src/robotImport/engine/parse');
+  const { mergeByColour } = await import('../src/robotImport/engine/meshOps');
+  const { simplifyModel } = await import('../src/robotImport/engine/prepare');
+  const { importModel } = await import('../src/robotImport/engine/importSession');
+  const errs = await import('../src/robotImport/engine/importError');
+  const geo = await import('../src/robotImport/geometry');
+  const synth = await import('./robot-import/synthRobot');
+  const mfs = await import('./robot-import/threeMfSample');
+  const mf3 = await import('../src/robotImport/engine/threeMf');
+  const { frontAssumed, reviewItems, buildSpec, draftKey } = await import('../src/robotImport/ui/editorModel');
+  const { zipSync, strToU8 } = await import('three/examples/jsm/libs/fflate.module.js');
+  const THREE = await import('three');
+  const occtMod = (await import('occt-import-js')) as unknown as { default: (a: { locateFile: (f: string) => string }) => Promise<{ ReadStepFile: (b: Uint8Array, p: unknown) => unknown }> };
+  const occt = await occtMod.default({ locateFile: (f: string) => joinPath('node_modules', 'occt-import-js', 'dist', f) });
+  const fixtureDir = joinPath('scripts', 'fixtures', 'robot-import');
+  const stepBytes = new Uint8Array(readFileSync(joinPath(fixtureDir, 'robot.step')));
+  const u8 = (s: string): Uint8Array => Uint8Array.from(s, (c) => c.charCodeAt(0));
+  const sameBits = (a: ArrayBufferView | null | undefined, b: ArrayBufferView | null | undefined): boolean => {
+    if (!a || !b) return !a && !b;
+    if (a.byteLength !== b.byteLength) return false;
+    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+    return true;
+  };
+  type Tri = { positions: Float32Array; indices: Uint32Array; color: readonly number[] };
+  /** every triangle as text (colour, then its corners from the smallest), sorted: a multiset */
+  const triSet = (parts: readonly Tri[]): string[] => {
+    const out: string[] = [];
+    for (const p of parts) {
+      const c = p.color.map((v) => Math.round(v * 255)).join('/');
+      for (let t = 0; t < p.indices.length; t += 3) {
+        const v = [0, 1, 2].map((k) => Array.from(p.positions.subarray(3 * p.indices[t + k], 3 * p.indices[t + k] + 3)).join(','));
+        let m = 0;
+        for (let k = 1; k < 3; k++) if (v[k] < v[m]) m = k;
+        out.push(`${c}|${v[m]}|${v[(m + 1) % 3]}|${v[(m + 2) % 3]}`);
+      }
+    }
+    return out.sort();
+  };
+  const readOcct = (bytes: Uint8Array): Tri[] => {
+    const r = conv.stepToParts(occt.ReadStepFile(bytes, conv.STEP_PIECE_PARAMS) as never);
+    if (r.kind !== 'done') throw new Error(r.message);
+    return r.parts;
+  };
+  const sameList = (a: string[], b: string[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
+
+  // ---- what a file is ----
+  const cut = stepBytes.slice(0, Math.floor(stepBytes.length * 0.6));
+  let cutIndex = '';
+  try {
+    split.indexStep(cut);
+  } catch (e) {
+    cutIndex = e instanceof split.StepSyntaxError && e.truncated ? 'truncated' : String(e);
+  }
+  const padded = new Uint8Array(stepBytes.length + 3);
+  padded.set(stepBytes);
+  padded.set(u8('\r\n\n'), stepBytes.length);
+  check(
+    'robot import (real CAD): a STEP file that stops partway (no END-ISO-10303-21) is CUT OFF, said before occt sees it; whole files, trailing blank lines and all, pass; a non-STEP is not STEP',
+    split.checkStepText(stepBytes).ok && split.checkStepText(padded).ok && JSON.stringify(split.checkStepText(cut)) === '{"ok":false,"reason":"truncated"}' && JSON.stringify(split.checkStepText(u8('solid robot\nfacet'))) === '{"ok":false,"reason":"not-step"}' && cutIndex === 'truncated',
+    cutIndex,
+  );
+  const ix = split.indexStep(stepBytes);
+  const instances = (new TextDecoder().decode(stepBytes).match(/^#\d+\s*=/gm) ?? []).length;
+  let unresolved = 0;
+  for (const r of ix.refs) if (r < 0) unresolved++;
+  check('robot import (real CAD): the STEP index finds every entity instance, and every reference resolves', ix.count === instances && unresolved === 0, `${ix.count} of ${instances}, ${unresolved} unresolved`);
+
+  // ---- pieces = the whole file ----
+  const whole = triSet(readOcct(stepBytes));
+  const piecesOf = (pieceBytes: number, minPartMm = 0): { plan: ReturnType<typeof split.planPieces>; tris: string[]; complete: boolean } => {
+    const plan = split.planPieces(ix, { pieceBytes, minPartMm });
+    const parts: Tri[] = [];
+    let complete = true;
+    for (let k = 0; k < plan.pieces.length; k++) {
+      const text = split.pieceText(ix, plan, k);
+      const pix = split.indexStep(text);
+      if (!split.checkStepText(text).ok || pix.refs.some((r) => r < 0)) complete = false;
+      parts.push(...readOcct(text));
+    }
+    return { plan, tris: triSet(parts), complete };
+  };
+  const byRoot = piecesOf(40 * 1024);
+  const byFace = piecesOf(8 * 1024);
+  check(
+    'robot import (real CAD): a STEP read in PIECES gives the whole read’s triangles, colours included, by whole parts and with every solid split into faces',
+    whole.length === 360 && sameList(byRoot.tris, whole) && sameList(byFace.tris, whole) && byRoot.plan.pieces.length > 1 && byRoot.plan.carriers.size === 0 && byFace.plan.carriers.size === 10,
+    `${whole.length} / ${byRoot.tris.length} in ${byRoot.plan.pieces.length} / ${byFace.tris.length} in ${byFace.plan.pieces.length}`,
+  );
+  check('robot import (real CAD): every piece is a complete STEP file (whole, and no reference left dangling)', byRoot.complete && byFace.complete);
+  // the four wheels: 104 mm across, 1.5 in wide, so √(104² + 104² + 38.1²) = 151.9 mm; the belly 16 × 12.6 × 0.5 in
+  const sized = split.planPieces(ix, { minPartMm: 200 });
+  const sizes = sized.roots.map((r) => r.sizeMm ?? -1);
+  const wheelsAt = sizes.filter((s) => Math.abs(s - 151.9) < 0.3).length;
+  check(
+    'robot import (real CAD): the part-size filter measures a part by the points ON it, and leaves out exactly the parts under its size',
+    wheelsAt === 4 && sized.skipped.length === sizes.filter((s) => s < 200).length && sized.skipped.every((k) => sizes[k] < 200) && Math.abs(Math.max(...sizes) - 517.4) < 0.5,
+    sizes.map((s) => s.toFixed(1)).join(' '),
+  );
+
+  // ---- zips ----
+  const zipFile = (name: string, entries: Record<string, Uint8Array | [Uint8Array, { level: 0 }]>): File => new File([zipSync(entries) as Uint8Array<ArrayBuffer>], name);
+  const zstep = zipFile('starter.zip', { 'robot/robot.step': stepBytes, 'readme.txt': strToU8('hello') });
+  const rz = await load.resolveFiles([zstep]);
+  const inner = rz.zip ? await zip.zipEntryBytes(zstep, rz.zip.entry, zstep.name) : new Uint8Array(0);
+  const stored = zipFile('stored.zip', { 'robot.step': [stepBytes, { level: 0 }] });
+  const rs = await load.resolveFiles([stored]);
+  const storedBytes = rs.zip ? await zip.zipEntryBytes(stored, rs.zip.entry, stored.name) : new Uint8Array(0);
+  let noModel = '';
+  try {
+    await load.resolveFiles([zipFile('photos.zip', { 'readme.txt': strToU8('x'), 'bot.png': strToU8('y') })]);
+  } catch (e) {
+    noModel = e instanceof errs.ImportError ? `${e.code}: ${e.message}` : String(e);
+  }
+  check(
+    'robot import (real CAD): a dropped zip is read through its directory: the STEP inside is the model, named as itself, and inflates (or copies, stored) to its exact bytes',
+    rz.format === 'step' && rz.zip?.name === 'robot.step' && sameBits(inner, stepBytes) && rs.format === 'step' && sameBits(storedBytes, stepBytes),
+  );
+  check('robot import (real CAD): a zip with no model says what it holds (Couldn’t find a robot model … readme.txt, bot.png)', /^zip: Couldn’t find a robot model in photos\.zip: it holds readme\.txt, bot\.png\./.test(noModel), noModel);
+  const objText = readFileSync(joinPath(fixtureDir, 'robot.obj'));
+  const mtlText = readFileSync(joinPath(fixtureDir, 'robot.mtl'));
+  const zobj = zipFile('obj.zip', { 'robot.obj': new Uint8Array(objText), 'robot.mtl': new Uint8Array(mtlText) });
+  const ro = await load.resolveFiles([zobj]);
+  const glbBytes = new Uint8Array(readFileSync(joinPath(fixtureDir, 'robot.glb')));
+  const viaZip = await importModel([zipFile('glb.zip', { 'robot.glb': glbBytes })], { budget: 100_000 });
+  const viaGlb = await importModel([new File([glbBytes], 'robot.glb')], { budget: 100_000 });
+  check(
+    'robot import (real CAD): an .obj in a zip brings its .mtl, and a GLB in a zip imports exactly as the GLB (main-thread fallback here)',
+    ro.format === 'obj' && ro.zip?.entries.map((e) => e.name).join(',') === 'robot.obj,robot.mtl' && viaZip.parts.length === viaGlb.parts.length && viaZip.parts.every((p, i) => sameBits(p.positions, viaGlb.parts[i].positions) && sameBits(p.indices, viaGlb.parts[i].indices)) && viaZip.name === 'robot.glb',
+  );
+
+  // ---- the messages ----
+  const said = [errs.EXPORT_HINT, errs.stepCutOff('bot.step').message, errs.notStep('bot.step').message, noModel];
+  check(
+    'robot import (real CAD): the STEP failures say Couldn’t …, name the exact export menus in Onshape, Fusion, SolidWorks and Inventor, and keep the copy rules',
+    said.every((s) => !/'|\.\.\.|\s-\s|"/.test(s)) && /^Couldn’t read bot\.step: the file is cut off\./.test(said[1]) && ['Onshape', 'Fusion', 'SolidWorks', 'Inventor', 'GLB', 'STL'].every((w) => errs.EXPORT_HINT.includes(w)),
+  );
+
+  // ---- 3MF off the main thread ----
+  const mfFixture = new Uint8Array(readFileSync(joinPath(fixtureDir, 'robot.3mf')));
+  const sample = mfs.threeMfSample();
+  const hadDom = typeof (globalThis as { DOMParser?: unknown }).DOMParser;
+  const hFixture = mfs.partsHash(mf3.parseThreeMf(mfFixture.slice().buffer, 'mini'));
+  const hSample = mfs.partsHash(mf3.parseThreeMf(sample.slice().buffer, 'mini'));
+  check(
+    // measured 2026-10-02 in Chromium (Electron), `harness/main.ts`: the page's DOMParser gave these
+    'robot import (real CAD): 3MF in the import worker — the small DOM gives three’s loader the parts Chromium’s DOMParser does (fixture and an XML-heavy sample), and leaves no DOMParser behind',
+    hFixture === '10:40d00c49' && hSample === '9:8324917' && typeof (globalThis as { DOMParser?: unknown }).DOMParser === hadDom && parse.WORKER_FORMATS.includes('3mf'),
+    `${hFixture} ${hSample}`,
+  );
+
+  // ---- the glTF merge as it reads ----
+  const glbScene = async (bytes: Uint8Array): Promise<THREE.Object3D> => {
+    const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+    return (await new GLTFLoader().parseAsync(bytes.slice().buffer, '')).scene;
+  };
+  const twoStep = (scene: THREE.Object3D): MeshPartLike[] => mergeByColour(parse.partsFromObject(scene, false).filter((p) => p.positions.length >= 9));
+  type MeshPartLike = { positions: Float32Array; indices: Uint32Array | null; color: readonly number[]; name: string };
+  const identical = (a: MeshPartLike[], b: MeshPartLike[] | null): boolean =>
+    !!b && a.length === b.length && a.every((p, i) => p.name === b[i].name && p.color.every((c, k) => c === b[i].color[k]) && sameBits(p.positions, b[i].positions) && sameBits(p.indices, b[i].indices));
+  const scene = new THREE.Group();
+  const box = new THREE.BoxGeometry(1, 2, 3);
+  const mats = [0, 1, 2, 3, 4, 5].map((k) => new THREE.MeshStandardMaterial({ color: new THREE.Color().setRGB(k / 6, 0.5, 1 - k / 6) }));
+  const multi = new THREE.Mesh(box, mats);
+  multi.position.set(1, 2, 3);
+  const mirror = new THREE.Mesh(box, mats[2]);
+  mirror.scale.set(-1, 1, 1);
+  const inst = new THREE.InstancedMesh(new THREE.SphereGeometry(0.5, 8, 6), new THREE.MeshStandardMaterial({ color: 0x336699 }), 4);
+  for (let i = 0; i < 4; i++) inst.setMatrixAt(i, new THREE.Matrix4().makeTranslation(i, 0, -i));
+  scene.add(multi, mirror, inst, new THREE.Mesh(box, mats[0]));
+  const flat = new THREE.BoxGeometry(0.5, 0.5, 0.5).toNonIndexed();
+  for (let i = 0; i < 60; i++) {
+    const m = new THREE.Mesh(flat, new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(i / 60, 0.7, 0.5) }));
+    m.position.set(i * 0.3, 5, 0);
+    scene.add(m);
+  }
+  const ref = twoStep(scene);
+  const merged = parse.mergedPartsFromObject(scene);
+  const fixRef = twoStep(await glbScene(glbBytes));
+  const fixMerged = parse.mergedPartsFromObject(await glbScene(glbBytes));
+  const vc = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial({ vertexColors: true }));
+  vc.geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(vc.geometry.getAttribute('position').count * 3).fill(0.5), 3));
+  check(
+    'robot import (real CAD): the glTF reader’s merge as it reads IS mergeByColour(partsFromObject()), bit for bit (groups, instances, a mirror, shared and unindexed geometry, 60 colours), and steps aside for vertex colours',
+    identical(ref, merged) && identical(fixRef, fixMerged) && ref.length > 1 && parse.mergedPartsFromObject(vc) === null,
+  );
+  const stlFile = new File([readFileSync(joinPath(fixtureDir, 'robot.stl'))], 'robot.stl');
+  const keep = await simplifyModel(await load.loadModel([stlFile]), 1000);
+  const loadedForConsume = await load.loadModel([stlFile]);
+  const consumed = await simplifyModel(loadedForConsume, 1000, undefined, { consume: true });
+  check(
+    'robot import (real CAD): a CONSUMED simplification (the worker lets each loaded part go once welded) is the same simplification, and leaves the loaded parts empty',
+    consumed.parts.length === keep.parts.length && consumed.parts.every((p, i) => sameBits(p.positions, keep.parts[i].positions) && sameBits(p.indices, keep.parts[i].indices)) && loadedForConsume.parts.length === 0,
+  );
+
+  // ---- the front ----
+  type V3 = [number, number, number];
+  const synthParts = (prisms: ReturnType<typeof synth.synthRobot>): { positions: Float32Array; indices: null; color: [number, number, number]; name: string }[] =>
+    prisms.map((pr) => {
+      const tris: V3[][] = synth.prismTriangles(pr);
+      const pos = new Float32Array(tris.length * 9);
+      tris.forEach((t, i) => t.forEach((v, k) => pos.set(v.map((c) => c * 25.4), 9 * i + 3 * k)));
+      return { positions: pos, indices: null, color: pr.color, name: pr.name };
+    });
+  const rots: number[][][] = [];
+  const axes: V3[] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+  for (const a of axes) for (const b of axes) {
+    if (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] !== 0) continue;
+    rots.push([a, b, [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]]);
+  }
+  const apply = (R: number[][], v: readonly number[]): V3 => [0, 1, 2].map((r) => R[r][0] * v[0] + R[r][1] * v[1] + R[r][2] * v[2]) as V3;
+  const frontRuns = (parts: ReturnType<typeof synthParts>, front: V3): { right: number; wrong: number; assumed: number } => {
+    const tally = { right: 0, wrong: 0, assumed: 0 };
+    for (const R of rots) {
+      const p = parts.map((q) => {
+        const out = new Float32Array(q.positions.length);
+        for (let i = 0; i < out.length; i += 3) out.set(apply(R, q.positions.subarray(i, i + 3)), i);
+        return { ...q, positions: out };
+      });
+      const { measurement: m } = geo.measureParts(p, geo.defaultImportSetup(), { format: 'stl', fileUnit: 'mm' });
+      if (!m.front.detected) {
+        tally.assumed++;
+        continue;
+      }
+      const rows = geo.orientation(m.up, m.front.yaw);
+      const f = apply(R, front);
+      const d = [0, 1, 2].map((k) => rows[k][0] * f[0] + rows[k][1] * f[1] + rows[k][2] * f[2]);
+      if (d[0] > 0.99) tally.right++;
+      else tally.wrong++;
+    }
+    return tally;
+  };
+  const forward = frontRuns(synthParts(synth.synthRobot()), [1, 0, 0]);
+  const backward = frontRuns(
+    synthParts(synth.synthRobot()).map((q) => {
+      const out = new Float32Array(q.positions.length);
+      for (let i = 0; i < out.length; i += 3) out.set([-q.positions[i], -q.positions[i + 1], q.positions[i + 2]], i);
+      return { ...q, positions: out };
+    }),
+    [-1, 0, 0],
+  );
+  const six = frontRuns(synthParts(synth.synthRobot({ sixWheel: true })), [1, 0, 0]);
+  // no intake, the tower centred: nothing says which way it faces
+  const blank = synth.synthRobot().filter((pr) => pr.name !== 'intake' && pr.name !== 'tower' && pr.name !== 'flag');
+  const plain = frontRuns(synthParts(blank), [1, 0, 0]);
+  check(
+    'robot import (real CAD): the front is FOUND from a front intake in all 24 orientations (4- and 6-wheel, and facing the other way), never wrongly',
+    forward.right === 24 && backward.right === 24 && six.right === 24 && forward.wrong + backward.wrong + six.wrong === 0,
+    JSON.stringify({ forward, backward, six }),
+  );
+  check('robot import (real CAD): a robot with no front cue is ASSUMED to face its CAD front, never guessed', plain.assumed === 24, JSON.stringify(plain));
+  const docOf = (front: 'detected' | 'assumed', yaw: 0 | 1 | 2 | 3, savedModel = false) => ({ detected: { units: 'mm' as const, up: '+z' as const, yaw: 0 as const, front }, savedModel, setup: { ...geo.defaultImportSetup(), yaw } });
+  const m0 = geo.measureParts(synthParts(synth.synthRobot()), geo.defaultImportSetup(), { format: 'stl', fileUnit: 'mm' }).measurement;
+  const doc0 = {
+    v: 1, key: draftKey('decode', null), game: 'decode', id: '0123456789abcdef', editId: null, step: 0,
+    setup: geo.defaultImportSetup({ massLb: 30 }), detected: null, mech: null,
+    spec: coerceSpec(DEFAULT_SPEC, undefined, 'decode'), source: null, savedModel: false, created: null, sourceName: null, updated: 0,
+  } as never;
+  const built0 = buildSpec(doc0, m0);
+  check(
+    'robot import (real CAD): the editor says ASSUMED truthfully — a Review note while the assumed front stands, none once it is turned, found, or a saved robot’s',
+    frontAssumed(docOf('assumed', 0)) && !frontAssumed(docOf('assumed', 1)) && !frontAssumed(docOf('detected', 0)) && !frontAssumed(docOf('assumed', 0, true)) && !frontAssumed(null) &&
+      reviewItems(m0, built0, 'decode', true).some((i) => i.id === 'front-assumed' && i.level === 'info' && i.fix?.focus === 'ri-front') &&
+      !reviewItems(m0, built0, 'decode', false).some((i) => i.id === 'front-assumed'),
+  );
+
+  // ---- the workers ----
+  const src = (f: string): string => readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
+  const eng = (f: string): string => src(joinPath('src', 'robotImport', 'engine', f));
+  check(
+    'robot import (real CAD): the STEP worker makes its occt workers with `new Worker(new URL(…, import.meta.url), { type: \'module\' })`, and is handed the FILE, never its bytes on the main thread',
+    /new Worker\(new URL\('\.\/occtWorker\.ts', import\.meta\.url\), \{ type: 'module' \}\)/.test(eng('stepWorker.ts')) && /worker\.postMessage\(\{ file, name, entry \}/.test(eng('stepReader.ts')) && !/arrayBuffer\(\)/.test(eng('stepReader.ts')),
+  );
+  const workerSide = ['stepWorker.ts', 'occtWorker.ts', 'stepSplit.ts', 'stepConvert.ts', 'zip.ts', 'miniDom.ts', 'threeMf.ts'];
+  // comments and string literals out (the small DOM's own node name is the string '#document')
+  const domUsers = workerSide.filter((f) => /\b(document|window|localStorage|indexedDB)\b/.test(eng(f).replace(/^\s*(\/\/|\*|\/\*).*$/gm, '').replace(/'[^'\n]*'/g, "''")));
+  check('robot import (real CAD): the STEP, zip and 3MF worker code uses no DOM', domUsers.length === 0, domUsers.join(', '));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // IMPORTED ROBOTS: MECHANISMS (`src/sim/importedMech.ts`, each game's `importMech.ts` /
 // `importChecks.ts`; `docs/area/physics.md` "Imported robots: mechanisms"). Mouths carved from the
