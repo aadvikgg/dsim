@@ -1,3 +1,16 @@
+# HANDOFF — 2026-10-03b (BIOBUZZ 3D: the online "invisible bump" against walls)
+
+**State: on `alpha` (pushed); `dsim-alpha` redeploy noted below. NOT on `main`, production not deployed (server + client change: `SIM_PATCH` 3).** `npm test` (5531), `build`, `server:check`, `docaudit`, `bundleaudit` pass. GUI checked offscreen in Electron: BIOBUZZ 3D Free Drive, driving into and along walls, no console errors.
+
+- **Owner:** "sometimes in online games, when I drive against the wall, there seems to be an invisible bump. It happens rarely."
+- **Where it is:** BIOBUZZ only. Online BIOBUZZ is always 3D; a real-`Room` probe at 66 ms found DECODE online clean (worst 0.29 in over 10 min of wall driving) and BIOBUZZ 3D (FULL) with reconcile snaps at walls up to ~1 in / 8°, one or two a minute.
+- **Cause:** the FULL client's 3D engine is built from a snapshot and never holds the room's contact state (warm starts, pair order). Copying the bodies' exact poses into it still parts from the room on tick one; copying Rapier's whole world is exact. Near a wall the difference was amplified by the wall square-up: a heading written after the solve, re-seated next tick, pushed back by the solver, alternating every tick (yaw 0 / −0.75 / 0 / −0.82 rad/s at 16°).
+- **Fix (`step3dImpl.ts` 6b/8a/8b, `physics.ts` `squareUpTurnsWalls`/`recordRobotContacts`, `predict.ts`):** the turn is handed to the solve as one tick of yaw rate. Gated `SIM_PATCH` 3; older replays run the old order (the old pins are checked under patch 2).
+- **Measured:** real `Room`, 3 × 120 s: wall corrections p99 0.12–0.25 → 0.02–0.04 in, worst heading 2.8° → 1.0°, over 0.25 in 7 → 1. `scripts/zz-bb3d-wall-rollback.ts` (12 seeds, `PATCH=2` for the old rule): over 0.1 in / 0.5° 101 → 58, worst 2.46 → 0.87 in.
+- **Not fixed:** a fast angled 3D wall IMPACT is sensitive on its own (5e-5 rad of heading → 0.65° within a second, 2D 0.014°), so a few degrees after a hard hit can still snap online. Tried and rejected: more solver iterations (open-field drift 6 in → 0.03 in, wall events unchanged), a fresh robot body on a divergent rewind (worse).
+- **Owner call:** the G402 3D chatter sweep (210 duels) has one shape (victim 2 in deep, −30°) that now grinds down the wall with a 1.17 s gap and bills TWICE under `BB_G402_REARM_S` 1.0 s; every other gap ≤ 0.47 s. Widen the window or accept it. Noted in `scripts/smoke-biobuzz/rules.ts`.
+- **Production:** needs `main` + a production Fly deploy; client and server must move together (a new client against an old server predicts the new rule against the old one).
+
 # HANDOFF — 2026-10-03 (ranked: new rating rules, 10/7 placement, BIOBUZZ Act 2 recalculation)
 
 **State: on `main` (550a955a) and `alpha`; DEPLOYED 2026-10-03 to `dsim-alpha` and to PRODUCTION from `main` (03:00Z, 2-minute announcement, all 8 machines on the new image). BIOBUZZ Act 2 RECALCULATED on production: the dry run reproduced all 1636 stored results of 764 matches (13 played after the export), the apply rewrote 252 boards, 252 snapshots and 1636 match rows and sent 252 notices; a re-check dry run changes nothing. Rehearsed first on `dsim-alpha` (dry run, apply, repeat apply).** `npm test`, `test:mm` (237), `dbtest`, `server:check`, `build`, `uiaudit`, `docaudit`, `bundleaudit` pass. Migration 0058. Rules in `docs/area/accounts.md` ("RULE SETS AND THE RECALCULATION").
