@@ -10,7 +10,7 @@ import type { ImportProgress, NormalisedModel, PreparedModel } from '../engine/i
 import type { LoadStage } from '../engine/load';
 import { wheelDiameterMm } from '../drive';
 import { defaultImportSetup, orientKey, transformParts } from '../geometry';
-import { coaxialBodies, findWheelGroups, isSpin, motionAsStored, mountedBodies } from '../motion';
+import { coaxialBodies, findRollerGroups, findWheelGroups, isSpin, motionAsStored, mountedBodies } from '../motion';
 import { deleteRobot, getRobot, listRobots, newRobotId, putRobot } from '../library';
 import { editSaveId, planShareAdd } from '../libraryIds';
 import { readShareFile, type SharePayload } from '../shareFile';
@@ -682,13 +682,17 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
     normalised && baseWheels && doc
       ? findWheelGroups(normalised.modelParts, baseWheels, doc.setup.drive.drivetrain, wheelDiameterMm(doc.setup.drive.wheel) / 25.4)
       : [];
-  // the drive wheels are looked for once, on a setup that has never had moving parts
+  const findRollers = (have: readonly MotionGroup[]): MotionGroup[] =>
+    normalised && doc?.mech?.intakes?.length ? findRollerGroups(normalised.modelParts, doc.mech.intakes, new Set(have.flatMap((g) => g.bodies))) : [];
+  // the drive wheels and the intake rollers are looked for once, on a setup that has never had moving
+  // parts, once the placements are in (the rollers are looked for on the intake spans)
   useEffect(() => {
-    if (!doc || !normalised || measuring || !baseWheels || doc.setup.motion !== undefined) return;
-    const found = findWheels();
+    if (!doc || !normalised || measuring || !baseWheels || doc.setup.motion !== undefined || !doc.mech) return;
+    const wheels = findWheels();
+    const found = [...wheels, ...findRollers(wheels)];
     update((d) => (d.setup.motion === undefined ? { ...d, setup: { ...d.setup, motion: found } } : d));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc?.setup.motion, normalised, measuring, baseWheels]);
+  }, [doc?.setup.motion, normalised, measuring, baseWheels, !doc?.mech]);
   const setMotion = (next: MotionGroup[]): void => update((d) => ({ ...d, setup: { ...d.setup, motion: next } }));
   const picking = step === 2 && activeMotion !== null && !!motion?.[activeMotion];
   // a click in the preview: the part under it (and, for something that spins, its axle; for the rest,
@@ -792,6 +796,7 @@ export default function ImportEditor({ settings, editId, onBack, onSaved, onTest
             }}
             onChange={setMotion}
             onFindWheels={() => setMotion([...(motion ?? []).filter((g) => g.role !== 'wheel'), ...findWheels()])}
+            onFindRollers={doc.mech?.intakes?.length ? () => setMotion([...(motion ?? []), ...findRollers(motion ?? [])]) : undefined}
             onPlay={(on) => {
               setPlaying(on);
               if (on) setActiveMotion(null);

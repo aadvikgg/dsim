@@ -294,7 +294,8 @@ match: `wheel`, `roller`, `flywheel` spin about their own axle, `turret` turns a
 `ramp` (BIOBUZZ's deployable intake) and `fold` swing about a hinge. It is FRAME-FREE (body ids and
 choices, never positions), so a units or yaw change keeps it. Absent = never looked for: the editor
 finds the drive wheels once (`findWheelGroups`, every body wholly inside each wheel's cylinder at a
-floor contact). `[]` = none.
+floor contact) and the intake rollers (`findRollerGroups`: a round body along an intake span's edge,
+within 4 in of it and under 10 in, grown to its axle). `[]` = none.
 
 - **Bodies.** `MeshPart.body` is a per-vertex id: one per mesh instance from a reader, one per STEP
   solid, the connected pieces when a file has only one. Weld never joins two bodies; weld, compact,

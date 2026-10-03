@@ -348,6 +348,72 @@ export function findWheelGroups(parts: readonly MeshPart[], wheels: readonly Vec
   return out;
 }
 
+// ---- the intake rollers, from the intake spans ----------------------------------------------------
+
+/** how far in from the robot's edge an intake roller's axle may sit, inches */
+const ROLLER_DEPTH_IN = 4;
+/** an intake roller's axle is no higher than this, inches (a folded ramp's far roller is up near it) */
+const ROLLER_TOP_IN = 10;
+/** a roller group's radius, inches: under it is a bare shaft, over it is not a roller */
+const ROLLER_R_MIN_IN = 0.35;
+const ROLLER_R_MAX_IN = 2.5;
+
+/**
+ * THE INTAKE ROLLERS: on each intake span (`ImportedMech.intakes`, MODEL frame), every axle that runs
+ * along the edge within `ROLLER_DEPTH_IN` of it, under `ROLLER_TOP_IN`, inside the span. An axle is
+ * seeded by a ROUND body along the edge (its cross-section as wide one way as the other, and no
+ * corner past the circle: a square tube fails, a hex shaft passes), then grown to everything on it
+ * (`coaxialBodies`). Bodies in `taken` (the wheels) are never used. A suggestion: the player removes
+ * what is not a roller.
+ */
+export function findRollerGroups(
+  parts: readonly MeshPart[],
+  intakes: readonly { edge: 'front' | 'back' | 'left' | 'right'; from: number; to: number }[],
+  taken: ReadonlySet<number>,
+): MotionGroup[] {
+  const st = bodyStats(parts);
+  if (!st.ids.length) return [];
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (const b of st.ids) {
+    for (let k = 0; k < 3; k++) {
+      lo[k] = Math.min(lo[k], st.min[3 * b + k]);
+      hi[k] = Math.max(hi[k], st.max[3 * b + k]);
+    }
+  }
+  const used = new Set(taken);
+  const out: MotionGroup[] = [];
+  for (const span of intakes) {
+    const along: 0 | 1 = span.edge === 'front' || span.edge === 'back' ? 1 : 0;
+    const across = along === 1 ? 0 : 1;
+    const outward = span.edge === 'front' || span.edge === 'left' ? 1 : -1;
+    const edgeAt = outward > 0 ? hi[across] : lo[across];
+    const axis: V3 = along === 1 ? [0, 1, 0] : [1, 0, 0];
+    for (const b of st.ids) {
+      if (used.has(b)) continue;
+      const c = [0, 1, 2].map((k) => (st.min[3 * b + k] + st.max[3 * b + k]) / 2);
+      if ((edgeAt - c[across]) * outward > ROLLER_DEPTH_IN || c[2] > ROLLER_TOP_IN) continue;
+      if (c[along] < Math.min(span.from, span.to) - 1 || c[along] > Math.max(span.from, span.to) + 1) continue;
+      // round about the edge's direction: equal spread across it, and no corner past the circle
+      const h1 = (st.max[3 * b + across] - st.min[3 * b + across]) / 2;
+      const h2 = (st.max[3 * b + 2] - st.min[3 * b + 2]) / 2;
+      if (h1 < 0.05 || h2 < 0.05 || h1 / h2 < 0.85 || h1 / h2 > 1.18) continue;
+      let r = 0;
+      eachVertex(parts, new Set([b]), (x, y, z) => {
+        const d = Math.hypot((along === 1 ? x : y) - c[across], z - c[2]);
+        if (d > r) r = d;
+      });
+      if (r > 1.12 * Math.max(h1, h2)) continue;
+      const bodies = coaxialBodies(parts, b, 'roller').filter((x) => !used.has(x));
+      const whole = fitRound(parts, bodies, axis);
+      if (!whole || whole.radius < ROLLER_R_MIN_IN || whole.radius > ROLLER_R_MAX_IN) continue;
+      for (const x of bodies) used.add(x);
+      out.push({ role: 'roller', bodies });
+    }
+  }
+  return out;
+}
+
 // ---- folding: a ramp the file shows deployed ------------------------------------------------------
 
 /**

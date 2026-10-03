@@ -19,6 +19,7 @@ export function MotionPanel({
   onActive,
   onChange,
   onFindWheels,
+  onFindRollers,
   onPlay,
 }: {
   /** this build has a deployable ramp (BIOBUZZ's `ramp` intake) */
@@ -32,6 +33,8 @@ export function MotionPanel({
   onActive: (i: number | null) => void;
   onChange: (next: MotionGroup[]) => void;
   onFindWheels: () => void;
+  /** look for intake rollers on the intake spans (absent: the build has none) */
+  onFindRollers?: () => void;
   onPlay: (on: boolean) => void;
 }) {
   // the measured part for each group (a group with no parts, or none it could fit, has none)
@@ -121,6 +124,11 @@ export function MotionPanel({
         <button type="button" className="ds-btn small" onClick={onFindWheels}>
           {hasWheels ? COPY.motionFindAgain : COPY.motionFindWheels}
         </button>
+        {onFindRollers ? (
+          <button type="button" className="ds-btn small" onClick={onFindRollers}>
+            {COPY.motionFindRollers}
+          </button>
+        ) : null}
         {roles.map((r) => (
           <button key={r} type="button" className="ds-btn ghost small" onClick={() => add(r)}>
             {COPY.motionAdd(r)}

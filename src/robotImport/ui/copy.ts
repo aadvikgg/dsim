@@ -213,6 +213,7 @@ export const COPY = {
   motionDeployBy: 'Deploys by',
   motionFindWheels: 'Find wheels',
   motionFindAgain: 'Find wheels again',
+  motionFindRollers: 'Find rollers',
   motionAdd: (role: MotionRole) => `Add ${(ROLE_NAME[role] ?? 'moving part').toLowerCase()}`,
   motionPlay: 'Play',
   motionStop: 'Stop',

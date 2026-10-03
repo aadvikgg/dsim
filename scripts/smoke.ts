@@ -35067,6 +35067,14 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
     !!rr && !!ramp && rr.parent === fm.motion!.indexOf(ramp) && rr.pivot[2] > 8 && Math.abs(rr.radius - 0.4) < 0.05,
     JSON.stringify(rr),
   );
+  const rollers = motion.findRollerGroups(folded.modelParts, [{ edge: 'front', from: -6, to: 6 }], new Set(found.flatMap((g) => g.bodies)));
+  const sameSet = (a: number[], b: number[]): boolean => JSON.stringify([...a].sort((x, y) => x - y)) === JSON.stringify([...b].sort((x, y) => x - y));
+  check(
+    'moving parts: findRollerGroups finds the front intake roller with its shaft, and the roller on the folded ramp, and nothing of the frame, the tower or the wheels',
+    rollers.length === 2 && rollers.some((g) => sameSet(g.bodies, [id('intake'), id('shaft')])) && rollers.some((g) => sameSet(g.bodies, [id('ramp_roller')])),
+    JSON.stringify(rollers),
+  );
+  check('moving parts: no intake span, no rollers looked for; a span on another edge finds none here', motion.findRollerGroups(folded.modelParts, [], new Set()).length === 0 && motion.findRollerGroups(folded.modelParts, [{ edge: 'back', from: -6, to: 6 }], new Set(found.flatMap((g) => g.bodies))).length === 0);
   const { oriented, modelParts } = geo.orientParts(parts, setup, { format: 'stl' });
   const same = geo.toModelFrame(parts, oriented.sourceToModel, oriented.folds);
   const bits = (a: Float32Array, b: Float32Array): boolean => a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
