@@ -1,3 +1,36 @@
+# HANDOFF — 2026-10-03b (2v2 is balanced on the 2v2 rating only)
+
+**State: on `main` (15798a41) and `alpha`; DEPLOYED 2026-10-03 to `dsim-alpha` and to PRODUCTION from `main` (2-minute announcement, all 8 machines on the new image).** `test:mm` (234), `npm test`, `dbtest`, `server:check`, `build`, `docaudit` pass. Server change, no migration.
+
+- **Owner:** "I think it is using 1v1 ranked ELO to balance out people in 2v2 or something. It is still weird."
+- **Confirmed** on production data (read-only): 59 of 216 player slots in Act 2's 2v2s were balanced mostly on a 1v1 rating, not the 2v2 rating on the card. Zeyad Gomaa lost four straight 2v2s (card 1000 → 763) and was still balanced as ~1000-1150 off a 1190 1v1. Over the 54 decided 2v2s the card predicted results better than the blend (log-loss 0.5659 vs 0.5929).
+- **Fix:** `skillOf` in `server/matchmaking.ts`: a 2v2 is balanced on the 2v2 rating, provisional from one game; no 2v2 game reads 1000 with the gate off. `getSkillRows` and the 1v1/earlier-act blend are gone.
+
+# HANDOFF — 2026-10-03b (BIOBUZZ 3D: the online "invisible bump" against walls)
+
+**State: on `alpha` (c91e709a); `dsim-alpha` DEPLOYED from it 2026-10-03 03:21Z (health ok, one machine). NOT on `main`, production not deployed (server + client change: `SIM_PATCH` 3).** `npm test` (5531), `build`, `server:check`, `docaudit`, `bundleaudit` pass. GUI checked offscreen in Electron: BIOBUZZ 3D Free Drive, driving into and along walls, no console errors.
+
+- **Owner:** "sometimes in online games, when I drive against the wall, there seems to be an invisible bump. It happens rarely."
+- **Where it is:** BIOBUZZ only. Online BIOBUZZ is always 3D; a real-`Room` probe at 66 ms found DECODE online clean (worst 0.29 in over 10 min of wall driving) and BIOBUZZ 3D (FULL) with reconcile snaps at walls up to ~1 in / 8°, one or two a minute.
+- **Cause:** the FULL client's 3D engine is built from a snapshot and never holds the room's contact state (warm starts, pair order). Copying the bodies' exact poses into it still parts from the room on tick one; copying Rapier's whole world is exact. Near a wall the difference was amplified by the wall square-up: a heading written after the solve, re-seated next tick, pushed back by the solver, alternating every tick (yaw 0 / −0.75 / 0 / −0.82 rad/s at 16°).
+- **Fix (`step3dImpl.ts` 6b/8a/8b, `physics.ts` `squareUpTurnsWalls`/`recordRobotContacts`, `predict.ts`):** the turn is handed to the solve as one tick of yaw rate. Gated `SIM_PATCH` 3; older replays run the old order (the old pins are checked under patch 2).
+- **Measured:** real `Room`, 3 × 120 s: wall corrections p99 0.12–0.25 → 0.02–0.04 in, worst heading 2.8° → 1.0°, over 0.25 in 7 → 1. `scripts/zz-bb3d-wall-rollback.ts` (12 seeds, `PATCH=2` for the old rule): over 0.1 in / 0.5° 101 → 58, worst 2.46 → 0.87 in.
+- **Not fixed:** a fast angled 3D wall IMPACT is sensitive on its own (5e-5 rad of heading → 0.65° within a second, 2D 0.014°), so a few degrees after a hard hit can still snap online. Tried and rejected: more solver iterations (open-field drift 6 in → 0.03 in, wall events unchanged), a fresh robot body on a divergent rewind (worse).
+- **Owner call:** the G402 3D chatter sweep (210 duels) has one shape (victim 2 in deep, −30°) that now grinds down the wall with a 1.17 s gap and bills TWICE under `BB_G402_REARM_S` 1.0 s; every other gap ≤ 0.47 s. Widen the window or accept it. Noted in `scripts/smoke-biobuzz/rules.ts`.
+- **Production:** needs `main` + a production Fly deploy; client and server must move together (a new client against an old server predicts the new rule against the old one).
+
+# HANDOFF — 2026-10-03 (ranked: new rating rules, 10/7 placement, BIOBUZZ Act 2 recalculation)
+
+**State: on `main` (550a955a) and `alpha`; DEPLOYED 2026-10-03 to `dsim-alpha` and to PRODUCTION from `main` (03:00Z, 2-minute announcement, all 8 machines on the new image). BIOBUZZ Act 2 RECALCULATED on production: the dry run reproduced all 1636 stored results of 764 matches (13 played after the export), the apply rewrote 252 boards, 252 snapshots and 1636 match rows and sent 252 notices; a re-check dry run changes nothing. Rehearsed first on `dsim-alpha` (dry run, apply, repeat apply).** `npm test`, `test:mm` (237), `dbtest`, `server:check`, `build`, `uiaudit`, `docaudit`, `bundleaudit` pass. Migration 0058. Rules in `docs/area/accounts.md` ("RULE SETS AND THE RECALCULATION").
+
+- **Owner:** BIOBUZZ 1v1 #1 was 5-0 at 1685 and nobody else could reach it; recalculate the season; "try many things", dry run first; then 10 games for 1v1, 7 for 2v2, rewrite old match records; new matches had been played since the dry run, so handle that.
+- **Measured:** the act's 751 matches exported read-only from production; a replay reproduced all 1608 results and 246 boards (rules switched 2026-09-27 21:25Z). 453 variants scored on online log-loss. Winner `team-2026-10-03` (RD ≤ 250, floor 200 → 60 over 20 games): 1v1 0.5500 → 0.5405. Dry-run board: catto_ 1483 #1 (24 g), Abova 1685 → 1491 (5 g, unranked until 10). Scratch tools in `scratch/recalc-*.ts` (gitignored).
+- **Built:** `RatingRules` sets + `matches.rating_rules` stamp + `match_participants.away/early` (0058); `server/ratingRecalc.ts` (validate as rated, then re-rate, under a lock, with backup + notices) and `POST /api/admin/rating-recalc`; per-mode placement `RANKED_PLACEMENT` (archived seasons keep 5); the `rating.recalculated` notice.
+- **Applies to every game:** the new rules rate DECODE and Chain Reaction matches from the deploy, and their live boards need 10/7 games. Only BIOBUZZ was recalculated; the other two can be with the same endpoint (dry run first).
+- **Live result:** 1v1 (10 games) catto_ 1522, Kylar 1429, solver 1383, aadvik 1373, Christian 1363; Abova 1720 → 1531 at 6 games, unranked until 10. 2v2 (7 games) solver 1231, fruitmaste 1227, Dohun Kim 1197. `rating_recalcs` row 1 holds the backup.
+- **Found rehearsing on alpha:** boards with games and no matches behind them (seeded by hand) are now KEPT as stored (`validation.kept`), not a refusal.
+- **Running it:** `curl -X POST "$GS/api/admin/rating-recalc?game=biobuzz&secret=…"` is the dry run; add `&apply=1` to apply. 409 = the log did not replay exactly; read `validation.problems`. To undo: `rating_recalcs.backup` holds every overwritten value.
+
 # HANDOFF — 2026-10-02f (robot import finished and on `alpha`: polish lane, hand loading, the kits measured)
 
 **State: everything on the 2026-10-02e list is done. `feat/robot-import` was fast-forwarded into `alpha` (`aa9ef5fb`, owner's go-ahead) and dsim-alpha redeployed from it (`/health` ok, one machine, alpha.playdsim.com serves `aa9ef5f`). Not on `main`.** `npm test` (both suites), `build`, `server:check`, `dbtest`, `test:workers`, `test:mm`, `uiaudit`, `docaudit`, `bundleaudit` pass; `shiftaudit`: the full run found one shift (`/configure/audio`, a fold body laid out mid-probe) that a re-run of that page did not reproduce; the seeded pass alone, twice, 476 states each, 0 shifts. Production would need the same server deploy with the client (sim, coercer, settings merge).

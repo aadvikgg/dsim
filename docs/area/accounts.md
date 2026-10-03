@@ -1,4 +1,4 @@
-<!-- governs: server/db/**, server/ranked.ts, server/matchmaking.ts, server/persist.ts, server/standing.ts, src/lib/**, src/standing.ts, src/awards.ts, src/badges.ts, src/rewards.ts, src/dodge.ts, src/report.ts, src/notices.ts, server/notices.ts, src/playtime.ts, src/ui/Leaderboard.tsx, src/ui/Admin.tsx -->
+<!-- governs: server/db/**, server/ranked.ts, server/ratingRecalc.ts, server/matchmaking.ts, server/persist.ts, server/standing.ts, src/lib/**, src/standing.ts, src/awards.ts, src/badges.ts, src/rewards.ts, src/dodge.ts, src/report.ts, src/notices.ts, server/notices.ts, src/playtime.ts, src/ui/Leaderboard.tsx, src/ui/Admin.tsx -->
 # Accounts, ranked, leaderboards, records, staff roles
 
 Glicko-2, per-game boards and periods, the badge rules, challenges and the party token, and the background ranked queue.
@@ -577,9 +577,11 @@ Glicko-2 with one game per rating period had three measured failures, and each f
 when a rating is READ or COMPUTED, never by rewriting stored rows:
 - **Placement luck.** RD fell below 180 by the end of placement and volatility NEVER moves
   with one-game periods (0.060 through 39 straight wins). `effectiveRd` holds RD at
-  `max(60, 250 − 9.5·games)` (gone by game 20) and grows it after 14 idle days, capped at
-  150. It reads `games` and `updated_at`, so an existing account is affected from its next
-  game. A streak rule was measured and REJECTED by the owner as exploitable; do not add one.
+  `max(60, 200 − 7·games)` (gone by game 20; it was `250 − 9.5·games` until 2026-10-03), never
+  rates above `RD_MAX` 250 (a new row is still SEEDED at 350 and read down), and grows it after
+  14 idle days, capped at 150. It reads `games` and `updated_at`, so an existing account is
+  affected from its next game. A streak rule was measured and REJECTED by the owner as
+  exploitable; do not add one.
 - **Margin.** `marginMultiplier`: ×0.8 for a one-point result up to ×1.5 at
   `DECISIVE_MARGIN` 0.30 of `|R−B|/(R+B)` — ONE number for every game (owner: 550–300 in
   BIOBUZZ is "massive"). The part above ×1 is scaled by `2·(1 − E_winner)` (538's damping,
@@ -597,23 +599,58 @@ when a rating is READ or COMPUTED, never by rewriting stored rows:
   rating.
 - **Matchmaking.** 1v1 keeps the span gate. A 2v2 is gated on the TEAMS: the best
   party-respecting split (`bestSplit`) must be within `|E_red − 0.5| ≤ 0.10`, widening every
-  3 s and unbounded at 6 s. `bestSplit` ALWAYS runs. A player placed on the 2v2 board is
-  balanced on that rating; an unplaced one on `QueueEntry.seed` (`skillFromRows`, one query,
-  `getSkillRows`): a mean of their 2v2 games so far, their 1v1 board and each mode's latest
-  earlier act, each board weighted `min(games, 5)` and an earlier act at half. No ranked games
-  in that game at all reads 1000 and turns the gate off. The 2v2 fill's tie-break span uses
-  the same numbers, so the four closest players are drawn together. A new entry sits out while
-  its rating read is in flight, up to 1.5 s. A premade anchor takes another premade before two
-  solos (a tie-break after latency).
-  ⚠️ **Until 2026-10-02 the seed was the placed 1v1 rating only.** Placing takes five games and
-  the 2v2 board starts empty every act, so most of the pool had no number: four players at
-  1240/1180/900/880 provisional read 1000 each and were staged 1240+1180 against 900+880, in
-  queue order, with no gate. Do not narrow the seed back to placed boards.
+  3 s and unbounded at 6 s. `bestSplit` ALWAYS runs, on the **2v2 RATING ONLY** — the number
+  on the intro card, provisional from one game (`skillOf`); a player with no 2v2 game reads 1000
+  and turns the gate off. The 2v2 fill's tie-break span uses the same numbers, so the four
+  closest players are drawn together. A new entry sits out while its rating read is in flight,
+  up to 1.5 s. A premade anchor takes another premade before two solos (a tie-break after
+  latency).
+  ⚠️ **No 1v1 rating, no earlier act.** 09-27 seeded an unplaced 2v2 player from their placed
+  1v1 rating and 10-02 blended the 1v1 board in; the owner found the splits weird (10-03), and
+  over BIOBUZZ Act 2's 54 decided 2v2s the card predicted results better than the blend
+  (log-loss 0.5659 vs 0.5929). One player lost four straight 2v2s (card 1000 → 763) and was
+  still balanced as ~1000-1150 off a 1190 1v1 rating. And before 10-02 a provisional 2v2 rating
+  was ignored altogether: four players at 1240/1180/900/880 read 1000 each and were staged
+  1240+1180 against 900+880 in queue order.
 - **`match_participants.premade`** (0056): true / false for a ranked row, NULL for custom and
   older rows. It exists to decide, at a future act rollover, whether premades need their own
   queue (owner, 2026-09-27: not now, the pool is too small).
 Tests: `npm test` (the ranked blocks in `scripts/smoke.ts`, incl. a real room reporting
 presence), `npm run test:mm`, `npm run dbtest` ("ranked review:").
+
+**RULE SETS AND THE RECALCULATION (2026-10-03, owner-approved).** BIOBUZZ Act 2's 1v1 #1 was
+5-0 at 1685 (RD ~200) over players with 30 games at ~1490: the 09-27 rules rated a new board at
+RD 350 with the full margin bonus, so its first win over a 1226 paid +413. Replayed over the
+act's 751 real matches (exported read-only, the replay reproduced all 1608 stored results and
+all 246 boards), 453 rule variants were scored on ONLINE log-loss (each match predicted from
+the ratings before it). The winner, `team-2026-10-03`, is RD ≤ 250 and the floor 200 → 60 over
+20 games; 1v1 log-loss 0.5500 → 0.5405 (better in 99.7% of bootstrap resamples). Rejected: a
+per-game cap (no gain), no margin bonus (worse), start RD ≤ 200 (worse), a ×2 margin (fits
+slightly better, but makes a blowout swing more). 2v2 (53 matches) read worse and is too small
+to decide on.
+- **`RatingRules`** (`server/ranked.ts`): `plain-2026-09-25`, `team-2026-09-27`,
+  `team-2026-10-03`; `RATING_RULES` is the live one. `matches.rating_rules` (0058) stamps the
+  set that rated each match; an unstamped row is dated by `ruleSetAt` (09-27 went live 21:25Z,
+  measured). **Add a set, never edit one**: a stamp pointing at edited numbers replays wrong.
+  0058 also stores `match_participants.away/early`, the absence the update was given.
+- **`server/ratingRecalc.ts`** + `POST /api/admin/rating-recalc?game=…[&apply=1]` (admin or
+  `ADMIN_SECRET`). Re-rates a game's CURRENT ACT in order under `RATING_RULES`. It replays the
+  log twice: AS RATED (each match under its own set, charges and refunds at their times, the
+  score each match was last rated on) — this must reproduce every stored before/after, board
+  and season snapshot, else it REFUSES (409) and lists where — then under the new rules from the
+  corrected scores. Inferred only where the rows are silent: a rated challenge (×1 margin) and,
+  for a 2v2 with no stored absence, a void (named by the one player whose rating moved) or a
+  forgiven share. A dry run is one REPEATABLE READ snapshot and writes nothing. An apply takes
+  SHARE ROW EXCLUSIVE on `elo_ratings`, `elo_history` and `match_participants` BEFORE reading
+  the log, so every match finished before it is in it and one finishing during it waits and rates
+  on top; it rewrites boards (never games), snapshots, every match's before/after and stamp,
+  stores the overwritten values in `rating_recalcs.backup`, and sends `rating.recalculated` to
+  each player whose rating moved, all in that one transaction. A second run is a no-op.
+- **Placement is per mode: 10 games for 1v1, 7 for 2v2** (`RANKED_PLACEMENT`, owner
+  2026-10-03), for the live board, the profile rank, the in-match "?" and the act podium.
+  Archived seasons keep 5 (`boardMinGames`, from each game's live season that day: DECODE 7,
+  Chain Reaction 5, BIOBUZZ 5) so a past board names who its awards named. `/api/elo` returns
+  the board's `minGames`. `PLACEMENT_GAMES` (5) is now the MATCHMAKER's trust threshold only.
 
 
 ---

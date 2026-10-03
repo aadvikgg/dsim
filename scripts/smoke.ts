@@ -409,7 +409,8 @@ import type { PendingMatch } from '../server/matchTypes';
 import {
   computeGlicko, glicko2Update, eloMode, RD_PROVISIONAL, type EloParticipant,
   marginMultiplier, effectiveRd, isPremade, MOV_MIN, MOV_MAX, DECISIVE_MARGIN, RD_FLOOR_MIN,
-  IDLE_RD_CAP, RD_MAX,
+  IDLE_RD_CAP, RD_MAX, RD_FLOOR_START, RATING_RULES, RULE_SETS, RULES_PLAIN_0925, RULES_TEAM_0927,
+  RULES_TEAM_1003, TEAM_0927_FROM, ruleSetAt,
 } from '../server/ranked';
 import { isReportReason, REPORT_REASONS } from '../src/report';
 import {
@@ -18771,7 +18772,9 @@ const recordDrive: CommandSource = (tick) => {
     d(mixedRd, 'n') < d(mixedRd, 'c') && d(mixedRd, 'c') < 0, `${d(mixedRd, 'n')} / ${d(mixedRd, 'c')}`);
 
   // CALIBRATION + IDLE RD
-  check('rd: a fresh board is held at 250 or more', effectiveRd(100, 0) === 250, `${effectiveRd(100, 0)}`);
+  check('rd: a fresh board is held at RD_FLOOR_START (200) or more', effectiveRd(100, 0) === RD_FLOOR_START && RD_FLOOR_START === 200,
+    `${effectiveRd(100, 0)}`);
+  check('rd: a new board seeded at 350 is RATED at RD_MAX (250)', effectiveRd(350, 0) === 250 && RD_MAX === 250, `${effectiveRd(350, 0)}`);
   check('rd: the floor is gone by game 20', effectiveRd(100, 20) === 100, `${effectiveRd(100, 20)}`);
   check('rd: and never below RD_FLOOR_MIN', effectiveRd(40, 500) === RD_FLOOR_MIN, `${effectiveRd(40, 500)}`);
   check('rd: no games count given ⇒ no floor (every older caller)', effectiveRd(70) === 70);
@@ -18779,7 +18782,7 @@ const recordDrive: CommandSource = (tick) => {
   const idle60 = effectiveRd(70, 100, 60);
   check('rd: two idle months loosen it, under the cap', idle60 > 70 && idle60 < IDLE_RD_CAP, idle60.toFixed(1));
   check('rd: a long absence stops at IDLE_RD_CAP', effectiveRd(70, 100, 5000) === IDLE_RD_CAP);
-  check('rd: idle growth never LOWERS a new account’s 350', effectiveRd(350, 0, 5000) === RD_MAX);
+  check('rd: idle growth never lifts an RD past RD_MAX', effectiveRd(350, 0, 5000) === RD_MAX);
   const early6 = computeGlicko(
     [P('a', 'red', 1200, { rating: { rating: 1200, rd: 90, vol: 0.06 }, games: 6 }), P('b', 'blue')],
     { red: 60, blue: 50 },
@@ -30057,6 +30060,14 @@ const IMP_STANDARD_PINS: Record<string, string> = {
   'chain teleop': 'rr=1281 2256841879:3095239556 3284001669:73183289 1872871630:404922659',
   'biobuzz auto': 'rr=991 4255951604:2662367511 660269574:1959277593 4168578138:2355650975',
   'biobuzz teleop': 'rr=991 1190480768:2589840997 1619190486:802938886 1865481434:3779862946',
+  'bb3d auto': 'rr=693 3060472950:2940359141 1030663276:691242207',
+  'bb3d teleop': 'rr=693 3798170826:4183526500 3022533868:2001194370',
+};
+// Re-pinned 2026-10-02 for `SIM_PATCH` 3: BIOBUZZ 3D takes the wall square-up inside its solve
+// (`sim3d/step3dImpl.ts` stage 6b), and these robots chase each other into the walls. The pins they
+// had before are kept below, and a world stepped under patch 2 must still land on them — which is
+// both the proof that the patch gate holds for old replays and that nothing else moved.
+const IMP_STANDARD_PINS_PATCH2: Record<string, string> = {
   'bb3d auto': 'rr=536 3017453969:3234063733 3359223633:3518342206',
   'bb3d teleop': 'rr=536 1542058217:1431457225 162820593:121201075',
 };
@@ -30066,8 +30077,10 @@ const IMP_STANDARD_SPECS: Partial<RobotSpec>[] = [
   { drivetrain: 'swerve', width: 16 },
   { drivetrain: 'xdrive', length: 13, width: 14 },
 ];
-function impStandardRun(g: GameId | 'bb3d', phase: 'auto' | 'teleop'): string {
+function impStandardRun(g: GameId | 'bb3d', phase: 'auto' | 'teleop', patch?: number): string {
   const { w, step: st } = impWorld(g, IMP_STANDARD_SPECS);
+  // a replay recorded under an older `SIM_PATCH` — hashed WITHOUT the field, so the pin is the world's
+  if (patch !== undefined) w.simPatch = patch;
   w.match.phase = phase;
   w.match.phaseTimeLeft = phase === 'auto' ? 30 : 25;
   const out: string[] = [];
@@ -30077,7 +30090,7 @@ function impStandardRun(g: GameId | 'bb3d', phase: 'auto' | 'teleop'): string {
     for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, impChase(w, i, t));
     st(w, 1 / 60, cmds);
     rr += w.rrContacts.length;
-    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(w))}`);
+    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(patch === undefined ? w : { ...w, simPatch: undefined }))}`);
   }
   return `rr=${rr} ${out.join(' ')}`;
 }
@@ -30087,6 +30100,11 @@ function impStandardCheck(g: GameId | 'bb3d'): void {
     const key = `${g} ${phase}`;
     const got = impStandardRun(g, phase);
     check(`imported robots: STANDARD robots step byte-identically — ${key} (worldHash + whole-world JSON, ${g === 'bb3d' ? 600 : 900} ticks)`, got === IMP_STANDARD_PINS[key], got);
+    const before = IMP_STANDARD_PINS_PATCH2[key];
+    if (before) {
+      const old = impStandardRun(g, phase, 2);
+      check(`imported robots: ...and under SIM_PATCH 2 (a replay recorded before the 3D wall square-up moved into the solve) the same scene still steps to its old pin — ${key}`, old === before, old);
+    }
   }
 }
 // one block per game, so the sharder can spread them
@@ -32552,8 +32570,11 @@ const L2_MECH_PINS: Record<string, string> = {
   decode: 'held=3611 2049313317:4014017715 2788731338:1360918128 1577943677:2318776227',
   chain: 'held=2913 280568408:432347152 3067491810:3978456955 2730570165:2501872899',
   biobuzz: 'held=1025 2762021873:2009800956 2776997930:279128570 4136908741:1973256459',
-  bb3d: 'held=907 4176744764:1760924406 112866128:1298346330',
+  bb3d: 'held=693 385226777:3749707125 2128002571:24819118',
 };
+// `bb3d` re-pinned 2026-10-02 for `SIM_PATCH` 3 (the 3D wall square-up inside the solve); the old
+// pin is the patch-2 run's, checked beside it — see `IMP_STANDARD_PINS_PATCH2`.
+const L2_MECH_PINS_PATCH2 = { bb3d: 'held=907 4176744764:1760924406 112866128:1298346330' };
 const L2_MECH_SPECS: Record<'decode' | 'chain' | 'biobuzz', Partial<RobotSpec>[]> = {
   decode: [
     { intake: 'sloped', canSort: true },
@@ -32610,7 +32631,7 @@ function l2MechCmd(w: World, i: number, tick: number): RobotCommand {
   };
 }
 
-function l2MechRun(g: GameId | 'bb3d', ticks: number): string {
+function l2MechRun(g: GameId | 'bb3d', ticks: number, patch?: number): string {
   const key = g === 'bb3d' ? 'biobuzz' : g;
   const mod = simModuleFor(key);
   const w = mod.createWorld(
@@ -32626,6 +32647,7 @@ function l2MechRun(g: GameId | 'bb3d', ticks: number): string {
     undefined,
     g === 'biobuzz' ? '2d' : g === 'bb3d' ? '3d' : undefined,
   );
+  if (patch !== undefined) w.simPatch = patch;
   w.match.phase = 'teleop';
   w.match.phaseTimeLeft = 90;
   const out: string[] = [];
@@ -32635,7 +32657,7 @@ function l2MechRun(g: GameId | 'bb3d', ticks: number): string {
     for (let i = 0; i < w.robots.length; i++) cmds.set(w.robots[i].id, l2MechCmd(w, i, t));
     mod.step(w, 1 / 60, cmds);
     for (const r of w.robots) held += r.hopper.length;
-    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(w))}`);
+    if ((t + 1) % 300 === 0) out.push(`${worldHash(w)}:${impFnv(JSON.stringify(patch === undefined ? w : { ...w, simPatch: undefined }))}`);
   }
   return `held=${held} ${out.join(' ')}`;
 }
@@ -32655,6 +32677,8 @@ function l2MechRun(g: GameId | 'bb3d', ticks: number): string {
   await initPhysics3d();
   const got = l2MechRun('bb3d', 600);
   check('imported mechanisms: STANDARD robots step byte-identically through every intake kind/launcher/Box Tube — biobuzz 3D (worldHash + whole-world JSON, 600 ticks)', got === L2_MECH_PINS.bb3d, got);
+  const old = l2MechRun('bb3d', 600, 2);
+  check('imported mechanisms: ...and under SIM_PATCH 2 the biobuzz 3D scene still steps to the pin it had before the wall square-up moved into the solve', old === L2_MECH_PINS_PATCH2.bb3d, old);
 }
 
 /** an 18 × 16 robot with its front corners chamfered: a hull no box describes */
@@ -35706,6 +35730,36 @@ function fxShoot(
 }
 
 /**
+ * RATING RULE SETS (2026-10-03) — ranked rates under `team-2026-10-03`; the two older sets are
+ * kept so `server/ratingRecalc.ts` can replay a match exactly as it was rated.
+ */
+{
+  const fresh = (userId: string, alliance: 'red' | 'blue', rating = 1000): EloParticipant =>
+    ({ userId, alliance, rating: { rating, rd: 350, vol: 0.06 }, games: 0 });
+  const opp = (userId: string, alliance: 'red' | 'blue', rating: number): EloParticipant =>
+    ({ userId, alliance, rating: { rating, rd: 80, vol: 0.06 }, games: 30 });
+  check('rules: ranked rates under team-2026-10-03', RATING_RULES === RULES_TEAM_1003 && RATING_RULES.id === 'team-2026-10-03');
+  check('rules: every set has its own id', new Set(RULE_SETS.map((r) => r.id)).size === RULE_SETS.length);
+  check('rules: a stamped match replays under its stamp', ruleSetAt('team-2026-10-03', 0) === RULES_TEAM_1003);
+  check('rules: an unstamped match before the 09-27 deploy was plain Glicko-2',
+    ruleSetAt(null, TEAM_0927_FROM - 1) === RULES_PLAIN_0925);
+  check('rules: ...and one after it the 09-27 team rules', ruleSetAt(null, TEAM_0927_FROM) === RULES_TEAM_0927);
+  check('rules: an unknown stamp falls back to the date', ruleSetAt('nope', TEAM_0927_FROM + 1) === RULES_TEAM_0927);
+  // a brand-new player's decisive first win over an established 1226 (BIOBUZZ Act 2's #1, 09-29)
+  const first = (rules = RATING_RULES) =>
+    computeGlicko([fresh('n', 'red'), opp('o', 'blue', 1226)], { red: 583, blue: 383 }, { mode: '1v1', rules }).find((u) => u.userId === 'n')!;
+  const was = first(RULES_TEAM_0927).after - 1000;
+  const now = first().after - 1000;
+  check('rules: the 09-27 rules paid that first win about +412', Math.abs(was - 412) <= 2, `+${was}`);
+  check('rules: today it pays well under that', now > 150 && now < 300, `+${now}`);
+  // the plain set is exactly the pre-09-27 update: each player against the opposing mean, stored RD
+  const plain = computeGlicko([opp('a', 'red', 1200), opp('b', 'blue', 1100)], { red: 550, blue: 300 }, { mode: '1v1', rules: RULES_PLAIN_0925 });
+  const direct = glicko2Update({ rating: 1200, rd: 80, vol: 0.06 }, 1100, 80, 1);
+  check('rules: plain-2026-09-25 is Glicko-2 at the stored RD, no margin',
+    Math.abs(plain.find((u) => u.userId === 'a')!.state.rating - direct.rating) < 1e-9);
+}
+
+/**
  * MODERATOR NOTICES (0057) — the words a player reads after a moderation outcome, and the one
  * rule that moves a rating: the refund after a corrected result.
  */
@@ -35745,6 +35799,7 @@ function fxShoot(
     'report.closed': { subject: '@ada', reasons: ['afk'] },
     penalty: { points: 25, scoreAfter: 50, cooldownMin: 1440, ratingCharge: 20, reasons: ['throwing', 'afk'], reporters: 3 },
     'standing.edited': { scoreBefore: 60, scoreAfter: 100, pardoned: 2, lock: 'cleared' },
+    'rating.recalculated': { mode: '1v1', before: 1685, after: 1491 },
   };
   for (const k of NOTICE_KINDS) {
     const v = view(k, samples[k] ?? {});
@@ -35754,6 +35809,10 @@ function fxShoot(
     check(`notices: ${k} follows the copy rules`, !/'/.test(text) && !/\bELO\b/i.test(text) && !/!/.test(text), text);
   }
   check('notices: an unknown kind (a newer server) is skipped, not drawn blank', view('something.new', {}) === null);
+  const recalc = view('rating.recalculated', samples['rating.recalculated'], 'biobuzz')!;
+  check('notices: a recalculation says the board, old → new, and the new placement',
+    recalc.lines[0] === 'Your 1v1 rating: 1685 → 1491.' && recalc.meta === 'Ranked 1v1 · BIOBUZZ' &&
+      recalc.lines.some((l) => l.includes('10 1v1 matches')), JSON.stringify(recalc));
   check('notices: a malformed correction is skipped rather than printing undefined', view('match.corrected', { alliance: 'red' }) === null);
 
   // ---- what each one actually says
