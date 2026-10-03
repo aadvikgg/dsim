@@ -16,9 +16,11 @@
  * with it. occt then places every piece's parts exactly where the whole file would have, because
  * the placements are all in the skeleton every piece carries.
  *
- * Also here: the checks made before any of that (is it STEP, is it complete) and the size filter
- * that leaves tiny fasteners out of a huge assembly.
+ * Also here: the checks made before any of that (is it STEP, is it complete), the size filter
+ * that leaves tiny fasteners out of a huge assembly, and the body colours occt cannot find in an
+ * assembly (`colourHint`).
  */
+import type { StepColourHint, StepLostBody } from './stepConvert';
 
 /** the bytes one piece may carry of geometry (its skeleton comes on top) */
 export const STEP_PIECE_BYTES = 12 * 1024 * 1024;
@@ -373,10 +375,14 @@ const isShapeRepName = (name: string): boolean => name.endsWith('SHAPE_REPRESENT
 export interface StepRoot {
   /** entity index of the representation item (a solid, a shell model, a curve set …) */
   entity: number;
+  /** entity index of the shape representation listing it */
+  rep: number;
   /** bytes of the item and everything it references */
   bytes: number;
   /** its bounding-box diagonal in millimetres (null when its unit is unknown or it was not measured) */
   sizeMm: number | null;
+  /** the `STYLED_ITEM` that colours it, or −1 */
+  style: number;
 }
 
 /** what a piece carries: a whole root, or ONE FACE of a root too big for a piece */
@@ -676,7 +682,7 @@ export function planPieces(ix: StepIndex, opts: PlanOptions = {}): StepPlan {
       const d = mm !== null ? rootDiagonal(ix, ents, sizeTypes) : null;
       sizeMm = mm !== null && d !== null ? d * mm : null;
     }
-    roots.push({ entity: e, bytes, sizeMm });
+    roots.push({ entity: e, rep: repOf[e], bytes, sizeMm, style: -1 });
   }
   const skipped: number[] = [];
   const units: StepUnit[] = [];
@@ -696,13 +702,18 @@ export function planPieces(ix: StepIndex, opts: PlanOptions = {}): StepPlan {
     carriers.set(k, split.carriers);
     for (const f of split.faces) units.push({ root: k, face: f, bytes: closure(ix, f, seen, ++stamp, null, stack) });
   });
-  // next fit, in file order: a solid's faces stay together, so the edges they share mostly do too
+  // next fit, in file order: a solid's faces stay together, so the edges they share mostly do too.
+  // A split solid's faces get pieces of their own: occt colours none of the shells it makes of them
+  // in an assembly, and a piece holding nothing else can give them all the solid's colour (`colourHint`)
   const pieces: number[][] = [];
   let fill = Infinity;
+  let holds = -2; // the split root whose faces the current piece holds, −1 for whole roots
   units.forEach((u, k) => {
-    if (fill + u.bytes > pieceBytes && fill > 0) {
+    const kind = u.face >= 0 ? u.root : -1;
+    if ((fill + u.bytes > pieceBytes && fill > 0) || kind !== holds) {
       pieces.push([]);
       fill = 0;
+      holds = kind;
     }
     pieces[pieces.length - 1].push(k);
     fill += u.bytes;
@@ -729,6 +740,20 @@ export function planPieces(ix: StepIndex, opts: PlanOptions = {}): StepPlan {
       ents.length = 0;
       closure(ix, t, seen, stamp, ents, stack);
       for (const x of ents) alwaysKeep[x] = 1;
+    }
+  }
+  // the styled item on each root, for the colours occt cannot find (`colourHint`)
+  const styledType = ix.typeNames.indexOf('STYLED_ITEM');
+  if (styledType >= 0) {
+    const ordOf = new Map<number, number>();
+    roots.forEach((r, k) => ordOf.set(r.entity, k));
+    for (const e of skeleton) {
+      if (ix.type[e] !== styledType) continue;
+      for (let r = ix.refStart[e]; r < ix.refStart[e + 1]; r++) {
+        if (ix.refFlags[r] & 1) continue;
+        const k = ordOf.get(ix.refs[r]);
+        if (k !== undefined && roots[k].style < 0) roots[k].style = e;
+      }
     }
   }
   // the styles on each split solid, and the presentation (MDGPR) listing each style
@@ -1014,4 +1039,140 @@ function rewriteWithout(ix: StepIndex, e: number, cut: Uint8Array): Uint8Array {
     i++;
   }
   return Uint8Array.from(out);
+}
+
+// ---- the colours occt cannot find ------------------------------------------------------------
+
+/** what occt meshes of a root: one mesh per solid (its faces, voids' included), then one per shell of a surface model */
+function bodyMeshes(ix: StepIndex, e: number): { solids: number[]; shells: number[] } | null {
+  const name = (x: number): string => ix.typeNames[ix.type[x]];
+  // the faces a shell lists (through an ORIENTED_CLOSED_SHELL('', *, #shell, .T.)), or −1
+  const shellFaces = (s: number): number => {
+    if (s < 0) return -1;
+    if (name(s) === 'ORIENTED_CLOSED_SHELL' || name(s) === 'ORIENTED_OPEN_SHELL') s = ix.refStart[s + 1] > ix.refStart[s] ? ix.refs[ix.refStart[s + 1] - 1] : -1;
+    if (s < 0 || (name(s) !== 'CLOSED_SHELL' && name(s) !== 'OPEN_SHELL')) return -1;
+    let n = 0;
+    for (let r = ix.refStart[s]; r < ix.refStart[s + 1]; r++) if (ix.refFlags[r] & 1) n++;
+    return n;
+  };
+  const t = name(e);
+  if (t === 'GEOMETRIC_CURVE_SET' || t === 'GEOMETRIC_SET') return { solids: [], shells: [] };
+  const solid = t === 'MANIFOLD_SOLID_BREP' || t === 'BREP_WITH_VOIDS' || t === 'FACETED_BREP';
+  if (!solid && t !== 'SHELL_BASED_SURFACE_MODEL') return null;
+  const counts: number[] = [];
+  for (let r = ix.refStart[e]; r < ix.refStart[e + 1]; r++) {
+    const n = shellFaces(ix.refs[r]);
+    if (n < 0) return null;
+    counts.push(n);
+  }
+  return solid ? { solids: [counts.reduce((s, n) => s + n, 0)], shells: [] } : { solids: [], shells: counts };
+}
+
+const PREDEFINED: Record<string, [number, number, number]> = {
+  red: [1, 0, 0],
+  green: [0, 1, 0],
+  blue: [0, 0, 1],
+  yellow: [1, 1, 0],
+  magenta: [1, 0, 1],
+  cyan: [0, 1, 1],
+  black: [0, 0, 0],
+  white: [1, 1, 1],
+};
+
+/** sRGB → linear as occt converts a `COLOUR_RGB` (`Quantity_Color`, which keeps floats) */
+const toLinear = (v: number): number => Math.fround(v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
+
+/** the colour a style gives a surface: under a surface style first, a fill before a rendering; linear */
+function styleColour(ix: StepIndex, e: number, depth = 0): [number, number, number] | null {
+  const t = ix.typeNames[ix.type[e]];
+  if (t === 'COLOUR_RGB') {
+    const m = /,\s*([-+.\dEe]+)\s*,\s*([-+.\dEe]+)\s*,\s*([-+.\dEe]+)\s*\)\s*;\s*$/.exec(entityText(ix, e));
+    if (!m) return null;
+    let rgb = [m[1], m[2], m[3]].map(Number);
+    if (rgb.some((v) => !Number.isFinite(v) || v < 0)) return null;
+    // occt scales a colour written 0..255 (any component over 1) by its largest
+    const top = Math.max(...rgb);
+    if (top > 1) rgb = rgb.map((v) => v / top);
+    return [toLinear(rgb[0]), toLinear(rgb[1]), toLinear(rgb[2])];
+  }
+  if (t === 'DRAUGHTING_PRE_DEFINED_COLOUR' || t === 'PRE_DEFINED_COLOUR') {
+    const m = /\(\s*'([^']*)'/.exec(entityText(ix, e));
+    const c = m ? PREDEFINED[m[1].trim().toLowerCase()] : undefined;
+    return c ? [c[0], c[1], c[2]] : null;
+  }
+  if (depth > 8) return null;
+  const rank = (x: number): number => {
+    const n = ix.typeNames[ix.type[x]];
+    return n === 'SURFACE_STYLE_USAGE' || n === 'SURFACE_STYLE_FILL_AREA' ? 0 : n === 'CURVE_STYLE' ? 2 : 1;
+  };
+  const refs: number[] = [];
+  // a styled item's target (its one reference outside a list) is not a style
+  for (let r = ix.refStart[e]; r < ix.refStart[e + 1]; r++) if (ix.refs[r] >= 0 && (depth > 0 || ix.refFlags[r] & 1)) refs.push(ix.refs[r]);
+  refs.sort((a, b) => rank(a) - rank(b));
+  for (const x of refs) {
+    const c = styleColour(ix, x, depth + 1);
+    if (c) return c;
+  }
+  return null;
+}
+
+/**
+ * The colours occt will not find in a read of `units` (`StepColourHint`, `stepConvert.ts`): every
+ * shape representation that makes a part of more than one body here gives its bodies' face counts
+ * and styled colours in list order, solids and shells as two runs; and a read of one split solid's
+ * faces and nothing else gives that solid's colour to every mesh occt leaves grey.
+ */
+export function colourHint(ix: StepIndex, plan: StepPlan, units: readonly number[]): StepColourHint {
+  const whole = new Map<number, number>(); // root entity → ordinal
+  const split = new Set<number>();
+  for (const u of units) {
+    const unit = plan.units[u];
+    if (unit.face < 0) whole.set(plan.roots[unit.root].entity, unit.root);
+    else split.add(unit.root);
+  }
+  const cache = new Map<number, [number, number, number] | null>();
+  const colour = (ord: number): [number, number, number] | null => {
+    const s = plan.roots[ord].style;
+    if (s < 0) return null;
+    if (!cache.has(s)) cache.set(s, styleColour(ix, s));
+    return cache.get(s)!;
+  };
+  const runs: StepLostBody[][] = [];
+  const reps = new Set<number>();
+  for (const ord of whole.values()) if (plan.roots[ord].rep >= 0) reps.add(plan.roots[ord].rep);
+  for (const rep of reps) {
+    const solids: StepLostBody[] = [];
+    const shells: StepLostBody[] = [];
+    const seen = new Set<number>();
+    let known = true;
+    for (let r = ix.refStart[rep]; r < ix.refStart[rep + 1] && known; r++) {
+      const ord = ix.refFlags[r] & 1 ? whole.get(ix.refs[r]) : undefined;
+      if (ord === undefined || seen.has(ord)) continue;
+      seen.add(ord);
+      const m = bodyMeshes(ix, plan.roots[ord].entity);
+      if (!m) known = false;
+      else {
+        const c = colour(ord);
+        for (const faces of m.solids) solids.push({ faces, color: c });
+        for (const faces of m.shells) shells.push({ faces, color: c });
+      }
+    }
+    // a part of ONE body is that body's shape, and occt finds its colour itself
+    if (!known || (seen.size < 2 && solids.length + shells.length < 2)) continue;
+    if (solids.length) runs.push(solids);
+    if (shells.length) runs.push(shells);
+  }
+  const fill = whole.size === 0 && split.size === 1 ? colour([...split][0]) : null;
+  return { runs, fill };
+}
+
+/** `colourHint` for a file read whole; null when the index cannot read it (occt still may) */
+export function wholeHint(bytes: Uint8Array): StepColourHint | null {
+  try {
+    const ix = indexStep(bytes);
+    const plan = planPieces(ix, { pieceBytes: Infinity });
+    return colourHint(ix, plan, plan.units.map((_, k) => k));
+  } catch {
+    return null;
+  }
 }

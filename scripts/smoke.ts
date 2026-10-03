@@ -32628,6 +32628,131 @@ function impPlayCheck(g: GameId): void {
   check('robot import (real CAD): the STEP, zip and 3MF worker code uses no DOM', domUsers.length === 0, domUsers.join(', '));
 }
 
+/**
+ * ROBOT IMPORT: THE STEP COLOURS occt CANNOT FIND (`docs/area/robot-import.md`, "Real CAD").
+ * occt-import-js looks a solid's colour up at its PLACED location, which finds it only when the
+ * solid is its part's whole shape: every body of a multi-body part placed in an assembly, and every
+ * shell of a solid split into faces, came back grey (a third of goBILDA's BIOBUZZ bot by area). The
+ * fixture's 10-body part placed twice in an assembly reproduces it; the reader's colour hint gives
+ * each body its own styled colour back, in a whole read, across pieces and from split solids.
+ */
+{
+  const split = await import('../src/robotImport/engine/stepSplit');
+  const conv = await import('../src/robotImport/engine/stepConvert');
+  const occtMod = (await import('occt-import-js')) as unknown as { default: (a: { locateFile: (f: string) => string }) => Promise<{ ReadStepFile: (b: Uint8Array, p: unknown) => unknown }> };
+  const occt = await occtMod.default({ locateFile: (f: string) => joinPath('node_modules', 'occt-import-js', 'dist', f) });
+  const fixture = readFileSync(joinPath('scripts', 'fixtures', 'robot-import', 'robot.step'), 'latin1').replace(/\r\n/g, '\n');
+  const idOf = (re: RegExp): string => re.exec(fixture)?.[1] ?? '?';
+  const pc = idOf(/#(\d+)=PRODUCT_CONTEXT\(/);
+  const pdc = idOf(/#(\d+)=PRODUCT_DEFINITION_CONTEXT\(/);
+  const pd = idOf(/#(\d+)=PRODUCT_DEFINITION\(/);
+  const [, rep, axis, ctx] = /#(\d+)=ADVANCED_BREP_SHAPE_REPRESENTATION\('',\(#(\d+),[^;]*,#(\d+)\);/.exec(fixture) ?? [];
+  // the robot part twice in an assembly: once turned a quarter about z, once moved
+  const asm = [
+    `#90001=PRODUCT('asm','asm','',(#${pc}));`,
+    "#90002=PRODUCT_DEFINITION_FORMATION('','',#90001);",
+    `#90003=PRODUCT_DEFINITION('design','',#90002,#${pdc});`,
+    "#90004=PRODUCT_DEFINITION_SHAPE('','',#90003);",
+    "#90005=DIRECTION('',(0.,0.,1.));",
+    "#90006=DIRECTION('',(0.,1.,0.));",
+    "#90007=DIRECTION('',(1.,0.,0.));",
+    "#90008=CARTESIAN_POINT('',(100.,20.,0.));",
+    "#90009=AXIS2_PLACEMENT_3D('',#90008,#90005,#90006);",
+    "#90010=CARTESIAN_POINT('',(-300.,0.,50.));",
+    "#90011=AXIS2_PLACEMENT_3D('',#90010,#90005,#90007);",
+    `#90012=SHAPE_REPRESENTATION('',(#90009,#90011),#${ctx});`,
+    '#90013=SHAPE_DEFINITION_REPRESENTATION(#90004,#90012);',
+    `#90020=NEXT_ASSEMBLY_USAGE_OCCURRENCE('a','a','',#90003,#${pd},$);`,
+    "#90021=PRODUCT_DEFINITION_SHAPE('','',#90020);",
+    `#90022=ITEM_DEFINED_TRANSFORMATION('','',#${axis},#90009);`,
+    `#90023=(REPRESENTATION_RELATIONSHIP('','',#${rep},#90012)REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#90022)SHAPE_REPRESENTATION_RELATIONSHIP());`,
+    '#90024=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#90023,#90021);',
+    `#90030=NEXT_ASSEMBLY_USAGE_OCCURRENCE('b','b','',#90003,#${pd},$);`,
+    "#90031=PRODUCT_DEFINITION_SHAPE('','',#90030);",
+    `#90032=ITEM_DEFINED_TRANSFORMATION('','',#${axis},#90011);`,
+    `#90033=(REPRESENTATION_RELATIONSHIP('','',#${rep},#90012)REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#90032)SHAPE_REPRESENTATION_RELATIONSHIP());`,
+    '#90034=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#90033,#90031);',
+  ];
+  const latin = (s: string): Uint8Array => Uint8Array.from(s, (c) => c.charCodeAt(0));
+  const fixBytes = latin(fixture);
+  const asmBytes = latin(fixture.replace(/ENDSEC;\s*END-ISO-10303-21;\s*$/, `${asm.join('\n')}\nENDSEC;\nEND-ISO-10303-21;\n`));
+  type Part = { positions: Float32Array; indices: Uint32Array; color: readonly number[]; body?: Uint32Array };
+  const read = (bytes: Uint8Array, hint?: ReturnType<typeof split.colourHint> | null): Part[] => {
+    const r = conv.stepToParts(occt.ReadStepFile(bytes, conv.STEP_PIECE_PARAMS) as never, hint);
+    if (r.kind !== 'done') throw new Error(r.message);
+    return r.parts;
+  };
+  /** triangles per EXACT colour */
+  const perColour = (parts: readonly Part[]): Map<string, number> => {
+    const m = new Map<string, number>();
+    for (const p of parts) m.set(p.color.join(','), (m.get(p.color.join(',')) ?? 0) + p.indices.length / 3);
+    return m;
+  };
+  const same = (a: Map<string, number>, b: Map<string, number>): boolean => a.size === b.size && [...a].every(([c, n]) => b.get(c) === n);
+  const show = (m: Map<string, number>): string => [...m].map(([c, n]) => `${c.split(',').map((v) => Math.round(Number(v) * 255)).join('/')}:${n}`).join(' ');
+  const twice = (m: Map<string, number>): Map<string, number> => new Map([...m].map(([c, n]) => [c, 2 * n]));
+  const grey = '0.48,0.5,0.52';
+  // what occt finds itself, the part at the top level
+  const native = perColour(read(fixBytes));
+  const plain = perColour(read(asmBytes));
+  const hinted = perColour(read(asmBytes, split.wholeHint(asmBytes)));
+  check(
+    'robot import (STEP colours): a 10-body part placed twice in an assembly reads all grey from occt (the bug), and the hint gives every body its own colour back, bit for bit what occt gives the part at the top level',
+    native.size === 6 && plain.size === 1 && plain.get(grey) === 720 && same(hinted, twice(native)),
+    `${show(plain)} | ${show(hinted)}`,
+  );
+
+  const ix = split.indexStep(asmBytes);
+  const inPieces = (bytes: Uint8Array, pieceBytes: number, minPartMm = 0, hint = true): { plan: ReturnType<typeof split.planPieces>; colours: Map<string, number> } => {
+    const pix = bytes === asmBytes ? ix : split.indexStep(bytes);
+    const plan = split.planPieces(pix, { pieceBytes, minPartMm });
+    const parts: Part[] = [];
+    for (let k = 0; k < plan.pieces.length; k++) parts.push(...read(split.pieceText(pix, plan, k), hint ? split.colourHint(pix, plan, plan.pieces[k]) : null));
+    return { plan, colours: perColour(parts) };
+  };
+  const byRoot = inPieces(asmBytes, 40 * 1024);
+  const byFace = inPieces(asmBytes, 8 * 1024);
+  const facesAlone = byFace.plan.pieces.every((p) => new Set(p.map((u) => (byFace.plan.units[u].face >= 0 ? byFace.plan.units[u].root : -1))).size === 1);
+  check(
+    'robot import (STEP colours): the part’s body list CUT across pieces keeps every body’s colour, and so does every solid split into faces (a split solid’s faces get pieces of their own)',
+    same(byRoot.colours, twice(native)) && same(byFace.colours, twice(native)) && byRoot.plan.pieces.length > 1 && byRoot.plan.carriers.size === 0 && byFace.plan.carriers.size === 10 && facesAlone,
+    `${show(byRoot.colours)} | ${show(byFace.colours)}`,
+  );
+  // the size filter cuts the list too (the four wheels and the flag go at 200 mm)
+  const sized = inPieces(asmBytes, 1 << 30, 200);
+  const sizedTop = inPieces(fixBytes, 1 << 30, 200, false);
+  check(
+    'robot import (STEP colours): a body list cut by the part-size filter keeps the colours of the bodies it keeps',
+    sized.plan.skipped.length === 5 && sizedTop.plan.skipped.length === 5 && same(sized.colours, twice(sizedTop.colours)) && !sized.colours.has(grey),
+    `${show(sized.colours)} | ${show(sizedTop.colours)}`,
+  );
+
+  // colours that already worked: the same parts, bit for bit
+  const res = occt.ReadStepFile(fixBytes, conv.STEP_PIECE_PARAMS) as never;
+  const before = conv.stepToParts(res);
+  const after = conv.stepToParts(res, split.wholeHint(fixBytes));
+  const bits = (a: ArrayBufferView | undefined, b: ArrayBufferView | undefined): boolean =>
+    !!a && !!b && a.byteLength === b.byteLength && Buffer.compare(Buffer.from(a.buffer, a.byteOffset, a.byteLength), Buffer.from(b.buffer, b.byteOffset, b.byteLength)) === 0;
+  check(
+    'robot import (STEP colours): a file whose colours occt finds reads exactly as before with the hint (parts, colours and body ids, bit for bit)',
+    before.kind === 'done' && after.kind === 'done' && before.parts.length === after.parts.length &&
+      before.parts.every((p, i) => p.color.join() === after.parts[i].color.join() && bits(p.positions, after.parts[i].positions) && bits(p.indices, after.parts[i].indices) && bits(p.body, after.parts[i].body)),
+  );
+
+  // the matcher: never a guess
+  const mesh = (faces: number, name = '', color?: [number, number, number]) => ({ name, color, brep_faces: Array.from({ length: faces }, () => ({ first: 0, last: -1, color: null })), attributes: { position: { array: [] } }, index: { array: [] } });
+  const red: [number, number, number] = [1, 0, 0];
+  const blue: [number, number, number] = [0, 0, 1];
+  const body = (faces: number, color: [number, number, number] | null) => ({ faces, color });
+  const twins = conv.lostColours([mesh(6), mesh(6)] as never, { runs: [[body(6, red), body(6, red)], [body(6, blue), body(6, blue)]], fill: null });
+  const agree = conv.lostColours([mesh(6), mesh(6)] as never, { runs: [[body(6, red), body(6, red)], [body(6, red), body(6, red)]], fill: null });
+  const mixed = conv.lostColours([mesh(6), mesh(18), mesh(6, 'part', [0, 1, 0]), mesh(6), mesh(18), mesh(12)] as never, { runs: [[body(6, red), body(18, blue)]], fill: null });
+  check(
+    'robot import (STEP colours): two parts with the same face counts and different colours stay grey, never guessed; a named or coloured mesh is never touched; a mesh nothing explains stays grey',
+    twins.every((c) => c === null) && agree.every((c) => c === red) && mixed[0] === red && mixed[1] === blue && mixed[2] === null && mixed[3] === red && mixed[4] === blue && mixed[5] === null,
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // IMPORTED ROBOTS: MECHANISMS (`src/sim/importedMech.ts`, each game's `importMech.ts` /
 // `importChecks.ts`; `docs/area/physics.md` "Imported robots: mechanisms"). Mouths carved from the

@@ -264,6 +264,22 @@ REV's is CC BY-NC-SA); `scripts/robot-import/realcadprobe.cjs` drives the real e
   into its FACES (goBILDA's 99 MB gearbox body has 3,520): the solid and its shell come along as an
   open shell listing the piece's faces (`openUp`), and each face gets a copy of the solid's style,
   because occt heals a shell whose faces do not touch into new shells the colour no longer finds.
+  A split solid's faces get pieces of their own (see the colours below).
+- ⚠️ **occt does not find a body's colour when the body is not its part's whole shape.**
+  occt-import-js looks each solid up at its PLACED location, and that finds only a part made of one
+  solid. Every body of a multi-body part placed in an assembly, and every shell occt makes of a split
+  solid's faces, came back nameless and grey, in a whole read as in pieces, and the face style copies
+  do not help there. Cutting a body list (the size filter, a piece boundary) has nothing to do with
+  it: the whole 13-body part reads grey too. Measured: 31 % of goBILDA's BIOBUZZ bot by area (every
+  black wheel, the intake rollers), 11 % of REV's. So every occt read gets a colour hint
+  (`colourHint`, `wholeHint`; `lostColours` in `stepConvert.ts`): for each multi-body part, its
+  bodies' face counts and styled colours in list order (occt meshes a part's solids in that order,
+  then its shells, once per placement), and for a piece of one split solid's faces, that solid's
+  colour for every mesh left grey. A grey mesh takes a colour only when every best match of the face
+  counts gives it the same one, so two parts with the same counts and different colours stay grey.
+  A mesh occt named or coloured is never touched, and the colour is converted to linear as occt
+  does it (bit for bit). After, both kits read 0 % grey; BIOBUZZ 38 → 45 pieces, REV 11 → 13, read
+  time the same within noise (Node, three occt threads: 173 → 160 s and 67 → 69 s).
 - **Pieces mesh at an ABSOLUTE 0.5 mm and 0.5 rad** (`STEP_PIECE_PARAMS`): a bounding-box ratio is
   per top-level shape, and a piece's is a share of the robot. Meshing is not the cost: 2 mm and 1 rad
   cut a 24 MB piece's 29.3 s to 27.4 s. occt reads about 1 MB of STEP a second.
@@ -382,7 +398,7 @@ sampled, offscreen renders under the match's lighting):
   perforated plates come through, and nothing of the quantisation shows. goBILDA's mecanum rollers
   are still faceted at 250k.
 - **Not worth it (measured):** finer STEP tessellation (0.25 rad: twice the triangles in, the same
-  error out), another crease angle (40° holds), the 48-colour cap (both kits have 12).
+  error out), another crease angle (40° holds), the 48-colour cap (the kits have 12 and 13).
 
 ## Practice tuning
 
@@ -569,7 +585,9 @@ pattern, or `import` reads as a section name). Four steps: Model, Drivetrain, Me
   the 3MF small DOM against Chromium's DOMParser (hashes measured in `harness/main.ts`, which parses
   the fixture and `threeMfSample.ts` with both), the glTF merge as it reads and the consumed
   simplification against the old outputs bit for bit, the front in 24 orientations, and the editor's
-  Assumed note. `scripts/robot-import/realcadprobe.cjs --files <paths> --out <dir>` imports real
+  Assumed note. The `robot import (STEP colours)` block places the fixture's 10-body part twice in an
+  assembly (occt reads it all grey) and holds the hint to occt's own colours, whole, in pieces, split
+  into faces and cut by the size filter. `scripts/robot-import/realcadprobe.cjs --files <paths> --out <dir>` imports real
   files through the production editor in an offscreen Electron window, one at a time (timeline,
   long tasks, renderer and total memory, what the Model step says, pictures, Save and the saved
   descriptor, the stored mesh, a test drive). It needs a STEP or zip on disk: the vendors' files are
