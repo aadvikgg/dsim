@@ -325,6 +325,9 @@ Contract: `docs/robot-import-plan.md` §3.1 and §4.
   0.05 in² are dropped BEFORE either solve or the pin test sees them. An import shaped like the
   standard footprint carves exactly the standard solids, and smoke pins that for every DECODE
   preset and the BIOBUZZ/Chain end mounts.
+- DECODE with NO intake (`intake: 'none'`, hand loaded): no mouth is resolved, the whole hull is
+  chassis (`decodeImportSolids`), and the held slots run along the robot's centreline behind the
+  hull's front there (`decodeImportHeldSlot`). See `docs/area/decode.md`, "NO INTAKE".
 - DECODE: a launch height under `4R + 0.5` is raised to it (`DECODE_IMPORT_LAUNCH_MIN`): flight
   artifacts under `4R` run through the robot contact pass, so a lower shot would be pushed out of
   its own hull on the release tick.

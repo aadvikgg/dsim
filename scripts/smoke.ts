@@ -29704,6 +29704,33 @@ const dumperSetup = (): RobotSetup => {
   const rewritten = { ...older(bbFixed), spec: { ...strip(bbFixed.spec), bbMech: { launcher: { kind: 'turret', mount: 'front', hoodDeg: 77 }, lift: null } } };
   check('settings keep: (limit) a BIOBUZZ fixed launcher an older build turned into a turret is a changed robot, and is not re-attached',
     (bbFixed.spec?.bbMech as { launcher?: { kind?: string } }).launcher?.kind === 'fixed' && !isImportedSpec((keepImportsFromOlderClient(bbFixed, rewritten) as Blob).spec));
+
+  // A STANDARD DECODE robot with what an older build cannot read: the kit card (NO intake, a fixed
+  // launcher, a setpoint wheel). Alpha's coercer, measured 2026-10-02, sends it back as the sloped
+  // preset (length clamped to 15, width raised to 14.5) without the three shooter fields.
+  const kitSpec = coerceSpec({ ...DEFAULT_SPEC, name: 'Kit', intake: 'none', length: 16.5, width: 14, drivetrain: 'tank', driveRpm: 286, launcher: 'fixed', hoodDeg: 70, flywheel: { mode: 'fixed', rpm: [2411], wheelMm: 96, feedS: 0.2 } });
+  const kitSt = json({ ...coerceSettings({ game: 'decode' }), spec: kitSpec });
+  const olderKit = (b: Blob): Blob => {
+    const o = json(b);
+    const sp = strip(o.spec);
+    if (sp.intake === 'none') Object.assign(sp, { intake: 'sloped', length: Math.min(sp.length as number, 15), width: Math.max(sp.width as number, 14.5) });
+    o.spec = sp;
+    return o;
+  };
+  const kitSent = olderKit(kitSt);
+  const kitKept = keepImportsFromOlderClient(kitSt, kitSent) as Blob;
+  check('settings keep: a standard DECODE robot with no intake and a fixed launcher, saved unchanged by an older build, is kept whole',
+    kitSpec.intake === 'none' && kitSent.spec?.intake === 'sloped' && kitSent.spec?.length === 15 && kitSent.spec?.width === 14.5 &&
+      JSON.stringify(kitKept.spec) === JSON.stringify(kitSt.spec) && kitKept.lastStandardSpec === undefined,
+    JSON.stringify({ sent: [kitSent.spec?.intake, kitSent.spec?.length, kitSent.spec?.width], kept: [kitKept.spec?.intake, kitKept.spec?.launcher] }),
+  );
+  check('settings keep: ...but a slider moved on the older build is a change, and the sloped robot it sent stands',
+    (keepImportsFromOlderClient(kitSt, { ...kitSent, spec: { ...kitSent.spec, driveRpm: 300 } }) as Blob).spec?.intake === 'sloped');
+  const fxSt = json({ ...coerceSettings({ game: 'decode' }), spec: coerceSpec({ ...DEFAULT_SPEC, launcher: 'fixed', hoodDeg: 60 }) });
+  check('settings keep: a fixed hood on a standard robot (an intake kept) survives an older build\'s unchanged save',
+    (keepImportsFromOlderClient(fxSt, olderKit(fxSt)) as Blob).spec?.hoodDeg === 60);
+  check('settings keep: a plain standard robot still changes nothing (the incoming blob is returned as is)',
+    keepImportsFromOlderClient(plain, olderKit(plain)) !== undefined && (() => { const s2 = olderKit(plain); return keepImportsFromOlderClient(plain, s2) === s2; })());
 }
 
 /**
@@ -35264,6 +35291,11 @@ function fxShoot(
     JSON.stringify({ dt: k.drivetrain, rpm: k.driveRpm, m: k.massLb }),
   );
   check('StarterBot (DECODE): it is the LAST card, so the default build is still the first', ROBOT_PRESETS[ROBOT_PRESETS.length - 1].name === 'StarterBot' && ROBOT_PRESETS[0].name === 'TW');
+  check(
+    'StarterBot (DECODE): NO intake, as the kit has none (the human player loads it), on its 17-in frame, a fixed point of the coercer',
+    k.intake === 'none' && k.length === 17 && JSON.stringify(coerceSpec(k)) === JSON.stringify(coerceSpec(coerceSpec(k))) && coerceSpec(k).intake === 'none' && coerceSpec(k).length === 17,
+    JSON.stringify({ intake: k.intake, length: k.length }),
+  );
 }
 
 // ---- where it scores from ---------------------------------------------------------------------

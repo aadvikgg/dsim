@@ -1955,8 +1955,19 @@ export const DECODE_HOOD_MAX_DEG = 80;
 /** the hood an adjustable-speed-only solve falls back to when no angle reaches the goal: the
  * maximum-range throw, so the shot falls honestly short. */
 export const DECODE_HOOD_FALLBACK_DEG = 45;
-/** the DECODE kit robot's hood. Not published; APPROX, chosen with `FLY_EXIT_EFFICIENCY` so its
- * against-the-goal autonomous shot scores (the kit's own documented auto). */
+/**
+ * the DECODE kit robot's hood, as the sim flies it: an EFFECTIVE angle, chosen with
+ * `FLY_EXIT_EFFICIENCY` so its against-the-goal autonomous shot scores (the kit's own documented
+ * auto).
+ *
+ * MEASURED ON THE KIT'S CAD (2026-10-02, the mecanum variant's STEP, whose launcher the skid-steer
+ * kit shares part for part): the two polycarbonate ramps end in a straight vertical run bolted flat
+ * to a U-channel, so the artifact leaves the guide at **90° ±2°**, 13.0 in up, near the robot's
+ * launcher end. A 90° arc has no horizontal travel; what carries the real artifact over the goal
+ * face is the spin of the one-sided pinch (the wheel on one side, the ramp on the other), which
+ * curves it toward the launcher end. The flight stage has no spin, so the kit flies the no-spin
+ * arc that lands where the real one does instead of the guide's angle.
+ */
 export const DECODE_KIT_HOOD_DEG = 70;
 /** a FIXED launcher with aim assist releases a held fire only once the chassis is within this of
  * the aim heading (rad, ~3.4°: the 11-in opening seen from ~6 ft). */
@@ -3072,20 +3083,25 @@ export const ROBOT_PRESETS: readonly RobotSpec[] = [
    *    2411 rpm, at any range ⇒ flywheel `fixed` [2411], 96 mm. The feeder (two continuous
    *    servos) runs FEED_TIME 0.20 s a shot, and only above LAUNCHER_MIN_VELOCITY 1075
    *    (`FLY_FEED_MIN_FRAC`).
-   *  · hood: fixed polycarbonate ramps, angle not published ⇒ `DECODE_KIT_HOOD_DEG` (APPROX,
-   *    calibrated with `FLY_EXIT_EFFICIENCY` so the kit's own autonomous — start against the goal,
-   *    fire three — scores).
+   *  · hood: fixed polycarbonate ramps; the guide exits at 90° (measured on the CAD), flown at the
+   *    effective `DECODE_KIT_HOOD_DEG` (see there: the flight stage has no spin).
+   *  · INTAKE: none — the human player loads it by hand in the LOADING ZONE (`intake: 'none'`,
+   *    `handLoad`, G432). The launcher end is the robot's front: its autonomous starts with that
+   *    end against the goal.
+   *  · frame 17.0 in long (measured on the CAD).
    *  · hopper 3 (`HOPPER_CAPACITY`, the same).
    * WHERE THE SIM CANNOT FOLLOW IT, each a clamp rather than a choice:
    *  · MASS: the kit is 13.5 lb with its hub; DECODE's tank floor is 22 (`DRIVETRAIN_LIMITS`), so
    *    the card sits ON the floor, with `flywheelInertia` 0 to keep it there.
-   *  · INTAKE: the kit has none — the human player loads it by hand in the LOADING ZONE — and DSIM
-   *    has no hand loading yet, so the card carries the `sloped` intake, the one whose length
-   *    ceiling (15) is nearest the kit's frame. Width 16 is APPROX (no published overall width).
+   *  · RELEASE POINT: a standard fixed launcher releases at the turret's point (a sixth of the
+   *    length behind the centre, `LAUNCH_HEIGHT` 12 in); the kit's is 13.0 in up and 3.2 in behind
+   *    its front. The effective hood is calibrated from the sim's point.
+   *  · Width 16 is APPROX (the skid-steer's CAD file is cut off at the source; the mecanum
+   *    variant's 17.8 in is across its wider wheels).
    */
   {
     name: 'StarterBot', teamName: 'Kit robot · tank', teamNumber: 0,
-    length: 15, width: 16, intake: 'sloped', massLb: 22, drivetrain: 'tank',
+    length: 17, width: 16, intake: 'none', massLb: 22, drivetrain: 'tank',
     driveRpm: 286, flywheelInertia: 0, canSort: false, assists: PRESET_ASSISTS,
     launcher: 'fixed', hoodDeg: DECODE_KIT_HOOD_DEG,
     flywheel: { mode: 'fixed', rpm: [2411], wheelMm: 96, feedS: 0.2 },

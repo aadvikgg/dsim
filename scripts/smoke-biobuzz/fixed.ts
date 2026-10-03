@@ -13,11 +13,12 @@ import {
   BB_FIXED_HOOD_DEFAULT_DEG,
   BB_FIXED_HOOD_MAX_DEG,
   BB_FIXED_HOOD_MIN_DEG,
+  BB_HALF_Y,
   bbMassLimits,
 } from '../../src/games/biobuzz/config';
 import { bbCarriesNectar, bbLauncherOf, bbSpansEdge } from '../../src/games/biobuzz/mechs';
 import { bbFixedBand, bbFixedShotEnters, bbPretendHive } from '../../src/games/biobuzz/play';
-import { bbFixedRelease } from '../../src/games/biobuzz/robot';
+import { bbFixedRelease, bbFootprint } from '../../src/games/biobuzz/robot';
 import { BB_STARTER_BOTS, bbSpecMatches } from '../../src/games/biobuzz/presets';
 import { BIOBUZZ_BOT } from '../../src/games/biobuzz/ai';
 import { flyExitSpeed } from '../../src/sim/flywheel';
@@ -127,6 +128,9 @@ const KIT: Partial<RobotSpec> = {
   bbMech: { launcher: { kind: 'fixed', mount: 'front', hoodDeg: BB_FIXED_HOOD_DEFAULT_DEG }, lift: null, intake: { kind: 'sweeper' } },
   flywheel: { ...BB_FIXED_FLY_DEFAULT, rpm: [...BB_FIXED_FLY_DEFAULT.rpm] },
 };
+/** the same launcher on a steeper hood (77°, the angle the card used before the CAD was measured):
+ *  its band has a far edge on the field, so "long of the band" is a pose a robot can be in */
+const STEEP: Partial<RobotSpec> = { ...KIT, bbMech: { ...KIT.bbMech!, launcher: { kind: 'fixed', mount: 'front', hoodDeg: 77 } } };
 
 /** a parked shot: robot 0 on the north cell's mouth axis `d` in out, `yawErr` off facing it, fire
  * held for four seconds. Counts hive ENTRIES (a tip spills a cell, so a final count would lie). */
@@ -202,7 +206,11 @@ export function fixedChecks(check: Check): void {
   {
     const card = BB_STARTER_BOTS[0];
     const l = bbLauncherOf(card, 0);
-    check('StarterBot: a FIXED front launcher, not a dumper', l.kind === 'fixed' && l.mount === 'front', J(l));
+    check('StarterBot: a FIXED launcher at the BACK (the end opposite its front sweeper), at the CAD’s 68°, not a dumper',
+      l.kind === 'fixed' && l.mount === 'back' && l.hoodDeg === 68 && BB_FIXED_HOOD_DEFAULT_DEG === 68 && card.intakeMount === 'front', J(l));
+    const cardBand = bbFixedBand(card);
+    check('StarterBot: it scores facing away, from a band that reaches the wall behind it (its autonomous shoots from against a wall)',
+      !!cardBand && cardBand[1] - cardBand[0] >= 4 && hiveCellTarget('blue', 'north').pos.y + cardBand[1] + 1 + bbFootprint(card).front > BB_HALF_Y, J(cardBand));
     check(
       'StarterBot: the kit setpoint, 1250 ticks/s at 28 PPR = 2679 rpm, on one 96-mm wheel',
       card.flywheel?.mode === 'fixed' && card.flywheel.rpm[0] === Math.round((1250 / 28) * 60) && card.flywheel.wheelMm === 96,
@@ -217,37 +225,49 @@ export function fixedChecks(check: Check): void {
 
   // ---- where it scores from ---------------------------------------------------------------------
   const kit = bbCoerce(KIT);
-  const band = bbFixedBand(kit);
+  const kitBand = bbFixedBand(kit);
+  const band = bbFixedBand(bbCoerce(STEEP));
   check(
-    'fixed: the kit robot scores from a band with both edges on the field (robot centre to cell centre, on the mouth axis)',
-    band !== null && band[1] - band[0] >= 10 && band[1] + 4 + hiveCellTarget('blue', 'north').pos.y + 7.5 <= 72,
-    J(band),
+    'fixed: the kit launcher (68°) scores from a band that starts on the field and runs to the wall (robot centre to cell centre, on the mouth axis)',
+    kitBand !== null && kitBand[1] - kitBand[0] >= 4 && kitBand[1] + 1 + hiveCellTarget('blue', 'north').pos.y + bbFootprint(kit).rear > BB_HALF_Y,
+    J(kitBand),
   );
+  check(
+    'fixed: on a steeper hood (77°) the band has both edges on the field, nearer the cell',
+    band !== null && band[1] - band[0] >= 10 && band[1] + 4 + hiveCellTarget('blue', 'north').pos.y + 7.5 <= 72 && !!kitBand && band[0] < kitBand[0],
+    J({ band, kitBand }),
+  );
+  if (kitBand) {
+    const kmid = Math.round((kitBand[0] + kitBand[1]) / 2);
+    const kitIn = parkedShot('2d', KIT, kmid);
+    check(`fixed: the kit launcher parked IN its band (${kmid} in), facing the cell, scores every element`, kitIn.fired === 4 && kitIn.scored === 4, J(kitIn));
+  }
   if (band) {
+    // the band's two edges, on the steeper hood (the kit's far edge is the wall)
     const mid = Math.round((band[0] + band[1]) / 2);
-    const inBand = parkedShot('2d', KIT, mid);
+    const inBand = parkedShot('2d', STEEP, mid);
     check(`fixed: parked IN its band (${mid} in), facing the cell, every element scores`, inBand.fired === 4 && inBand.scored === 4, J(inBand));
-    const shortAssist = parkedShot('2d', KIT, band[0] - 8);
+    const shortAssist = parkedShot('2d', STEEP, band[0] - 8);
     check('fixed: SHORT of the band, aim assist releases nothing (the arc would not land)', shortAssist.fired === 0, J(shortAssist));
-    const shortManual = parkedShot('2d', KIT, band[0] - 8, { assist: false });
+    const shortManual = parkedShot('2d', STEEP, band[0] - 8, { assist: false });
     check('fixed: …and with aim assist off the shot leaves and misses', shortManual.fired > 0 && shortManual.scored === 0, J(shortManual));
-    const longManual = parkedShot('2d', KIT, band[1] + 4, { assist: false });
+    const longManual = parkedShot('2d', STEEP, band[1] + 4, { assist: false });
     check('fixed: LONG of the band, the same: it leaves and misses', longManual.fired > 0 && longManual.scored === 0, J(longManual));
-    const offManual = parkedShot('2d', KIT, mid, { assist: false, yawErr: 0.4 });
+    const offManual = parkedShot('2d', STEEP, mid, { assist: false, yawErr: 0.4 });
     check('fixed: in the band but facing 23° off, a manual shot misses — the launcher does not aim', offManual.fired > 0 && offManual.scored === 0, J(offManual));
-    const turned = parkedShot('2d', KIT, mid, { yawErr: 0.6, ticks: 300 });
+    const turned = parkedShot('2d', STEEP, mid, { yawErr: 0.6, ticks: 300 });
     check(
       'fixed: with aim assist, holding fire turns the CHASSIS (a tank, through its side drives) onto the cell and then it scores',
       turned.scored >= 3 && Math.abs(wrapAngle(turned.heading + Math.PI / 2)) < 0.1,
       J(turned),
     );
-    const in3d = parkedShot('3d', KIT, mid);
+    const in3d = parkedShot('3d', STEEP, mid);
     check('fixed: …and in 3D the same parked shot scores', in3d.scored >= 3, J(in3d));
     // the feeder waits for the wheel
     let firstShot = -1;
     let rpmAtShot = 0;
     {
-      const w = createBiobuzzWorld('match', 3, [setup(0, 'blue', KIT)]);
+      const w = createBiobuzzWorld('match', 3, [setup(0, 'blue', STEEP)]);
       w.match.phase = 'teleop';
       w.match.phaseTimeLeft = 100;
       const r = w.robots[0];
@@ -272,10 +292,10 @@ export function fixedChecks(check: Check): void {
 
   // ---- one setpoint in this game, and the setpoint IS the band ------------------------------------
   {
-    const PRE: Partial<RobotSpec> = { ...KIT, flywheel: { mode: 'presets', rpm: [3000, 2679], wheelMm: 96, feedS: 0.3 } };
+    const PRE: Partial<RobotSpec> = { ...STEEP, flywheel: { mode: 'presets', rpm: [3000, 2679], wheelMm: 96, feedS: 0.3 } };
     const spec = bbCoerce(PRE);
     check('setpoint: BIOBUZZ folds a presets wheel to its first speed (one setpoint, no preset button)', J(spec.flywheel) === J({ mode: 'fixed', rpm: [3000], wheelMm: 96, feedS: 0.3 }), J(spec.flywheel));
-    const slow = bbFixedBand(bbCoerce(KIT));
+    const slow = bbFixedBand(bbCoerce(STEEP));
     const fast = bbFixedBand(spec);
     check('setpoint: a faster wheel moves the band OUT', !!slow && !!fast && fast[0] > slow[0] && fast[1] >= slow[1], J({ slow, fast }));
     const w = createBiobuzzWorld('match', 3, [setup(0, 'blue', PRE)]);

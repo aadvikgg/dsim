@@ -29,11 +29,19 @@
  * CHANGES is a BIOBUZZ fixed launcher (kind `'fixed'` reads as a turret there, and the mass moves
  * with it), so an import with one is not re-attached: that save really did change the robot.
  *
+ * **Rules 1 and 3 cover a STANDARD DECODE robot too** when it carries what an older build cannot
+ * read (`carriesNew`): a fixed launcher, a fixed hood, a setpoint flywheel, or NO intake. Measured
+ * the same way (alpha's coercer, 2026-10-02): the three shooter fields are dropped, and `intake:
+ * 'none'` comes back as the sloped preset with the length clamped to its 13.5–15 in and the width
+ * raised to its 14.5 in floor (`olderReading`), so that rewrite is compared as "not read", not as
+ * a change.
+ *
  * DOM-free, no runtime imports beyond the game list: the server (`server/db/repo.ts`) and the smoke
  * suite read it, and the client reads the capability.
  */
 import { GAME_IDS, isGameId } from '../games/types';
 import type { GameId } from '../types';
+import { INTAKE_PRESETS, ROBOT_MAX_SIZE, ROBOT_MIN_WIDTH, SWERVE_MIN_WIDTH } from '../config';
 
 /** the body field a settings save carries (`{ settings, caps }`) when the build keeps imports */
 export const SETTINGS_KEEPS_IMPORTS = 'robotImport';
@@ -46,6 +54,27 @@ export function keepsImports(caps: unknown): boolean {
 type Obj = Record<string, unknown>;
 const isObj = (x: unknown): x is Obj => typeof x === 'object' && x !== null && !Array.isArray(x);
 const isImported = (spec: unknown): boolean => isObj(spec) && isObj(spec.imported);
+/** does this robot carry something an older build cannot read back (see the header)? */
+const carriesNew = (spec: unknown): boolean =>
+  isObj(spec) && (isObj(spec.imported) || spec.launcher !== undefined || spec.hoodDeg !== undefined || spec.flywheel !== undefined || spec.intake === 'none');
+
+const num = (v: unknown, d: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+/**
+ * The stored robot as an older build reads it back, for the fields it REWRITES rather than drops:
+ * NO intake (`intake: 'none'`) is not a preset there, so it falls back to the sloped one and the
+ * size is clamped to that preset's range (alpha's `coerceSpec`, measured 2026-10-02).
+ */
+function olderReading(stored: Obj): Obj {
+  if (stored.intake !== 'none') return stored;
+  const p = INTAKE_PRESETS.sloped;
+  const floor = Math.max(stored.drivetrain === 'swerve' ? SWERVE_MIN_WIDTH : ROBOT_MIN_WIDTH, p.minWidth);
+  return {
+    ...stored,
+    intake: 'sloped',
+    length: Math.min(Math.max(num(stored.length, p.maxLength), p.minLength), p.maxLength),
+    width: Math.min(Math.max(num(stored.width, floor), floor), ROBOT_MAX_SIZE),
+  };
+}
 
 function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
@@ -62,15 +91,17 @@ const SPEC_FLOOR = ['name', 'drivetrain', 'length', 'width'] as const;
 
 /**
  * Is `sent` the robot `stored` with only the fields an older client cannot read taken off? Every
- * field `sent` carries must equal the stored one; a field only `stored` has is one the older client
- * dropped (`imported`, and whatever else it predates). `sent` itself must carry no import.
+ * field `sent` carries must equal the stored one (as the older build reads it back, `olderReading`);
+ * a field only `stored` has is one the older client dropped (`imported`, and whatever else it
+ * predates). `sent` itself must carry no import.
  */
 export function sameButDropped(sent: unknown, stored: unknown): boolean {
   if (!isObj(sent) || !isObj(stored) || isImported(sent)) return false;
   if (!SPEC_FLOOR.every((k) => sent[k] !== undefined)) return false;
+  const read = olderReading(stored);
   for (const [k, v] of Object.entries(sent)) {
     if (v === undefined) continue;
-    if (!(k in stored) || !deepEqual(v, stored[k])) return false;
+    if (!(k in read) || !deepEqual(v, read[k])) return false;
   }
   return true;
 }
@@ -97,7 +128,7 @@ export function keepImportsFromOlderClient(stored: unknown, incoming: Obj): Obj 
   const inActive = activeGame(incoming);
   for (const g of GAME_IDS) {
     const st = sliceOf(stored, g);
-    if (!st || !isImported(st.spec)) continue;
+    if (!st || !carriesNew(st.spec)) continue;
     const sent = sliceOf(incoming, g);
     if (!sent) {
       // 3. a game the older client did not send at all (it does not know it): keep the stored loadout

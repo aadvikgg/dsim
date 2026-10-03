@@ -264,6 +264,24 @@ handle (`GATE_ARM_SHORT`) pokes OUT into the gate zone (what a robot pushes) and
     crossing the mouth toward the seat must not be chassis-pinnable for not yet being under the
     wheel. `intakeSuction`'s `ahead` is now exactly `overIntakeRoof`'s front edge (`tip +
     BALL_RADIUS`), which matters because `drawIn` is above `INTAKE_LID_THROW` on every preset.
+- **NO INTAKE (`intake: 'none'`) AND HAND LOADING** (`humanPlayer.ts` `handLoad`, 2026-10-02). The kit
+  robot has no intake: its human player drops artifacts into it in the LOADING ZONE, which the manual
+  allows for any robot (G432: "DRIVE TEAM members may load SCORING ELEMENTS into a ROBOT that is
+  partially or fully in the LOADING ZONE"). `none` is a fourth `INTAKE_PRESETS` entry with reach 0 and
+  an all-zero mouth, but every capture path is gated on `noIntake(spec)`, not on those numbers: no
+  claim, suction, capture, roof or G408 mouth exemption; the footprint and the artifact solids are
+  the chassis box (an import: its whole hull, `decodeImportSolids`); the three held slots are the
+  standard line with the front skin at the face, inside a 15–18 in chassis (an import: on its
+  centreline, packed closer if its hull is short). The human player hands one artifact per
+  `HP_HAND_LOAD_S` (0.4 s) to a robot of its alliance with no intake that is partly in its own zone
+  (`robotIntersectsRect`), under `HP_HAND_LOAD_MAX_SPEED` / `_MAX_TURN` and with hopper room, teleop
+  and free drive only: from the box first, else a ground artifact off the zone's floor (no artifact is
+  created or lost). It goes straight into the next slot. A hand-off is that tick's one action, so
+  staging the grab row waits. **Robots with an intake are not hand loaded**, though the rule allows
+  it: the human player stages the grab row for them as before, and a world without a no-intake robot
+  steps byte-identically (the shared pins). Chain Reaction and BIOBUZZ coerce `none` to `sloped`. The
+  touch pad drops INTAKE for it, the import editor has no intake span to place, and the DECODE
+  tutorial swaps its intake step for a load step (drive into the zone, wait).
 - BASE PARKING counts only the four WHEEL ground-contact points (`wheelContacts`, inset
   `WHEEL_INSET`): intake/turret overhang neither earns nor spoils credit. The turret never
   protrudes (`TURRET_OFFSET_FRAC`). The chassis may be NARROWER than the intake
@@ -308,8 +326,8 @@ the one arc, and the unchanged flight stage and `checkGoalEntry` decide the hit.
   Spawn seeds the wheel at its first setpoint (no spin-up before the first shot, the turret's rule).
 - **`FLY_EXIT_EFFICIENCY` 0.40 is CALIBRATED.** A wheel rolling an artifact along a fixed hood
   gives it half the surface speed; 0.4 leaves a fifth of that to squeeze and slip. With the kit's
-  unpublished hood at `DECODE_KIT_HOOD_DEG` 70°, it is the value at which the kit's own autonomous
-  (drive against the goal, fire three) scores. Measured, muzzle to goal centroid along the face
+  hood at `DECODE_KIT_HOOD_DEG` 70°, it is the value at which the kit's own autonomous (drive
+  against the goal, fire three) scores. Measured, muzzle to goal centroid along the face
   normal: the kit scores from **12–22 in** (rising through the opening, the against-the-goal shot:
   muzzle ≈ 18 in there) and **40–60 in** (falling into it); 24–38 and 62+ miss. 0.35 merges the
   bands (14–44); 0.45 moves the far one to 58–66.
@@ -322,9 +340,19 @@ the one arc, and the unchanged flight stage and `checkGoalEntry` decide the hit.
 - **Presets** step on `RobotCommand.flyPreset` (bit 1024, debounced edge; Z / R3, the mode-toggle
   role shared with BIOBUZZ's Deploy ramp). DECODE only: BIOBUZZ's fixed launcher runs one setpoint.
 - **The kit card** (`ROBOT_PRESETS`, LAST so `DEFAULT_SPEC` still mirrors the first): tank 286,
-  fixed launcher, hood 70°, 2411 rpm on 96 mm, 0.20-s feed. Clamps: 13.5 lb → the 22-lb tank floor;
-  it has no intake (the human player loads it by hand in the LOADING ZONE), DSIM has no hand
-  loading, so the card carries the sloped intake.
+  NO intake (hand loaded, see "NO INTAKE" above), frame 17 in, fixed launcher, hood 70°, 2411 rpm on
+  96 mm, 0.20-s feed. Clamps: 13.5 lb → the 22-lb tank floor; width 16 APPROX.
+- ⚠️ **THE KIT'S 70° IS AN EFFECTIVE ANGLE, NOT ITS GUIDE'S.** Measured on the kit's CAD
+  (2026-10-02, the mecanum variant's STEP; the skid-steer kit's file is cut off at the source, and
+  its assembly PDF matches the mecanum variant's launcher dimension for dimension): the ramps end in
+  a straight vertical run bolted flat to a U-channel, so the artifact leaves at **90° ±2°**, 13.0 in
+  up, 3.2 in behind the robot's front (the launcher end: the kit's auto starts with it against the
+  goal, fires, then drives 4 in back). A 90° no-spin arc lands where it left. What carries the real
+  artifact over the goal face is the spin of the one-sided pinch, which curves it toward the
+  launcher end; `stepFlightBall` has no spin or drag. So the card flies the no-spin arc that lands
+  where the kit's auto says it does, from the sim's release point (the turret's, a sixth of the
+  length behind centre at `LAUNCH_HEIGHT`). Setting the guide's 90° would make the kit unable to
+  score at all. The honest fix is spin in the flight stage, calibrated against a real shot.
 
 ## Scoring + multi-robot
 

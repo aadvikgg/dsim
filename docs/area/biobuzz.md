@@ -2023,6 +2023,10 @@ import: `mech.shooterYawDeg`), at the build's `hoodDeg` (30–80, its own clamp;
 `docs/area/decode.md`, "Fixed shooters"). It mirrors as `scoreMode: 'dumper'` (`bbScoreModeMirror`),
 spans no edge (a Box Tube may sit on the corner beside it), carries POLLEN only, weighs
 `BB_MASS_FIXED` 3.5, and is enveloped by the turret's cylinder in 3D.
+- **One head, one axis** (`bbFixedAxisLocal`): the edge cell on a standard robot, and on an import
+  the placed point walked FORWARD along the facing by the muzzle's setback, because the placed point
+  is the LIP. Both drawings stand the head there (the 2D sprite drew an import's axis on the lip,
+  a setback off the release, until 2026-10-02); `release = axis − facing · setback` either way.
 - **Nothing is solved.** It releases from the head's own muzzle (`bbFixedLocal` reads
   `bbMuzzleLocal` at the hood angle) at the wheel's speed NOW, carrying `bbPointVel`. Stage 5b,
   3D stage 11 and the shot path all ask `bbFixedShotEnters`; aim assist turns the chassis
@@ -2032,10 +2036,18 @@ spans no edge (a Box Tube may sit on the corner beside it), carries POLLEN only,
 - **One setpoint in this game**: both kit robots run one, and the pad has no free button (D-DOWN is
   unbound on purpose), so `coerceBiobuzzSpec` folds a presets wheel to its first speed.
 - **The band** (`bbFixedBand`: the fire gate's own predicate at every inch on the mouth axis,
-  capped at the wall). Kit setpoint 2679 rpm, 96 mm ⇒ 212 in/s with the shared efficiency. At the
-  APPROX hood `BB_FIXED_HOOD_DEFAULT_DEG` 77° it scores from **26–46 in** (robot centre to cell
-  centre); at 70° from 37 in to the wall; under ~2450 rpm no arc reaches the 53.4-in opening. The AI
+  capped where the footprint meets the wall, measured on the side that faces it — the front, sweeper
+  included, for a back launcher; until 2026-10-02 it always used the rear). Kit setpoint 2679 rpm,
+  96 mm ⇒ 212 in/s with the shared efficiency. At the kit's measured 68° it scores from **41 in to
+  the wall** (robot centre to cell centre; 41–46 for the card, back to the cell, its front touching
+  the wall at 46); at 77° from 26–46 in; under ~2450 rpm no arc reaches the 53.4-in opening. The AI
   stands in the band (`ai/policy.ts` `dRange`).
+- **The hood is measured** (`BB_FIXED_HOOD_DEFAULT_DEG` 68°, 2026-10-02): on the kit's CAD the
+  pollen leaves the wheel at 57–61° and rides the curved guide plate to its end, tangent 68° ±3°.
+  The launcher is at the BACK, the end opposite the sweeper; the kit's auto starts with its front on
+  the wall, launches all four there and backs 120 mm away, which is the far end of the card's band.
+  The flight has no spin; a one-sided pinch puts topspin on the pollen, which would dip the real arc
+  (a closer band). Not modelled.
 
 **THE PRESETS** are the StarterBot (`presets.ts`, the one real kit robot, still alone in front of
 the rule-off) and four demos in `config.ts`. Scored 2026-09-22 head-to-head against the StarterBot
@@ -2044,8 +2056,9 @@ with HARD bots, 3D, a full 150-s match: **Sniper 70.4 · Skimmer 68.0 · Forager
 
 ⚠️ **THE STARTERBOT IS A FIXED LAUNCHER SINCE 2026-10-02, RE-MEASURED ON THE BENCH** (`npm run
 bench:ai -- --builds preset:starterbot --tiers hard --seeds 5`, 3D, every bot on the card, seeds
-7000–7004). Fixed launcher: **solo 166.2** (151–176), **2v2 153.5** per alliance (134–168). The front
-dumper it replaced, the same seeds and protocol: solo 242.6, 2v2 284.8. So the card scores about a
+7000–7004). As measured on the CAD (back launcher, 68°): **solo 117.8** (40–194), **2v2 142.4** per
+alliance (106–174); its band is 5 in deep against a wall. The first fixed-launcher card (front,
+77° guessed): solo 166.2, 2v2 153.5. The front dumper before that: solo 242.6, 2v2 284.8. So the card scores about a
 third less solo and a half less in a 2v2: POLLEN only (no NECTAR), and a shot only from inside its
 26–46 in band (`bbFixedBand`). These are the bench's numbers, not the 2026-09-22 head-to-head
 protocol, so they do not compare with the column below; the demo cards were not re-measured.

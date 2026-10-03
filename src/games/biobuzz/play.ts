@@ -1,6 +1,6 @@
 import type { Alliance, Artifact, RobotCommand, RobotSpec, RobotState, Vec2, World } from '../../types';
 import * as C from '../../config';
-import { clamp, hyp, nextRandom, rot, wrapAngle } from '../../math';
+import { clamp, dcos, dsin, hyp, nextRandom, rot, wrapAngle } from '../../math';
 import { solveArtifacts, type SweepFrom } from '../../sim/physicsEngine';
 import { simModuleFor } from '../sim';
 import { stepGroundBall } from '../../sim/physics';
@@ -1325,17 +1325,26 @@ export function bbFixedBand(spec: RobotSpec): readonly [number, number] | null {
   const cell = hiveCellTarget('blue', 'north');
   const face = bbFixedFacing(spec);
   const rpm = spec.flywheel?.rpm[0] ?? 0;
-  // ...and only where the robot fits on the field: past the wall is a pose nobody can drive to
-  const rear = bbFootprint(spec).rear;
+  // ...and only where the robot fits on the field: past the wall is a pose nobody can drive to.
+  // The footprint's reach toward the wall (+y) at the pose the robot is parked in: its rear for a
+  // front launcher, its FRONT (the sweeper's reach included) for a back one, a flank for a side one.
+  const fp = bbFootprint(spec);
+  const heading = -Math.PI / 2 - face;
+  const sh = dsin(heading);
+  const ch = dcos(heading);
+  let toWall = 0;
+  for (const [x, y] of [[fp.front, fp.half], [fp.front, -fp.half], [-fp.rear, fp.half], [-fp.rear, -fp.half]]) {
+    toWall = Math.max(toWall, x * sh + y * ch);
+  }
   let lo = -1;
   let hi = -1;
-  for (let d = 4; cell.pos.y + d + rear <= BB_HALF_Y; d++) {
+  for (let d = 4; cell.pos.y + d + toWall <= BB_HALF_Y + 1e-9; d++) {
     const r = {
       id: -1,
       alliance: 'blue',
       spec,
       pos: { x: cell.pos.x, y: cell.pos.y + d },
-      heading: -Math.PI / 2 - face,
+      heading,
       vel: { x: 0, y: 0 },
       angVel: 0,
       flyRpm: rpm,

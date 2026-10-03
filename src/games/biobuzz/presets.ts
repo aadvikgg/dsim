@@ -33,10 +33,10 @@ import { bbCoerceSpec } from './robotConfig';
  * before an invented one — the same ordering Chain Reaction uses (`CHAIN_REAL_PRESETS`).
  *
  * ⚠️ WHAT IS SOURCED AND WHAT IS NOT. Kit documentation publishes drivetrain topology, motors
- * and wheel sizes; it does not publish an overall footprint, a height or a weight. So the
- * footprint below is `APPROX` and the mass is the sim's own floor (see `BB_STARTER_BOTS`) —
- * the only card on the list that sits on it, which is the honest answer for a robot nobody
- * publishes a weight for.
+ * and wheel sizes; it does not publish an overall footprint, a height or a weight. The footprint,
+ * the launcher's end and its guide angle below are measured on a kit's CAD (2026-10-02); the mass
+ * is the sim's own floor (see `BB_STARTER_BOTS`) — the only card on the list that sits on it,
+ * which is the honest answer for a robot nobody publishes a weight for.
  *
  * ── HOW `driveRpm` IS DERIVED (this is not a gearmotor's RPM) ───────────────
  * `RobotSpec.driveRpm` is not a real wheel RPM: `SPEED_PER_RPM` is normalised to a 104 mm
@@ -80,8 +80,11 @@ const BB_STARTER_BUILDS: readonly RobotSpec[] = [
   {
     // ── StarterBot: the common rookie kit shape ──────────────────────────────
     // A 6WD drop-centre tank: four driven traction wheels chained per side plus two undriven
-    // omni wheels at the dropped centre, one gearmotor a side. A single chassis-fixed launcher
-    // over the front, fed by a front sweeper. No Box Tube — the kit has no placement mechanism.
+    // omni wheels at the dropped centre, one gearmotor a side. A front sweeper and a single
+    // chassis-fixed launcher at the BACK, at the opposite end from the intake (the CAD,
+    // 2026-10-02). The kit's autonomous starts with its front against the wall, launches all four
+    // there and then backs 120 mm away, so its shots go out the back. No Box Tube — the kit has no
+    // placement mechanism.
     //   driveRpm: a 96 mm wheel on a ~312 rpm drive gearmotor (19.2:1),
     //             π·(96/25.4)·312/60 = 61.7 in/s ÷ (0.20367 · 1.06 tank) = 286
     // THE LAUNCHER IS A FIXED FLYWHEEL (2026-10-02 — it used to be modelled as a dumper, which
@@ -90,16 +93,18 @@ const BB_STARTER_BUILDS: readonly RobotSpec[] = [
     // 2679 rpm at any range, a windmill servo feeding only above LAUNCHER_MIN_VELOCITY 1200
     // (`FLY_FEED_MIN_FRAC` is the DECODE kit's 1075/1125 = 0.956, against this kit's 0.960). No
     // turret, so the robot turns to aim; a wheel sized for a 3-in POLLEN carries no NECTAR. The
-    // guide's angle is not published: `BB_FIXED_HOOD_DEFAULT_DEG` is APPROX, and the windmill's
-    // rate is too (`BB_FIXED_FLY_DEFAULT.feedS`). Holds 4 (`BB_STORAGE_MAX`, the same).
+    // guide's angle is not published; `BB_FIXED_HOOD_DEFAULT_DEG` is measured on the CAD (68°).
+    // The windmill's rate is not (`BB_FIXED_FLY_DEFAULT.feedS`, APPROX). Holds 4 (`BB_STORAGE_MAX`).
     name: 'StarterBot', teamName: 'Kit robot · 6WD tank', teamNumber: 0,
-    length: 15, width: 16, // APPROX — kit side rails are ~15"; no kit publishes a width
+    // the CAD: 17.8 in long with the intake (the chassis plus the sweeper's 3-in reach) and 16.8 in
+    // wide
+    length: 15, width: 16.75,
     intake: 'sloped', massLb: 0, drivetrain: 'tank',
     driveRpm: 286, flywheelInertia: 0, canSort: false,
     scoreMode: 'dumper', // the flat mirror of a FIXED launcher (`bbScoreModeMirror`)
-    intakeMount: 'front', shooterMount: 'front',
+    intakeMount: 'front', shooterMount: 'back',
     ballStorage: BB_G407_CAP,
-    bbMech: { launcher: { kind: 'fixed', mount: 'front', hoodDeg: BB_FIXED_HOOD_DEFAULT_DEG }, lift: null },
+    bbMech: { launcher: { kind: 'fixed', mount: 'back', hoodDeg: BB_FIXED_HOOD_DEFAULT_DEG }, lift: null },
     flywheel: { ...BB_FIXED_FLY_DEFAULT, rpm: [...BB_FIXED_FLY_DEFAULT.rpm] },
     assists: { ...BB_STARTER_ASSISTS },
   },

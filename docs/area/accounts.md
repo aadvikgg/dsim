@@ -399,7 +399,11 @@ pre-import alpha deleted the account's imported robot on every device. This buil
 in one transaction (`select … for update`): the stored IMPORTED robot is kept when the incoming one
 is it minus what the older build cannot read (every field sent equals the stored one), with its
 `lastStandardSpec`; a game the older build sent nothing for keeps its stored loadout if it holds an
-import; anything the older build CHANGED stands. A save WITH the cap is stored as sent, so a new
+import; anything the older build CHANGED stands. The same two rules keep a STANDARD DECODE robot
+that carries what an older build cannot read (`carriesNew`: a fixed launcher, hood or setpoint
+wheel, or NO intake); the older build's rewrite of `intake: 'none'` (the sloped preset, the length
+clamped to 15, the width raised to 14.5, measured on alpha's coercer) counts as "not read"
+(`olderReading`), not as a change. A save WITH the cap is stored as sent, so a new
 build that drops the import on purpose is never "repaired". Backward-compatible both ways (an older
 server ignores `caps`). `npm run dbtest` "settings:" drives the write on PGlite; smoke "settings
 keep:" holds the rules, including the one robot an older build rewrites rather than strips (a
