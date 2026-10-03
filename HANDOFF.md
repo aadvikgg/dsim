@@ -1,3 +1,12 @@
+# HANDOFF — 2026-10-03e (imported-robot mesh quality, part 1)
+
+**State: on `alpha` (ede417c4), client only (no server change, no deploy needed). Not on `main`.** `npm test`, `build`, `bundleaudit`, `docaudit` pass.
+
+- **Owner:** "The quality of the imported robot is very ass even at the highest fidelity / graphics settings."
+- **Measured** (opus analysis on the REV and goBILDA starter-bot STEPs; scripts, caches and image sheets in that session's scratchpad `quality/`): the simplifier's sloppy fallback shredded the mesh; a third of the goBILDA BIOBUZZ surface loses its CAD colour on read; the 4 MB float GLB caps a robot near 90k triangles and no graphics tier touches an import; every part was matte plastic and received no shadow.
+- **Done (ede417c4):** one global error bound with `Prune` replaces the sloppy pass (`engine/simplify.ts`, `simplifyLists` for the bake refit and `liteMesh`): p90 2.09 → 0.66 mm, max 15.9 → 3.6 mm at equal triangles. Finishes by colour (`robotImport/finish.ts`, old stored meshes upgraded on load), a room environment in the editor preview, the 3D robot receives shadows. robot-import.md "Mesh quality".
+- **In flight (agent worktrees, branches off ede417c4, nothing committed when the session last restarted):** `step-colours` (agent-a643fe…, reader-only STEP colour recovery: split roots and cut multi-body reps), `mesh-meshopt` (agent-a5cdb1…, quantised + meshopt stored GLB, budget 100k → 250k / max 400k, relay kept a plain float GLB). Merge each after its gates pass.
+
 # HANDOFF — 2026-10-03d (fixed-shooter aim, practice tuning for imports)
 
 **State: on `alpha` (28a05a93); `dsim-alpha` DEPLOYED from it (health ok, one machine). Not on `main`.** `npm test` (shared 3942 + BIOBUZZ), `build`, `server:check`, `dbtest`, `uiaudit`, `docaudit`, `bundleaudit` pass. GUI checked in the dev preview: the Practice tuning and Mechanism tuning panels, a tuned top speed reaching the stats.
