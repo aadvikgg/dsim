@@ -103,8 +103,9 @@ touching `src/robotImport/**`.
   optimum (a 64-gon circle cut to 16: 0.26 in, against 0.17 for even spacing). Then quantised to
   1/64 in and re-hulled so `coerceImported` leaves it unchanged.
 - **Measured on the simplified mesh.** The engine simplifies once per file, in the source frame
-  (simplification commutes with rotation and uniform scale), and measures the ≤ 150k-triangle
-  result. Against measuring every triangle of the stress robots (0.5, 1.5 and 3.9 M), that costs at
+  (simplification commutes with rotation and uniform scale), and measures the simplified result
+  (250k triangles by default). At 100k, against measuring every triangle of the stress robots (0.5,
+  1.5 and 3.9 M), that cost at
   most 0.07 in of hull, 0.13 in of wheel centre and 0.01 in of height, with the same units, up axis
   and band count (`stressbench.ts --full`); `npm test` holds the 0.5 M robot to 1/16 in, 0.15 in and
   0.02 in.
@@ -122,11 +123,28 @@ touching `src/robotImport/**`.
 
 ## Budgets
 
-- ≤ 150,000 triangles after simplification (meshopt `simplify`, then `simplifySloppy` if the
-  error-bounded pass stalls), split across parts in proportion to their triangle counts. One
-  material per source colour; textures are dropped.
-- Stored GLB ≤ 4 MB: positions, creased normals (40°), Uint16/Uint32 indices. If a bake comes out
-  larger, the triangle target drops in proportion and the mesh is simplified again.
+- 250,000 triangles after simplification by default (`DEFAULT_TRI_BUDGET`), 400,000 at most
+  (`MAX_TRIANGLES`), with one error bound for the whole robot (`engine/simplify.ts`, "Mesh quality").
+  One material per source colour; textures are dropped.
+- Stored GLB ≤ 4 MiB (`MAX_MESH_BYTES`), written by `engine/storedGlb.ts` with
+  `KHR_mesh_quantization` and `EXT_meshopt_compression`, both required. Positions are 14 bits per
+  axis over each mesh's largest side, dequantised by the mesh's node (a translation and one uniform
+  scale). Normals are creased at 40° and stored as 8-bit octahedral. `_BODY` is unsigned 32-bit.
+  Indices are 16-bit below 65,535 vertices. The encoder is meshoptimizer's (a lazy chunk, fetched on
+  a Save).
+- Measured on the REV and goBILDA kits at 250k: 8.5–9.5 bytes a triangle against GLTFExporter's 51,
+  so 250k is 2.0–2.3 MiB and 400k about 3.6 MiB. Quantisation moves a vertex 0.022 mm at most;
+  normals are off by 0.3° on average, 1.2° at most. If a bake still comes out over 4 MiB, the
+  triangle target drops in proportion and the mesh is simplified again.
+- Every reader sets three's meshopt decoder: the 3D scene's loader, `parse.ts` (an edit of a saved
+  robot, a share file) and `liteMesh`. The scene turns positions and normals back into Float32 on load
+  (`floatAttribute`, `renderImported.ts`), because ANGLE on D3D11 draws quantised attributes slower:
+  four 250k robots took 2.21 ms a frame quantised and 1.31 ms as float (RTX 4070 Ti, 1080p). It drops
+  `_body` there as well, which the scene never reads.
+- A float stored mesh saved before still loads as it did, and is never re-baked.
+- A share file is the stored mesh with the setup in its JSON, so it is compressed too. Every build
+  with the importer opens one, since `parse.ts` has set the meshopt decoder from the first engine. A
+  glTF viewer needs both extensions; three.js and Babylon.js read them.
 - `ImportedRobot` ≤ 2 KB JSON (16 + 3 × 12 hull vertices at 1/64 in is about 1.2 KB).
 - The drivetrain numbers shown are `driveParams`/`pushForce` of the spec that will be saved. The
   equivalent rpm is motor free rpm ÷ gearbox ÷ external ratio × (wheel mm / 104), because the sim
@@ -145,7 +163,8 @@ before this rule, a 3.9 M-triangle STL froze the editor for one 3.6 s task and a
 | 3MF: three's loader | the import worker, with `miniDom.ts` as its `DOMParser` for the length of the parse (a worker has none); the main-thread fallback keeps the page's own |
 | a new orientation (units, up axis, turn) | `measureWorker.ts`, one per model in the editor, holding a copy of the prepared model |
 | the light half of a measurement, the model-frame arrays | main thread, from the worker's small `OrientedMeasure` (`toModelFrame` rebuilds the arrays bit for bit) |
-| the bake's GLB export and its refits | the import worker (`bakeMesh.ts`); the two pictures need WebGL and stay, with `compileAsync` first |
+| the bake's GLB export and its refits | the import worker (`bakeMesh.ts`, `storedGlb.ts`); the two pictures need WebGL and stay, with `compileAsync` first |
+| a room's lighter mesh (`liteMesh`) | the import worker (`liteMeshOff`, a lazy `lite-*.js` there); it was on the main thread, 0.3 s from a 69k float mesh and 0.8 s from a 250k one (Node) |
 
 - **Identical outputs.** Every move is the same code in another thread, and `npm test` holds each to
   the old result bit for bit: the halves against `measureParts`, `toModelFrame` against the arrays
@@ -168,7 +187,7 @@ before this rule, a 3.9 M-triangle STL froze the editor for one 3.6 s task and a
   main-thread `loadModel` on purpose (≤ 4 MB).
 - **Memory.** The renderer's peak on the 3.9 M STL went from 1021 MB to 763 MB; what is left is
   meshopt's working set for a 3.9 M-triangle part, in the import worker, returned when it is
-  terminated. The main thread holds the prepared model (≤ 150k triangles) and up to six
+  terminated. The main thread holds the prepared model (250k triangles by default) and up to six
   orientations of it; two models keep a measure worker (`KEEP_MODELS`), the oldest is released.
 - **A GLB is merged as it is read** (`mergedPartsFromObject`): the colours are grouped first, each
   group's arrays allocated at their final size, every mesh instance written straight into its group,
@@ -207,6 +226,17 @@ the time this Electron takes to stop even a bare busy-loop worker). Memory: the 
 cut the STL peaks by a quarter; a GLB's peak was about what it was (18 % higher on the 80 MB flat
 one: the worker held the buffers the main thread did) until the GLB was merged as it is read (the
 "Memory" bullet above: 937 → 830 MB on that file), and a STEP's is occt's.
+
+**At 250k triangles** (2026-10-03, the same probe with hardware GL, the 1.55 M GLB; ede417c4 at
+100k in brackets): the first frame at 4.75 s (4.44); Units, Up and Turn settle in 310–490 ms
+(210–290) with two main-thread tasks of 58–80 ms each (none over 50), the measure worker's answer
+and the preview rebuilding its mesh; a wheel nudge settles in 30–33 ms with no long task (59–65,
+once the moving parts stopped being re-measured on a nudge, `measureSession.ts`); the orbit holds
+60 fps; Save settles in 445 ms (874) with one 114 ms task, the two pictures. Real CAD: REV's STEP
+gives 247,949 triangles in 85 s (95 s for 81k), goBILDA's BIOBUZZ zip 247,563 in 196 s (195 s);
+simplifying to 250k is no slower than to 100k (the error-bound ladder stops sooner). One task grew
+that is worth moving: BIOBUZZ's first measurement has a 409 ms main-thread task (160 ms at 100k),
+mostly the one-time roller search (`findRollerGroups`, 164 ms in Node at 250k, 43 ms at 72k).
 
 ## Real CAD: big STEP files, zips, files cut off
 
@@ -299,9 +329,9 @@ within 4 in of it and under 10 in, grown to its axle). `[]` = none.
 
 - **Bodies.** `MeshPart.body` is a per-vertex id: one per mesh instance from a reader, one per STEP
   solid, the connected pieces when a file has only one. Weld never joins two bodies; weld, compact,
-  crease, merge and simplify all carry it. The stored GLB writes it as `_BODY` (the relay's
-  validator allows it, 16- or 32-bit unsigned, one per vertex), so an edit of a saved robot can pick
-  parts again. The lighter relay mesh drops it.
+  crease, merge and simplify all carry it. The stored GLB writes it as `_BODY` (unsigned 32-bit, one
+  per vertex; a float mesh saved before has 16-bit where it fits, and the relay's validator allows
+  both), so an edit of a saved robot can pick parts again. The lighter relay mesh drops it.
 - **Picking** (Mechanisms step, Moving parts): a click on a spinning part takes everything on its
   axle (`coaxialBodies`; a wheel keeps to its own width, since the opposite wheel is often on the
   same line); on anything else, the smaller bodies inside its box (`mountedBodies`: a plate's
@@ -344,6 +374,13 @@ sampled, offscreen renders under the match's lighting):
   anodised aluminium to chalk. A stored mesh with the old pair is upgraded on load. The editor
   preview has a room environment so a metal has something to reflect.
 - **The robot receives shadows** in BIOBUZZ 3D (`prepareImportedMesh`); it read as a flat cut-out.
+- **250k triangles, stored compressed** ("Budgets"). The float GLB held 69k of the REV kit in 4 MiB
+  (the bake refit the 81k simplification down). Compressed, REV at 248k is 2.08 MiB and goBILDA's
+  BIOBUZZ kit 2.41 MiB. At 250k REV is its CAD to p90 0.17 mm, max 0.74 mm (p90 0.56 mm at 100k);
+  400k and 600k gain 0.07 and 0.12 mm more. Rendered offscreen under the match's lighting against
+  the old stored meshes: the omni rollers, the hubs' hex pattern, the flywheel's gear teeth and the
+  perforated plates come through, and nothing of the quantisation shows. goBILDA's mecanum rollers
+  are still faceted at 250k.
 - **Not worth it (measured):** finer STEP tessellation (0.25 rad: twice the triangles in, the same
   error out), another crease angle (40° holds), the 48-colour cap (both kits have 12).
 
@@ -378,9 +415,10 @@ The picture and mesh live on the owner's device, so a custom or LAN room relays 
 
 - **What goes:** the top PNG (every viewer, 2D is the default) and the GLB (BIOBUZZ's 3D view only). Caps: PNG ≤ 256 KiB with a side ≤ 1024 px (the bake is 512), GLB ≤ 1 MiB.
 - **`liteMesh`** (`engine/lite.ts`, reached through `loadImporterEngine()`) makes the 1 MiB mesh when the stored one (≤ 4 MB) is bigger. It does NOT go back through `normalise`/`bake`: a re-measure could re-detect the wheels or the origin and land the mesh a hair off the footprint the sim was told about. It reads the stored GLB, simplifies the same vertices with the importer's simplifier, re-creases the normals and writes it back in the SAME stored mesh frame, so a viewer places it with `STORED_MESH_TO_ROBOT` exactly as the full one. Measured against real GLTFExporter output: 140k triangles, 2.5 MB → 0.9 MB, bounding box unchanged to 0.1 mm, both colours kept. It returns null below 400 triangles, and the relay then sends the picture alone.
+- **The relay never gets the compressed stored mesh.** `liteMesh` always writes a FLOAT GLB (`exportStoredScene`, `floatGlb.ts`): a compressed mesh goes through it however small, whole when the float copy fits 1 MiB, else aimed from the float copy's size. From the REV kit's 248k stored mesh it makes 19.8k triangles in 0.97 MB (the old 69k float mesh gave 16k). The owner sends the library's file as it is only when `validateMeshGlb` takes it, which is a float mesh saved before (`libraryOwnAssets.mesh`). So nothing on the wire changed and no server needs a deploy. An older client holding a compressed mesh (from a share file) refuses it at its own validator and sends the picture alone.
 - **`meshLite`** is cached on the library record (`LibraryRobot.meshLite`, `meshLiteFor`, `putMeshLite`; the file key `<id>:meshLite`). `putRobot` drops it unless the save carries one, because the mesh it was cut from may have changed; `deleteRobot` removes it; `getRobot` returns it when present. It is never required.
 - **A viewer sees what the owner's device would**: the relayed blobs are lent to the renderers' registry, which prefers a lent blob over the library, and are taken back when the room is left or the viewer turns "Show other players’ imported robots" off. A lent blob carries its LENDER (`registerImportedAssets(id, assets, lender)`): `''` is this device (the editor's draft) and always wins; `relay:<owner>` is a room's, and never replaces another lender's look for that id.
-- **The relayed mesh must be what the exporter writes and nothing more.** The relay's GLB check (`validateMeshGlb`) is an allowlist sized to `exportGlbStored`'s output: no glTF extensions, no images or textures, only POSITION/NORMAL/TANGENT/COLOR_0/TEXCOORD_0-1 and `_BODY` attributes, nodes with a mesh, children and a transform. If the bake ever writes something new (a material extension, quantised attributes), add it to `VISUAL_GLB_EXTENSIONS` or the key lists WITH a check of its fields, or every relayed mesh is refused and viewers see outlines.
+- **The relayed mesh must be what the float exporter writes and nothing more.** The relay's GLB check (`validateMeshGlb`) is an allowlist sized to `exportStoredScene`'s output: no glTF extensions, no images or textures, only POSITION/NORMAL/TANGENT/COLOR_0/TEXCOORD_0-1 and `_BODY` attributes, nodes with a mesh, children and a transform. The bake's own file (quantised, meshopt) is outside it on purpose. To relay that file directly, both extensions need field checks in `VISUAL_GLB_EXTENSIONS` AND a capability every receiver advertises, because older servers and clients run the old check; until then `liteMesh` stays in the path.
 - **A host that draws frames in one burst must wait for them.** The pictures and meshes load
   lazily (a draw asks, a later task delivers), which a live view never notices and the replay
   export did: it draws every frame before the browser gets a turn, so a file made from a viewer

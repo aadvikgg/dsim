@@ -72,7 +72,8 @@ const GLB_MAGIC = 0x46546c67;
 const GLB_JSON = 0x4e4f534a;
 const GLB_BIN = 0x004e4942;
 const GLB_JSON_MAX = 256 * 1024;
-/** the importer's own ceiling (`MAX_TRIANGLES`); a relayed mesh is under it by construction */
+/** a relayed mesh's ceiling. It was the importer's `MAX_TRIANGLES` (now 400k for the compressed stored
+ *  mesh); a relayed mesh is `liteMesh`'s float GLB under 1 MiB, about 20k on a real robot, so it stays */
 export const VISUAL_MAX_TRIANGLES = 150_000;
 /** own-property lookups only: `componentType: "constructor"` must not find `Object` */
 const COMPONENT_BYTES = new Map<unknown, number>([[5120, 1], [5121, 1], [5122, 2], [5123, 2], [5125, 4], [5126, 4]]);
@@ -81,9 +82,11 @@ const TYPE_COMPONENTS = new Map<unknown, number>([['SCALAR', 1], ['VEC2', 2], ['
 const INDEX_TYPES = new Set<unknown>([5121, 5123, 5125]);
 
 /**
- * THE glTF EXTENSIONS A RELAYED MESH MAY USE: what our own exporter writes (`exportGlbStored`, the
- * bake and `liteMesh`: three's GLTFExporter on a group of `MeshStandardMaterial` meshes with
- * positions, normals and indices), which is NONE. An extension is code the viewer's loader runs on
+ * THE glTF EXTENSIONS A RELAYED MESH MAY USE: what our own float exporter writes (`exportStoredScene`,
+ * which `liteMesh` uses: three's GLTFExporter on a group of `MeshStandardMaterial` meshes with
+ * positions, normals and indices), which is NONE. The STORED mesh is quantised and meshopt-packed
+ * (`storedGlb.ts`), and is never relayed as it is: older servers and clients run this same check, so
+ * the owner always sends `liteMesh`'s float copy of it. An extension is code the viewer's loader runs on
  * the owner's say-so: `EXT_mesh_gpu_instancing` drew 512 × 500,000 copies of a mesh from a 546 KB
  * file, `EXT_meshopt_compression` allocated `count × byteStride` bytes it was told to. Add a name
  * here only with a check that says what its fields may hold.

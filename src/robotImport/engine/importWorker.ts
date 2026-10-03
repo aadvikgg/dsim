@@ -10,7 +10,8 @@
  * player sees the same sentence the main-thread loader would have given.
  *
  * It also runs the bake's mesh half (`{ kind: 'bake' }`, `bakeMesh.ts`): the GLB export and its
- * refits, so Save does not block on them either.
+ * refits, so Save does not block on them either; and the relay's lighter mesh (`{ kind: 'lite' }`,
+ * `lite.ts`), which at 250k triangles is most of a second of simplifying.
  */
 import { bakeSceneHere, sceneParts } from './bakeMesh';
 import { ImportError } from './importError';
@@ -31,6 +32,13 @@ ctx.onmessage = async (e: MessageEvent<ImportRequest>) => {
     if (req.kind === 'bake') {
       const { glb, scene, refits } = await bakeSceneHere(req.scene);
       post({ kind: 'baked', glb, scene, refits }, [glb, ...partBuffers(sceneParts(scene))]);
+      return;
+    }
+    if (req.kind === 'lite') {
+      // its own chunk (the float exporter and the decoder), fetched only when a room needs one
+      const { liteMesh } = await import('./lite');
+      const glb = await liteMesh(req.glb, req.maxBytes);
+      post({ kind: 'lite', glb }, glb ? [glb] : []);
       return;
     }
     let loaded;

@@ -162,9 +162,29 @@ function evict(): void {
 }
 
 /**
+ * A quantised or interleaved attribute → plain Float32, values as the loader reads them (dequantised
+ * by the node's transform, which stays). The stored mesh is quantised (`robotImport/engine/
+ * storedGlb.ts`), and ANGLE on D3D11 draws quantised attributes slower: four robots of 250k
+ * triangles took 2.21 ms a frame left quantised and 1.31 ms as float (RTX 4070 Ti, 1080p,
+ * 2026-10-03). A float mesh saved before is left as it is.
+ */
+export function floatAttribute(geo: THREE.BufferGeometry, name: string): void {
+  const a = geo.getAttribute(name);
+  if (!a) return;
+  if (!(a as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute && a.array instanceof Float32Array && !a.normalized) return;
+  const k = a.itemSize;
+  const out = new Float32Array(a.count * k);
+  for (let i = 0; i < a.count; i++) {
+    for (let c = 0; c < k; c++) out[i * k + c] = a.getComponent(i, c);
+  }
+  geo.setAttribute(name, new THREE.BufferAttribute(out, k));
+}
+
+/**
  * A parsed glTF scene → a TEMPLATE in the robot frame: wrapped in one node carrying
- * `IMPORTED_MESH_TO_ROBOT` (inches, +x front, +z up), normals computed where the file has none, no
- * emissive anywhere, every resource registered as shared.
+ * `IMPORTED_MESH_TO_ROBOT` (inches, +x front, +z up), positions and normals as plain Float32,
+ * normals computed where the file has none, no emissive anywhere, every resource registered as
+ * shared.
  */
 export function prepareImportedMesh(scene: THREE.Object3D): THREE.Group {
   const root = new THREE.Group();
@@ -179,6 +199,10 @@ export function prepareImportedMesh(scene: THREE.Object3D): THREE.Group {
     // self-shadowing is what gives a robot its depth (an arm over the chassis, the frame over the
     // wheels); without it the model read as a flat cut-out (2026-10-03, "Mesh quality")
     m.receiveShadow = true;
+    floatAttribute(m.geometry, 'position');
+    floatAttribute(m.geometry, 'normal');
+    // the body ids are the editor's (picking parts); here they would only be uploaded and never read
+    m.geometry.deleteAttribute('_body');
     if (!m.geometry.getAttribute('normal')) m.geometry.computeVertexNormals();
     SHARED.add(m.geometry);
     for (const mat of materialsOf(m)) {

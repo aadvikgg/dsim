@@ -241,6 +241,9 @@ export function creaseParts(parts: readonly MeshPart[]): MeshPart[] {
   });
 }
 
+/** a part's node name in a stored GLB: word characters only, 40 at most, and its index */
+export const safePartName = (s: string, i: number): string => `${(s || 'part').replace(/[^\w.-]+/g, '_').slice(0, 40)}_${i}`;
+
 /** colour key at `bits` bits per channel */
 const colourKey = (c: readonly number[], bits: number): number => {
   const m = (1 << bits) - 1;

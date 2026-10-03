@@ -221,7 +221,8 @@ export function readStoredMotion(x: unknown): StoredMotion | null {
   return out;
 }
 
-export const MAX_TRIANGLES = 150_000;
+/** the triangle cap after simplification (the default budget is `DEFAULT_TRI_BUDGET`, 250k) */
+export const MAX_TRIANGLES = 400_000;
 export const MAX_MESH_BYTES = 4 * 1024 * 1024;
 
 // ---- measurement ---------------------------------------------------------------------------
@@ -335,7 +336,8 @@ export interface LibraryRobot {
   id: string;
   game: GameId;
   spec: RobotSpec;
-  /** simplified, normalised GLB (stored mesh frame above), ≤ 4 MB, ≤ 150k triangles */
+  /** simplified, normalised GLB (stored mesh frame above), ≤ 4 MB, ≤ 400k triangles; quantised and
+   *  meshopt-packed since 2026-10-03 (engine/storedGlb.ts), a float GLB when saved before */
   mesh: Blob;
   /** top-down orthographic PNG, `TOP_IMAGE_PX`, transparent; frame: `topImageFrame` */
   top: Blob;

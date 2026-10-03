@@ -10,7 +10,7 @@ import { sceneParts, type StoredScene } from './bakeMesh';
 import { bakeSceneOff } from './importSession';
 import { buildMeshGroup, creaseParts, disposeTree } from './meshGroup';
 
-export { exportGlb, exportGlbStored } from './bakeMesh';
+export { exportGlb, exportGlbStored } from './floatGlb';
 
 export interface BakeInput {
   /** MODEL frame (the engine's `normalise` output) */

@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import type { MeshPart } from '../geometry';
 import { finishOf } from '../finish';
+import { safePartName } from './meshOps';
 
 // three-free, so the import worker creases without three.js; re-exported for the bake and preview
 export { CREASE_DEG, creaseParts } from './meshOps';
@@ -30,8 +31,6 @@ export function geometryOf(p: MeshPart): THREE.BufferGeometry {
   return g;
 }
 
-const safeName = (s: string, i: number): string => `${(s || 'part').replace(/[^\w.-]+/g, '_').slice(0, 40)}_${i}`;
-
 /** parts → a group of meshes, one standard material per part colour */
 export function buildMeshGroup(parts: readonly MeshPart[], name = 'robot'): THREE.Group {
   const group = new THREE.Group();
@@ -43,7 +42,7 @@ export function buildMeshGroup(parts: readonly MeshPart[], name = 'robot'): THRE
       name: `colour_${i}`,
     });
     const mesh = new THREE.Mesh(geometryOf(p), mat);
-    mesh.name = safeName(p.name, i);
+    mesh.name = safePartName(p.name, i);
     group.add(mesh);
   });
   return group;

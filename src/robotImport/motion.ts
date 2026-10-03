@@ -389,21 +389,29 @@ export function findRollerGroups(
     const outward = span.edge === 'front' || span.edge === 'left' ? 1 : -1;
     const edgeAt = outward > 0 ? hi[across] : lo[across];
     const axis: V3 = along === 1 ? [0, 1, 0] : [1, 0, 0];
+    // the candidates by their boxes: near the edge, low, within the span, round about the edge's
+    // direction (equal spread across it)
+    const cand = new Map<number, { c: number[]; h1: number; h2: number; r: number }>();
     for (const b of st.ids) {
       if (used.has(b)) continue;
       const c = [0, 1, 2].map((k) => (st.min[3 * b + k] + st.max[3 * b + k]) / 2);
       if ((edgeAt - c[across]) * outward > ROLLER_DEPTH_IN || c[2] > ROLLER_TOP_IN) continue;
       if (c[along] < Math.min(span.from, span.to) - 1 || c[along] > Math.max(span.from, span.to) + 1) continue;
-      // round about the edge's direction: equal spread across it, and no corner past the circle
       const h1 = (st.max[3 * b + across] - st.min[3 * b + across]) / 2;
       const h2 = (st.max[3 * b + 2] - st.min[3 * b + 2]) / 2;
       if (h1 < 0.05 || h2 < 0.05 || h1 / h2 < 0.85 || h1 / h2 > 1.18) continue;
-      let r = 0;
-      eachVertex(parts, new Set([b]), (x, y, z) => {
-        const d = Math.hypot((along === 1 ? x : y) - c[across], z - c[2]);
-        if (d > r) r = d;
-      });
-      if (r > 1.12 * Math.max(h1, h2)) continue;
+      cand.set(b, { c, h1, h2, r: 0 });
+    }
+    // and no corner past the circle: ONE pass over the model for every candidate (a pass each was
+    // 0.2 s at 250k triangles on goBILDA's BIOBUZZ kit, 2026-10-03)
+    eachVertex(parts, new Set(cand.keys()), (x, y, z, b) => {
+      const k = cand.get(b)!;
+      const d = Math.hypot((along === 1 ? x : y) - k.c[across], z - k.c[2]);
+      if (d > k.r) k.r = d;
+    });
+    for (const [b, k] of cand) {
+      if (used.has(b)) continue;
+      if (k.r > 1.12 * Math.max(k.h1, k.h2)) continue;
       const bodies = coaxialBodies(parts, b, 'roller').filter((x) => !used.has(x));
       const whole = fitRound(parts, bodies, axis);
       if (!whole || whole.radius < ROLLER_R_MIN_IN || whole.radius > ROLLER_R_MAX_IN) continue;
