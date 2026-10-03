@@ -1,6 +1,6 @@
 # HANDOFF — 2026-10-03d (ranked "Match found · loading into the match" never ends)
 
-**State: on `alpha`. NOT on `main`; production not deployed (client + server change, no migration).** `npm test` (3876 + 5531), `test:mm` (236), `test:workers` (149), `server:check`, `build`, `docaudit`, `uiaudit`, `bundleaudit` pass.
+**State: on `alpha` (94d7b0bd); `dsim-alpha` DEPLOYED from it 2026-10-03 (health ok, one machine). NOT on `main`; production not deployed (client + server change, no migration).** `npm test` (3876 + 5531), `test:mm` (236), `test:workers` (149), `server:check`, `build`, `docaudit`, `uiaudit`, `bundleaudit` pass.
 
 - **Report:** "stuck on 'loading into match' screen for an extended period of time".
 - **Cause:** that screen moves only on `strategyStart`, `matchStart` or `error`, and has no button. Joining a matchmaker code whose match was already over (cancelled at the 20 s grace, or the machine restarted) made the server create an EMPTY custom room under that code; the client got `welcome, roster` and nothing else. Reached by a socket that reconnects after the cancel it missed, or the reload path (`stagedMatch.ts`). It lasted until the socket was reaped: 15 min on a satellite, never on iad. Reproduced against the real server (PGlite): `scratch/staged-gone-probe.ts` (gitignored). Also: a join that threw answered nothing, and a parked search that cancelled was adopted back as "Match found" with ← Back re-parking it for the takeover.
