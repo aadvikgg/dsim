@@ -591,11 +591,11 @@ export function bbIntakeAct(world: World, r: RobotState, opts: BbIntakeOpts = {}
  * (`play.ts`), which applies the result as a rotate override while fire is held, and stage 5b,
  * which only calls a dumper ON TARGET once the chassis is within `BB_AIM_TOL` of it.
  */
-export function bbAimHeading(r: RobotState, target: ScoreTarget): number | null {
+export function bbAimHeading(r: RobotState, target: ScoreTarget, spinLead = false): number | null {
   const launcher = bbLauncherOf(r.spec, BB_HOOD_DEFAULT_DEG);
   if (bbIsTurreted(launcher)) return null; // the turret slews to it; the chassis is free
   // a FIXED launcher aims its own arc from its own muzzle, with the lead (`bbFixedAimHeading`)
-  if (launcher.kind === 'fixed') return bbFixedAimHeading(r, target);
+  if (launcher.kind === 'fixed') return bbFixedAimHeading(r, target, spinLead);
   const edge = bbShooterEdgeOf({ shooterMount: launcher.mount });
   const bearing = datan2(target.pos.y - r.pos.y, target.pos.x - r.pos.x);
   // heading + EDGE_ANGLE[edge] === bearing  ⇒  heading = bearing − EDGE_ANGLE[edge]
@@ -810,7 +810,7 @@ export function bbFixedRelease(r: RobotState, speed: number): { origin: Vec2; z:
  * as fire was held. A shot released WHILE spinning still carries the spin (`bbFixedRelease`), and
  * the landing predicate still sees it.
  */
-export function bbFixedAimHeading(r: RobotState, target: ScoreTarget): number {
+export function bbFixedAimHeading(r: RobotState, target: ScoreTarget, spinLead = false): number {
   const loc = bbFixedLocal(r.spec);
   const face = bbFixedFacing(r.spec);
   const vh = Math.max(flyPlannedSpeed(r) * dcos(bbFixedHood(r.spec)), 1);
@@ -823,8 +823,10 @@ export function bbFixedAimHeading(r: RobotState, target: ScoreTarget): number {
     const ox = r.pos.x + o.x;
     const oy = r.pos.y + o.y;
     const t = hyp(target.pos.x - ox, target.pos.y - oy) / vh;
-    tx = target.pos.x - v.x * t;
-    ty = target.pos.y - v.y * t;
+    // `spinLead`: the rule before `SIM_PATCH` 4, for a replay recorded then (`bbAimAssist`)
+    const lead = spinLead ? bbPointVel(r, { x: ox, y: oy }) : v;
+    tx = target.pos.x - lead.x * t;
+    ty = target.pos.y - lead.y * t;
     h = wrapAngle(datan2(ty - oy, tx - ox) - face);
   }
   return h;
@@ -1019,7 +1021,7 @@ export function bbLaunch(world: World, r: RobotState, cmd: RobotCommand, enabled
     // (`flyReady`, the kit OpMode's own gate), at the speed the wheel is turning NOW — a shot fed
     // the moment it crosses the minimum leaves a little slow. The wheel gives some speed back
     // (`flyShot`) and the feeder's own time sets the next one; recovery is the ready gate.
-    if (!flyFeedDue(r, world.time) || !flyReady(r)) return;
+    if (!flyFeedDue(r, world) || !flyReady(r)) return;
     const colour = feed(0);
     if (colour === undefined) return;
     const rel = bbFixedRelease(r, flyExitSpeed(r));

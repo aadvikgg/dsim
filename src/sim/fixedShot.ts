@@ -234,14 +234,22 @@ export function decodeFixedShotScores(r: RobotState, dt: number): boolean {
  * whose saturated turn happened to zero the push, it chattered 0.05↔0.12 rad every three ticks.
  * Holonomic drives keep their translation: the turn rides on top of it.
  */
-export function decodeFixedAimAssist(r: RobotState, cmd: RobotCommand, enabled: boolean): RobotCommand | null {
+export function decodeFixedAimAssist(r: RobotState, cmd: RobotCommand, enabled: boolean, world: { simPatch?: number } = {}): RobotCommand | null {
   if (!enabled || !cmd.fire || !r.aimAssist || r.autoPathActive || r.passive) return null;
   if (!decodeFixedLauncher(r.spec)) return null;
+  const fwd0 = ((cmd.leftDrive ?? 0) + (cmd.rightDrive ?? 0)) / 2;
+  if (!C.simPatchAtLeast(world, 4)) {
+    // a replay recorded before `SIM_PATCH` 4: the P-controller dead-banded at the flat tolerance,
+    // led by the whole chassis velocity, and the forward kept whatever the turn left
+    const e0 = wrapAngle(decodeFixedAim(r).heading - r.heading);
+    const a0 = Math.abs(e0) < C.DECODE_FIXED_AIM_TOL_PRE4 ? 0 : clamp(e0 * C.DECODE_FIXED_AIM_GAIN_PRE4, -1, 1);
+    const f0 = clamp(fwd0, -(1 - Math.abs(a0)), 1 - Math.abs(a0));
+    return { ...cmd, rotate: a0, leftDrive: f0 - a0, rightDrive: f0 + a0 };
+  }
   const err = decodeFixedAimErr(r, cmd);
   const aim = fixedAimTurn(r, err);
-  const fwd = ((cmd.leftDrive ?? 0) + (cmd.rightDrive ?? 0)) / 2;
   const room = (1 - Math.abs(aim)) * clamp(1 - Math.abs(err) / decodeFixedAimTol(r), 0, 1);
-  const f = clamp(fwd, -room, room);
+  const f = clamp(fwd0, -room, room);
   return { ...cmd, rotate: aim, leftDrive: f - aim, rightDrive: f + aim };
 }
 
@@ -286,7 +294,10 @@ export function decodeFixedAimTol(r: RobotState): number {
   return Math.min(datan2(C.GOAL_OPENING_RADIUS * C.DECODE_FIXED_AIM_OPENING_FRAC, d), C.DECODE_FIXED_AIM_TOL_MAX);
 }
 
-/** is a FIXED launcher's chassis on its aim heading (within `decodeFixedAimTol`), driving `cmd`? */
-export function decodeFixedOnTarget(r: RobotState, cmd: RobotCommand | undefined): boolean {
+/** is a FIXED launcher's chassis on its aim heading (within `decodeFixedAimTol`), driving `cmd`?
+ *  (A replay from before `SIM_PATCH` 4: within the flat `DECODE_FIXED_AIM_TOL_PRE4` of the aim led
+ *  by the whole chassis velocity.) */
+export function decodeFixedOnTarget(r: RobotState, cmd: RobotCommand | undefined, world: { simPatch?: number } = {}): boolean {
+  if (!C.simPatchAtLeast(world, 4)) return Math.abs(wrapAngle(decodeFixedAim(r).heading - r.heading)) < C.DECODE_FIXED_AIM_TOL_PRE4;
   return Math.abs(decodeFixedAimErr(r, cmd)) < decodeFixedAimTol(r);
 }

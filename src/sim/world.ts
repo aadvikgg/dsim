@@ -193,7 +193,7 @@ export function step(world: World, dt: number, commands: Map<number, RobotComman
     // turn replaces the command before the drivetrain model sees it — into `rotate` AND the tank side
     // drives, because a tank turns only from those (BIOBUZZ's stage 2 does the same). Null for every
     // robot without a fixed launcher, which leaves the command untouched.
-    const aimed = decodeFixedAimAssist(r, currentCmd, enabled);
+    const aimed = decodeFixedAimAssist(r, currentCmd, enabled, world);
     if (aimed !== null) currentCmd = aimed;
     actualCommands.set(r.id, currentCmd);
   }

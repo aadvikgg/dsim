@@ -246,8 +246,18 @@ export const SIM_VERSION = 5;
  *      cell and the ACM panel (`sim3d/bodies.ts`, `trayOuterSkin`).
  *   3  BIOBUZZ 3D: the wall square-up is a turn the SOLVE makes (one tick of extra yaw rate),
  *      not a heading written after it (`sim3d/step3dImpl.ts` stage 6b) — the online wall bump.
+ *   4  FIXED LAUNCHERS, both games: the aim assist turns with `fixedAimTurn` (`sim/aimTurn.ts`)
+ *      and leads only translation; DECODE releases inside `decodeFixedAimTol` and a tank's forward
+ *      yields to the turn; the feed clock reads through `flyFeedDue` with `FLY_FEED_TIME_EPS`. Before
+ *      it: the `*_PRE4` constants (`fixedShot.ts`, `biobuzz/play.ts`, `biobuzz/robot.ts`).
  */
-export const SIM_PATCH = 3;
+export const SIM_PATCH = 4;
+
+/** does `world` run the rules of `SIM_PATCH` `n`? A live world (no `simPatch`) runs them all; a
+ *  replay runs the ones it was recorded under. */
+export function simPatchAtLeast(world: { simPatch?: number }, n: number): boolean {
+  return world.simPatch === undefined || world.simPatch >= n;
+}
 
 /** a toggle-button release shorter than this is a dropout, not a release (`debouncedPress`,
  * `src/sim/robot.ts`). 2.5 ticks: a 3-tick gap, the fastest real re-press in replay 1dc6eb8f,
@@ -1994,6 +2004,10 @@ export const DECODE_KIT_HOOD_DEG = 70;
  * tight as the goal at the kit's own 40–60 in band.
  */
 export const DECODE_FIXED_AIM_OPENING_FRAC = 0.5;
+/** BEFORE `SIM_PATCH` 4 (a replay recorded then): the flat release tolerance (rad) and the
+ *  chassis-turn P gain a DECODE fixed launcher's aim assist used, dead-banded at that tolerance */
+export const DECODE_FIXED_AIM_TOL_PRE4 = 0.06;
+export const DECODE_FIXED_AIM_GAIN_PRE4 = 4.5;
 /** ...and never wider than this (rad), however close: the arc is not a straight line at point blank */
 export const DECODE_FIXED_AIM_TOL_MAX = 0.25;
 

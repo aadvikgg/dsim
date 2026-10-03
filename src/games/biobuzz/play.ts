@@ -8,6 +8,7 @@ import { robotSolids, type RobotSolids } from '../../sim/artifactSolids';
 import {
   BB_AIM_GAIN,
   BB_AIM_TOL,
+  BB_FIXED_AIM_TOL_PRE4,
   BB_FLOWERS,
   BB_FLOWER_RETRIEVE_S,
   BB_FLOWER_UNLOCK_S,
@@ -1508,11 +1509,15 @@ export function bbAimAssist(
   enabled: boolean,
 ): number | null {
   if (!enabled || !cmd.fire || !r.aimAssist) return null;
-  const want = bbAimHeading(r, bbAimTarget(world, r));
+  // a replay recorded before `SIM_PATCH` 4 keeps the fixed launcher's old aim: led by the muzzle's
+  // spin velocity too, and the dumper's P-controller dead-banded at `BB_FIXED_AIM_TOL_PRE4`
+  const pre4 = !C.simPatchAtLeast(world, 4);
+  const want = bbAimHeading(r, bbAimTarget(world, r), pre4);
   if (want === null) return null; // turreted: the turret does this
   const err = wrapAngle(want - r.heading);
-  if (bbLauncherOf(r.spec, BB_HOOD_DEFAULT_DEG).kind === 'fixed') return fixedAimTurn(r, err);
-  if (Math.abs(err) < BB_AIM_TOL) return 0; // lined up — hold still rather than hunt
+  const fixed = bbLauncherOf(r.spec, BB_HOOD_DEFAULT_DEG).kind === 'fixed';
+  if (fixed && !pre4) return fixedAimTurn(r, err);
+  if (Math.abs(err) < (fixed ? BB_FIXED_AIM_TOL_PRE4 : BB_AIM_TOL)) return 0; // lined up — hold still rather than hunt
   return clamp(err * BB_AIM_GAIN, -1, 1);
 }
 

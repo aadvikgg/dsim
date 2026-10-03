@@ -2026,6 +2026,9 @@ export const BB_FIXED_HOOD_DEFAULT_DEG = 68;
 /** the kit launcher: one 96-mm wheel on a 1:1 motor at 1250 ticks/s (28 PPR ⇒ 2679 rpm). The feed
  * is a continuous windmill whose rate is not published; 0.3 s an element is APPROX. */
 export const BB_FIXED_FLY_DEFAULT: FlywheelSpec = { mode: 'fixed', rpm: [2679], wheelMm: 96, feedS: 0.3 };
+/** BEFORE `SIM_PATCH` 4 (a replay recorded then): aim assist held a FIXED launcher still inside this
+ *  heading error (rad), turning by the dumper's P gain outside it */
+export const BB_FIXED_AIM_TOL_PRE4 = 0.04;
 
 /** how long a DUMPER takes to re-arm after a dump (s). APPROX — a tray swinging back down. It is
  * what stops a held fire button re-dumping on every capture. */

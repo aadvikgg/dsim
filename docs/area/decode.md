@@ -345,6 +345,9 @@ the one arc, and the unchanged flight stage and `checkGoalEntry` decide the hit.
   chassis: TW (mecanum) 30° → −0.074, Cypher (swerve) 30° → −0.16, 90° → −0.32. Now nothing in the
   drivetrain envelope crosses it, 10° to 172°, and each build ends within 0.02 rad (a swerve stops
   0.015 off: its pods ignore a command under 2 % of top speed).
+  ⚠️ **Gated on `SIM_PATCH` 4**, with the feed clock's slack and DECODE's release tolerance: a
+  replay recorded before steps the `*_PRE4` rules, and smoke holds five scenes to the old code's
+  pins (`scripts/fixed-pre4-scenes.ts`). Keep both branches until a `SIM_VERSION` bump retires them.
 - **The aim leads only the velocity along the driver's stick** (`decodeFixedLeadVel`). Pressed on
   the goal face, a turning chassis pivots on a corner and its centre moves sideways at about
   ω × the half-diagonal; leading that moved the aim against the turn (±0.1–0.18 rad every tick,

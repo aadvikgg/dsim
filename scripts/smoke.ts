@@ -35186,6 +35186,28 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
 }
 
 /**
+ * SIM_PATCH 4 (fixed launchers: the aim controller, the lead, DECODE's release tolerance and tank
+ * forward, the feed clock's slack). A replay recorded before it must re-simulate exactly as it was
+ * recorded, so the five scenes stepped under patch 3 land on the pins the code BEFORE the change
+ * produced (c5e56b05, measured 2026-10-03), and live they do not (the new rules really run).
+ */
+{
+  const { pre4Pins } = await import('./fixed-pre4-scenes');
+  const PRE4: Record<string, string> = {
+    decodeKit: 'fired=19 2612680600:2960403223',
+    decodeKitPress: 'fired=13 3719071965:4122911612',
+    decodeMecanum: 'fired=18 2015847934:2997278344',
+    bb2d: 'fired=13 971486037:2405579923',
+    bb3d: 'fired=13 3312699138:1540063362',
+  };
+  const old = await pre4Pins(3);
+  const live = await pre4Pins(undefined);
+  const bad = Object.keys(PRE4).filter((k) => old[k] !== PRE4[k]);
+  check('SIM_PATCH 4: a replay recorded under patch 3 steps the fixed launchers exactly as the code before the aim fix did (DECODE kit, kit on the goal face, mecanum; BIOBUZZ kit 2D and 3D)', bad.length === 0, bad.map((k) => `${k}: ${old[k]}`).join(' | '));
+  check('SIM_PATCH 4: ...and live, every one of those scenes runs the new rules (none lands on its old pin)', Object.keys(PRE4).every((k) => live[k] !== PRE4[k]), JSON.stringify(live));
+}
+
+/**
  * THE IMPORTER UI'S DOM-FREE HALF (lane 4: `src/robotImport/ui/`). The copy keeps the house rules,
  * the review list blocks what `coerceImported` would refuse (and passes an ordinary robot), the
  * wheel layouts hold (the block after this one), and the wiring the screens depend on is still there: the test drive's

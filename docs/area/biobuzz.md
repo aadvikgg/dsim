@@ -2063,7 +2063,9 @@ spans no edge (a Box Tube may sit on the corner beside it), carries POLLEN only,
   inside a tick. The card in 2D shook ±1.27 rad/s at 30 Hz, the heading 0.05–0.09 rad either side
   of the line, for as long as fire was held (3D overshot 0.10 and settled). Now every build settles
   without crossing, and the release still carries the real spin. Feed: 18 ticks per 0.30 s
-  (`flyFeedDue`; it was 18 or 19, 3.2/s over ten shots, now 3.33). Smoke: `fixed aim:`.
+  (`flyFeedDue`; it was 18 or 19, 3.2/s over ten shots, now 3.33). Smoke: `fixed aim:`. Gated on
+  `SIM_PATCH` 4: a replay recorded before keeps the spin lead and `BB_FIXED_AIM_TOL_PRE4`
+  (`bbAimAssist`, `bbAimHeading`'s `spinLead`).
 - **Dumpers keep their P-controller** (`BB_AIM_GAIN` 4.5, dead band `BB_AIM_TOL` 0.14), measured
   2026-10-02 and left alone: no lead, so no shake, but they overshoot — 30° off, mecanum/swerve
   cross by 0.03 (2D) to 0.14 (3D swerve); 69° off, 0.15–0.20 (2D) and 0.27–0.33 (3D) — then park

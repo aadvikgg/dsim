@@ -758,7 +758,7 @@ function updateFixedShotActions(world: World, r: RobotState, cmd: RobotCommand, 
   }
 
   // ---- fire (the feed clock read through `flyFeedDue`, so a 0.20-s feed is 12 ticks, not 13)
-  const canFire = enabled && r.hopper.length > 0 && flyFeedDue(r, world.time) && flyReady(r);
+  const canFire = enabled && r.hopper.length > 0 && flyFeedDue(r, world) && flyReady(r);
   const zoneOk = world.mode === 'free' || robotInLaunchZone(r);
   if (!canFire || !zoneOk) {
     updateIntake(world, r, cmd);
@@ -767,7 +767,7 @@ function updateFixedShotActions(world: World, r: RobotState, cmd: RobotCommand, 
   let go = false;
   if (cmd.fire) {
     // the driver's call — and with aim assist turning a fixed launcher, once it is on target
-    go = !(fixed && r.aimAssist) || decodeFixedOnTarget(r, cmd);
+    go = !(fixed && r.aimAssist) || decodeFixedOnTarget(r, cmd, world);
   } else if (r.autoFire) {
     go = decodeFixedShotScores(r, dt);
   }
