@@ -36671,5 +36671,65 @@ function fxImportFixed(): RobotSpec {
   check('tune: this build’s settings save says it keeps tuning (source pin)', /caps: \[SETTINGS_KEEPS_IMPORTS, SETTINGS_KEEPS_TUNE\]/.test(rd('src/net/api.ts')) && /keepsTune\(caps\) \? withImports : keepTuneFromOlderClient/.test(rd('server/db/repo.ts')));
 }
 
+/**
+ * MESH QUALITY (`engine/simplify.ts`, one error bound, no sloppy pass; the measurements on the real
+ * kits are in `docs/area/robot-import.md` "Mesh quality"). A guard on the properties that matter:
+ * one colour group holding a smooth part AND hundreds of tiny fasteners comes out under budget with
+ * the fasteners pruned and the smooth part's surface whole, every vertex still on it.
+ */
+{
+  const THREE = await import('three');
+  const { simplifyParts, simplifyLists } = await import('../src/robotImport/engine/simplify');
+  const { triangleCount } = await import('../src/robotImport/geometry');
+  type P = import('../src/robotImport/geometry').MeshPart;
+  const R = 2;
+  const sphere = new THREE.SphereGeometry(R, 120, 80);
+  const pos: number[] = Array.from(sphere.getAttribute('position').array as Float32Array);
+  const idx: number[] = Array.from(sphere.index!.array as ArrayLike<number>);
+  // 600 fasteners, 0.08 in cubes, in a row well away from the sphere
+  for (let i = 0; i < 600; i++) {
+    const box = new THREE.BoxGeometry(0.08, 0.08, 0.08);
+    box.translate(6 + (i % 30) * 0.3, Math.floor(i / 30) * 0.3, 0);
+    const base = pos.length / 3;
+    pos.push(...(box.getAttribute('position').array as Float32Array));
+    for (const k of box.index!.array as ArrayLike<number>) idx.push(base + k);
+  }
+  const area = (p: P, keep: (x: number, y: number, z: number) => boolean): number => {
+    let a = 0;
+    const v = p.positions;
+    const ix = p.indices!;
+    for (let t = 0; t < ix.length; t += 3) {
+      const [i0, i1, i2] = [ix[t] * 3, ix[t + 1] * 3, ix[t + 2] * 3];
+      if (!keep((v[i0] + v[i1] + v[i2]) / 3, (v[i0 + 1] + v[i1 + 1] + v[i2 + 1]) / 3, (v[i0 + 2] + v[i1 + 2] + v[i2 + 2]) / 3)) continue;
+      const ux = v[i1] - v[i0], uy = v[i1 + 1] - v[i0 + 1], uz = v[i1 + 2] - v[i0 + 2];
+      const wx = v[i2] - v[i0], wy = v[i2 + 1] - v[i0 + 1], wz = v[i2 + 2] - v[i0 + 2];
+      a += Math.hypot(uy * wz - uz * wy, uz * wx - ux * wz, ux * wy - uy * wx) / 2;
+    }
+    return a;
+  };
+  const near = (x: number, y: number, z: number): boolean => Math.hypot(x, y, z) < 4;
+  const part: P = { positions: new Float32Array(pos), indices: new Uint32Array(idx), color: [0.8, 0.8, 0.8], name: 'kit' };
+  const before = area(part, near);
+  const r = await simplifyParts([{ ...part, positions: part.positions.slice(), indices: part.indices!.slice() }], 3000);
+  const out = r.parts[0];
+  let worst = 0;
+  for (let i = 0; i < out.positions.length; i += 3) {
+    const d = Math.hypot(out.positions[i], out.positions[i + 1], out.positions[i + 2]);
+    if (d < 4) worst = Math.max(worst, Math.abs(d - R));
+  }
+  const kept = area(out, near) / before;
+  check(
+    'mesh quality: a smooth part sharing its colour with 600 fasteners comes out under budget, its surface whole (≥ 97 % of its area) and on the CAD surface (vertices within 1 % of the radius), the fasteners pruned first',
+    r.trisOut <= 3000 && kept >= 0.97 && worst < 0.02 * R * 0.5 && triangleCount(r.parts) === r.trisOut,
+    JSON.stringify({ tris: r.trisOut, kept: kept.toFixed(4), worst: worst.toFixed(4) }),
+  );
+  check('mesh quality: no sloppy pass is left in the simplifier (source pin)', !/simplifySloppy\(/.test(readFileSync('src/robotImport/engine/simplify.ts', 'utf8')));
+  // the lists stay apart and share one bound
+  const ring = new THREE.TorusGeometry(1, 0.3, 40, 120);
+  const ringPart: P = { positions: new Float32Array(ring.getAttribute('position').array as Float32Array), indices: new Uint32Array(ring.index!.array as ArrayLike<number>), color: [0.1, 0.1, 0.1], name: 'wheel' };
+  const both = await simplifyLists([[{ ...part, positions: part.positions.slice(), indices: part.indices!.slice() }], [ringPart]], 4000);
+  check('mesh quality: simplifyLists keeps each list apart and brings the whole under its budget', both.lists.length === 2 && both.lists[1].length === 1 && both.trisOut <= 4000 && triangleCount(both.lists[0]) + triangleCount(both.lists[1]) === both.trisOut, String(both.trisOut));
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

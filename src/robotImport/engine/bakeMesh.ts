@@ -15,7 +15,7 @@ import { transformParts, triangleCount, type MeshPart } from '../geometry';
 import { MAX_MESH_BYTES, ROBOT_TO_STORED_MESH, STORED_MESH_TO_ROBOT, readStoredMotion, type StoredMotion } from '../types';
 import { buildMeshGroup, creaseParts, disposeTree } from './meshGroup';
 import { partsFromObject } from './parse';
-import { simplifyParts } from './simplify';
+import { simplifyLists } from './simplify';
 
 type V3 = [number, number, number];
 
@@ -131,15 +131,10 @@ export async function bakeSceneHere(scene: StoredScene): Promise<{ glb: ArrayBuf
   while (glb.byteLength > MAX_MESH_BYTES && refits < 4) {
     const tris = triangleCount(sceneParts(cur));
     const ratio = Math.max(2000 / Math.max(1, tris), (MAX_MESH_BYTES * 0.9) / glb.byteLength);
-    const refit = async (parts: MeshPart[]): Promise<MeshPart[]> => {
-      if (!parts.length) return parts;
-      const s = await simplifyParts(parts.map((p) => ({ ...p, normals: null })), Math.max(12, Math.floor(triangleCount(parts) * ratio)));
-      return creaseParts(s.parts);
-    };
-    const rest = await refit(cur.rest);
-    const moving: StoredScene['moving'] = [];
-    for (const m of cur.moving) moving.push({ ...m, parts: await refit(m.parts) });
-    cur = { rest, moving };
+    // one error bound over the robot and its moving parts (`simplifyLists`), each kept apart
+    const strip = (parts: MeshPart[]): MeshPart[] => parts.map((p) => ({ ...p, normals: null }));
+    const s = await simplifyLists([strip(cur.rest), ...cur.moving.map((m) => strip(m.parts))], Math.floor(tris * ratio));
+    cur = { rest: creaseParts(s.lists[0]), moving: cur.moving.map((m, i) => ({ ...m, parts: creaseParts(s.lists[i + 1]) })) };
     glb = await exportStoredScene(cur);
     refits++;
   }

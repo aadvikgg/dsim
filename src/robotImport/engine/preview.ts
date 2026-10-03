@@ -7,6 +7,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import type { ImportedMech, Vec2 } from '../../types';
 import { bbox, triangleBody, type MeshPart } from '../geometry';
 import type { MotionPart } from '../types';
@@ -92,6 +93,14 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
   renderer.setClearColor(0x000000, 0);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   const scene = new THREE.Scene();
+  // something for a metal finish to reflect (`finishOf`): the match lights robots the same way
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const room = new RoomEnvironment();
+  const envMap = pmrem.fromScene(room, 0.04).texture;
+  room.dispose();
+  pmrem.dispose();
+  scene.environment = envMap;
+  scene.environmentIntensity = 0.4;
   scene.add(new THREE.HemisphereLight(0xffffff, 0x50555c, 1.6));
   const key = new THREE.DirectionalLight(0xffffff, 2.2);
   key.position.set(30, 20, 60);
@@ -457,6 +466,7 @@ export function createPreview(canvas: HTMLCanvasElement, initial: Partial<Previe
       controls.removeEventListener('change', render);
       controls.dispose();
       disposeTree(scene);
+      envMap.dispose();
       renderer.dispose();
       renderer.forceContextLoss();
     },

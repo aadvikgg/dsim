@@ -13,6 +13,7 @@ import { frontArrowSpot } from '../../../render/drawImported';
 import { BB_DECK_Z } from '../config';
 import { loader } from './renderElementsGlb';
 import { readStoredMotion, type StoredMotion } from '../../../robotImport/types';
+import { finishOf, OLD_FINISH } from '../../../robotImport/finish';
 
 /**
  * BIOBUZZ 3D — AN IMPORTED ROBOT'S OWN PARTS (`docs/robot-import-plan.md` §1 "In a match").
@@ -175,13 +176,19 @@ export function prepareImportedMesh(scene: THREE.Object3D): THREE.Group {
     const m = o as THREE.Mesh;
     if (!m.isMesh) return;
     m.castShadow = true;
-    m.receiveShadow = false;
+    // self-shadowing is what gives a robot its depth (an arm over the chassis, the frame over the
+    // wheels); without it the model read as a flat cut-out (2026-10-03, "Mesh quality")
+    m.receiveShadow = true;
     if (!m.geometry.getAttribute('normal')) m.geometry.computeVertexNormals();
     SHARED.add(m.geometry);
     for (const mat of materialsOf(m)) {
       // ⚠️ A ROBOT PART NEVER GLOWS — whatever the CAD exporter wrote
       const e = mat as THREE.MeshStandardMaterial;
       if (e.emissive) e.emissive.setRGB(0, 0, 0);
+      // a mesh stored before finishes existed (every part matte plastic) gets its colour's finish
+      if (e.isMeshStandardMaterial && Math.abs(e.metalness - OLD_FINISH.metalness) < 1e-3 && Math.abs(e.roughness - OLD_FINISH.roughness) < 1e-3) {
+        Object.assign(e, finishOf([e.color.r, e.color.g, e.color.b]));
+      }
       if ('emissiveMap' in e) e.emissiveMap = null;
       SHARED.add(mat);
       for (const t of texturesOf(mat)) SHARED.add(t);

@@ -4,6 +4,16 @@
  * simplification is invariant under rotation and uniform scale, so the engine simplifies ONCE
  * per file, in the source frame, and every later change of units, up axis or yaw re-measures the
  * small result instead of the multi-million-triangle original.
+ *
+ * ⚠️ ONE ERROR BOUND FOR THE WHOLE ROBOT, NEVER A SLOPPY PASS (measured 2026-10-03 on the REV and
+ * goBILDA starter-bot STEPs, `docs/area/robot-import.md` "Mesh quality"). The old pass gave each
+ * colour group a share of the budget in proportion to its triangles and, where the bounded
+ * `simplify` stalled short of it, let `simplifySloppy` finish: every one of the goBILDA kit's 12
+ * groups went sloppy, which tore triangular holes through perforated plates and extrusions and
+ * turned gears into blobs (p90 2.09 mm, max 15.9 mm off the CAD at 84k triangles). One ABSOLUTE
+ * bound searched for the whole robot, each group simplified to it with small disconnected pieces
+ * pruned, lands at the same triangle count with p90 0.66 mm and max 3.6 mm, and no shards. Groups
+ * are simplified one call each: in one call, coincident vertices of two colours read as a seam.
  */
 import { MeshoptSimplifier } from 'three/examples/jsm/libs/meshopt_simplifier.module.js';
 import { triangleCount, type MeshPart } from '../geometry';
@@ -13,12 +23,16 @@ export interface SimplifyReport {
   parts: MeshPart[];
   trisIn: number;
   trisOut: number;
-  /** meshopt's largest relative error over the parts (fraction of each part's extent) */
+  /** the error bound used, as a fraction of the model's extent (0 when nothing was simplified) */
   error: number;
 }
 
-/** relative error the error-bounded pass may introduce before the sloppy pass takes over */
-const TARGET_ERROR = 0.002;
+/** the ladder's first bound, as a fraction of the model's extent (~0.02 mm on an 18-in robot) */
+const FIRST_BOUND = 4e-5;
+/** each rung doubles the bound; this many at most (2^40 × the first is past any model's size) */
+const MAX_RUNGS = 40;
+/** bisection steps between the last two rungs */
+const REFINE_STEPS = 5;
 
 function extentOf(parts: readonly MeshPart[]): number {
   const mn = [Infinity, Infinity, Infinity];
@@ -35,39 +49,57 @@ function extentOf(parts: readonly MeshPart[]): number {
   return Math.max(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2], 1e-9);
 }
 
-/**
- * Weld every part, then bring the whole model under `budget` triangles. Each part gets a share
- * of the budget in proportion to its own triangle count (at least 12 triangles, so a small part
- * keeps a shape); `simplify` runs first with a bounded error, and where it stalls short of the
- * target (thousands of disconnected fasteners do that) `simplifySloppy` finishes the job.
- */
+/** weld every part and bring the whole model under `budget` triangles (one list: `simplifyLists`) */
 export async function simplifyParts(
   parts: readonly MeshPart[],
   budget: number,
   onProgress?: (frac: number) => void,
   opts: { consume?: boolean } = {},
 ): Promise<SimplifyReport> {
+  const r = await simplifyLists([parts], budget, onProgress, opts);
+  return { parts: r.lists[0], trisIn: r.trisIn, trisOut: r.trisOut, error: r.error };
+}
+
+/**
+ * Weld every part of every list, then bring them all under `budget` triangles with ONE error
+ * bound, and hand them back in the same lists (a part simplified to nothing is left out). A
+ * stored robot's static body and each of its moving parts are separate lists that must stay
+ * separate, and share the bound so none of them is cut harder than the rest.
+ *
+ * The bound is found by a LADDER: from `FIRST_BOUND`, doubled each rung, each rung run on the last
+ * rung's result (so every pass is smaller than the one before), then `REFINE_STEPS` of bisection
+ * between the last two rungs. Deviation can add across rungs, to at most about twice the final
+ * bound; measured, the same accuracy as a bisection on the original (p90 0.378 vs 0.393 mm) at a
+ * third of the time.
+ */
+export async function simplifyLists(
+  lists: readonly (readonly MeshPart[])[],
+  budget: number,
+  onProgress?: (frac: number) => void,
+  opts: { consume?: boolean } = {},
+): Promise<{ lists: MeshPart[][]; trisIn: number; trisOut: number; error: number }> {
   await MeshoptSimplifier.ready;
-  const trisIn = triangleCount(parts);
-  const eps = extentOf(parts) * 1e-6;
-  // progress: welding is the first quarter, the first simplify pass the rest (later passes, when
-  // the budget overshoots, are small)
+  const all = lists.flat();
+  const trisIn = triangleCount(all);
+  const extent = extentOf(all);
+  const eps = extent * 1e-6;
+  // progress: welding is the first quarter, the ladder the rest
   let doneTris = 0;
-  const tick = (tris: number, from: number, span: number): void => {
-    doneTris += tris;
-    onProgress?.(from + (span * doneTris) / Math.max(1, trisIn));
-  };
-  // `consume`: the caller hands the parts over (`parts` is a mutable array only it held), and each
+  const report = (f: number): void => onProgress?.(Math.min(1, f));
+  // `consume`: the caller hands the parts over (each list a mutable array only it held), and each
   // one's arrays are let go as soon as its welded copy exists, instead of all of them living until
   // the end beside their copies
-  const src = parts as (MeshPart | null)[];
-  const welded: { part: Pick<MeshPart, 'color' | 'name'>; positions: Float32Array; indices: Uint32Array; body: Uint32Array | null }[] = [];
-  for (let i = 0; i < src.length; i++) {
-    const p = src[i]!;
-    welded.push({ part: { color: p.color, name: p.name }, ...weld(p, eps) });
-    tick(triangleCount([p]), 0, 0.25);
-    if (opts.consume) src[i] = null;
-  }
+  const welded: { list: number; part: Pick<MeshPart, 'color' | 'name'>; positions: Float32Array; indices: Uint32Array; body: Uint32Array | null }[] = [];
+  lists.forEach((list, li) => {
+    const src = list as (MeshPart | null)[];
+    for (let i = 0; i < src.length; i++) {
+      const p = src[i]!;
+      welded.push({ list: li, part: { color: p.color, name: p.name }, ...weld(p, eps) });
+      doneTris += triangleCount([p]);
+      report((0.25 * doneTris) / Math.max(1, trisIn));
+      if (opts.consume) src[i] = null;
+    }
+  });
   // A MODEL WITH NO BODIES OF ITS OWN (an STL, a PLY, a glTF exported as one mesh, or a reader that
   // gave every vertex one id) gets one per connected piece of the welded mesh, numbered across the
   // parts. Positions and indices are untouched: only `body` is added.
@@ -79,49 +111,43 @@ export async function simplifyParts(
       next += c.count;
     }
   }
-  doneTris = 0;
-  const weldedTris = welded.reduce((s, w) => s + w.indices.length / 3, 0);
-  const out: MeshPart[] = [];
-  let error = 0;
-  if (weldedTris <= budget) {
-    for (const w of welded) if (w.indices.length) out.push({ ...compact(w.positions, w.indices, w.body), color: w.part.color, name: w.part.name });
-    return { parts: out, trisIn, trisOut: weldedTris, error: 0 };
-  }
-  // meshopt lands NEAR a target, not on it (and the 12-triangle floor adds a little), so the
-  // budget is a ceiling enforced by re-running the pass on its own result, aimed lower each time
-  let current = welded.map((w) => ({ positions: w.positions, indices: w.indices, part: w.part, body: w.body }));
-  let total = weldedTris;
-  let aim = budget;
-  for (let pass = 0; pass < 4 && total > budget; pass++) {
-    const ratio = aim / total;
-    const next: typeof current = [];
-    for (const w of current) {
-      const n = w.indices.length / 3;
-      if (n === 0) continue;
-      const target = Math.min(n, Math.max(12, Math.floor(n * ratio)));
-      let idx = w.indices;
-      if (target < n) {
-        const [res, err] = MeshoptSimplifier.simplify(idx, w.positions, 3, target * 3, TARGET_ERROR, []);
-        idx = res;
-        error = Math.max(error, err);
-        if (idx.length / 3 > target * 1.1) {
-          const [sl, e2] = MeshoptSimplifier.simplifySloppy(idx, w.positions, 3, null, target * 3, 0.05);
-          if (sl.length >= 3) {
-            idx = sl;
-            error = Math.max(error, e2);
-          }
-        }
-      }
-      if (pass === 0) tick(n, 0.25, 0.75);
-      if (idx.length < 3) continue;
-      next.push({ positions: w.positions, indices: idx, part: w.part, body: w.body });
+  const count = (r: readonly Uint32Array[]): number => r.reduce((a, x) => a + x.length / 3, 0);
+  let cur = welded.map((w) => w.indices);
+  let res = cur;
+  let bound = 0;
+  if (count(cur) > budget) {
+    const run = (src: readonly Uint32Array[], e: number): Uint32Array[] =>
+      src.map((ix, i) => (ix.length >= 3 ? (MeshoptSimplifier.simplify(ix, welded[i].positions, 3, 0, e, ['ErrorAbsolute', 'Prune'])[0] as Uint32Array) : ix));
+    let e = extent * FIRST_BOUND;
+    let lastE = 0;
+    for (let rung = 0; ; rung++) {
+      res = run(cur, e);
+      report(0.25 + 0.6 * Math.min(1, rung / 12));
+      if (count(res) <= budget || rung >= MAX_RUNGS) break;
+      cur = res;
+      lastE = e;
+      e *= 2;
     }
-    current = next;
-    total = current.reduce((s, w) => s + w.indices.length / 3, 0);
-    aim = Math.floor(aim * (budget / Math.max(total, 1)) * 0.995);
+    // refine between the last rung over budget and the first under it, on the last result over it
+    let lo = Math.max(lastE, extent * FIRST_BOUND * 0.5);
+    let hi = e;
+    for (let i = 0; i < REFINE_STEPS && lastE > 0; i++) {
+      const mid = Math.sqrt(lo * hi);
+      const r = run(cur, mid);
+      report(0.85 + (0.15 * (i + 1)) / REFINE_STEPS);
+      if (count(r) <= budget) {
+        hi = mid;
+        res = r;
+      } else lo = mid;
+    }
+    bound = hi;
   }
-  for (const w of current) out.push({ ...compact(w.positions, w.indices, w.body), color: w.part.color, name: w.part.name });
-  return { parts: out, trisIn, trisOut: triangleCount(out), error };
+  const out: MeshPart[][] = lists.map(() => []);
+  welded.forEach((w, i) => {
+    if (res[i].length >= 3) out[w.list].push({ ...compact(w.positions, res[i], w.body), color: w.part.color, name: w.part.name });
+  });
+  report(1);
+  return { lists: out, trisIn, trisOut: count(res), error: bound / extent };
 }
 
 /** how many different body ids the welded parts carry (0 when none carries any) */

@@ -14,7 +14,7 @@ import { triangleCount, type MeshPart } from '../geometry';
 import { exportStoredScene, readStoredScene, sceneParts, type StoredScene } from './bakeMesh';
 import { creaseParts, disposeTree } from './meshGroup';
 import { mergeByColour } from './meshOps';
-import { simplifyParts } from './simplify';
+import { simplifyLists } from './simplify';
 
 /** below this a robot stops looking like itself, so the relay sends the picture alone instead */
 const MIN_TRIANGLES = 400;
@@ -39,14 +39,12 @@ export async function liteMesh(glb: ArrayBuffer, maxBytes: number): Promise<Arra
   for (let pass = 0; pass < 6; pass++) {
     const total = triangleCount(sceneParts(scene));
     const budget = Math.max(MIN_TRIANGLES, Math.floor((total * maxBytes * AIM) / bytes));
-    const ratio = budget / Math.max(1, total);
-    const cut = async (parts: MeshPart[]): Promise<MeshPart[]> =>
-      // the simplifier numbers the connected pieces of a part with no ids; the relay has no use for them
-      parts.length ? (await simplifyParts(parts.map((p) => ({ ...p, normals: null })), Math.max(12, Math.floor(triangleCount(parts) * ratio)))).parts.map((p) => ({ ...p, body: null })) : parts;
-    const rest = await cut(scene.rest);
-    const moving: StoredScene['moving'] = [];
-    for (const m of scene.moving) moving.push({ ...m, parts: await cut(m.parts) });
-    scene = { rest, moving };
+    // one error bound over the robot and its moving parts, each kept apart (`simplifyLists`); the
+    // simplifier numbers the connected pieces of a part with no ids, and the relay has no use for them
+    const prep = (parts: MeshPart[]): MeshPart[] => parts.map((p) => ({ ...p, normals: null }));
+    const s = await simplifyLists([prep(scene.rest), ...scene.moving.map((m) => prep(m.parts))], budget);
+    const bare = (parts: MeshPart[]): MeshPart[] => parts.map((p) => ({ ...p, body: null }));
+    scene = { rest: bare(s.lists[0]), moving: scene.moving.map((m, i) => ({ ...m, parts: bare(s.lists[i + 1]) })) };
     const out = await exportStoredScene({ rest: creaseParts(scene.rest), moving: scene.moving.map((m) => ({ ...m, parts: creaseParts(m.parts) })) });
     if (out.byteLength <= maxBytes) return out;
     if (budget <= MIN_TRIANGLES) return null;

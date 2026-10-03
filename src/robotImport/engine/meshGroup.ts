@@ -4,6 +4,7 @@
  */
 import * as THREE from 'three';
 import type { MeshPart } from '../geometry';
+import { finishOf } from '../finish';
 
 // three-free, so the import worker creases without three.js; re-exported for the bake and preview
 export { CREASE_DEG, creaseParts } from './meshOps';
@@ -38,8 +39,7 @@ export function buildMeshGroup(parts: readonly MeshPart[], name = 'robot'): THRE
   parts.forEach((p, i) => {
     const mat = new THREE.MeshStandardMaterial({
       color: new THREE.Color().setRGB(p.color[0], p.color[1], p.color[2]),
-      roughness: 0.55,
-      metalness: 0.05,
+      ...finishOf(p.color),
       name: `colour_${i}`,
     });
     const mesh = new THREE.Mesh(geometryOf(p), mat);

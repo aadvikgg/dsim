@@ -328,6 +328,25 @@ within 4 in of it and under 10 in, grown to its axle). `[]` = none.
   ramp off `bbRampOut`. Drawn spin is capped at 26 rad/s, past which a spoked wheel strobes. The
   editor's preview has Play for the same, with fixed rates.
 
+## Mesh quality
+
+Measured 2026-10-03 on the REV and goBILDA starter-bot STEPs (distance from the occt mesh, area
+sampled, offscreen renders under the match's lighting):
+
+- **One error bound for the robot, no sloppy pass** (`engine/simplify.ts`). The per-group share
+  plus `simplifySloppy` fallback shredded every goBILDA group and 88 % of REV's (holes through
+  perforated plates, gears as blobs): p90 2.09 mm, max 15.9 mm at 84k triangles. One absolute bound,
+  found by a doubling ladder and five bisection steps, each colour group its own call with `Prune`:
+  p90 0.66 mm, max 3.6 mm at the same count. The bake's refit and `liteMesh` use it too, over the
+  robot and its moving parts at once (`simplifyLists`). Costs a few seconds more in the import worker.
+- **Finish by colour** (`robotImport/finish.ts`): light neutral → metal 1 / rough 0.4, mid neutral
+  → 0.5 / 0.45, dark → 0 / 0.6, saturated → 0 / 0.45. Every part was 0.05 / 0.55, which turned
+  anodised aluminium to chalk. A stored mesh with the old pair is upgraded on load. The editor
+  preview has a room environment so a metal has something to reflect.
+- **The robot receives shadows** in BIOBUZZ 3D (`prepareImportedMesh`); it read as a flat cut-out.
+- **Not worth it (measured):** finer STEP tessellation (0.25 rad: twice the triangles in, the same
+  error out), another crease angle (40° holds), the 48-colour cap (both kits have 12).
+
 ## Practice tuning
 
 `ImportedRobot.tune` (`ImportTuning`, `docs/area/robot-import.md`; coerced by `coerceTune` to
