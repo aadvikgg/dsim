@@ -1,3 +1,13 @@
+# HANDOFF — 2026-10-03 (ranked: new rating rules, 10/7 placement, BIOBUZZ Act 2 recalculation)
+
+**State: see the commit for where it was pushed and deployed.** `npm test`, `test:mm` (237), `dbtest`, `server:check`, `build`, `uiaudit`, `docaudit`, `bundleaudit` pass. **Server change + migration 0058.** Rules in `docs/area/accounts.md` ("RULE SETS AND THE RECALCULATION").
+
+- **Owner:** BIOBUZZ 1v1 #1 was 5-0 at 1685 and nobody else could reach it; recalculate the season; "try many things", dry run first; then 10 games for 1v1, 7 for 2v2, rewrite old match records; new matches had been played since the dry run, so handle that.
+- **Measured:** the act's 751 matches exported read-only from production; a replay reproduced all 1608 results and 246 boards (rules switched 2026-09-27 21:25Z). 453 variants scored on online log-loss. Winner `team-2026-10-03` (RD ≤ 250, floor 200 → 60 over 20 games): 1v1 0.5500 → 0.5405. Dry-run board: catto_ 1483 #1 (24 g), Abova 1685 → 1491 (5 g, unranked until 10). Scratch tools in `scratch/recalc-*.ts` (gitignored).
+- **Built:** `RatingRules` sets + `matches.rating_rules` stamp + `match_participants.away/early` (0058); `server/ratingRecalc.ts` (validate as rated, then re-rate, under a lock, with backup + notices) and `POST /api/admin/rating-recalc`; per-mode placement `RANKED_PLACEMENT` (archived seasons keep 5); the `rating.recalculated` notice.
+- **Applies to every game:** the new rules rate DECODE and Chain Reaction matches from the deploy, and their live boards need 10/7 games. Only BIOBUZZ was recalculated; the other two can be with the same endpoint (dry run first).
+- **Running it:** `curl -X POST "$GS/api/admin/rating-recalc?game=biobuzz&secret=…"` is the dry run; add `&apply=1` to apply. 409 = the log did not replay exactly; read `validation.problems`. To undo: `rating_recalcs.backup` holds every overwritten value.
+
 # HANDOFF — 2026-10-02f (robot import finished and on `alpha`: polish lane, hand loading, the kits measured)
 
 **State: everything on the 2026-10-02e list is done. `feat/robot-import` was fast-forwarded into `alpha` (`aa9ef5fb`, owner's go-ahead) and dsim-alpha redeployed from it (`/health` ok, one machine, alpha.playdsim.com serves `aa9ef5f`). Not on `main`.** `npm test` (both suites), `build`, `server:check`, `dbtest`, `test:workers`, `test:mm`, `uiaudit`, `docaudit`, `bundleaudit` pass; `shiftaudit`: the full run found one shift (`/configure/audio`, a fold body laid out mid-probe) that a re-run of that page did not reproduce; the seeded pass alone, twice, 476 states each, 0 shifts. Production would need the same server deploy with the client (sim, coercer, settings merge).
