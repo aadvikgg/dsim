@@ -251,14 +251,15 @@ REV's is CC BY-NC-SA); `scripts/robot-import/realcadprobe.cjs` drives the real e
   failed inside BRepMesh, each was caught per face, and `ReadStepFile` returned `success: true`
   with 1,334 meshes, 118,734 faces and ZERO triangles. Deflection, units and parameters change
   nothing. So: faces with no triangles is how a read says it ran out (`stepToParts` counts them).
-- **Up to 20 MB a STEP is read whole**, exactly as before (`STEP_PARAMS`, bounding-box ratio), in
+- **Up to 8 MB a STEP is read whole** (`DIRECT_MAX_BYTES`, `STEP_PARAMS`, bounding-box ratio), in
   one occt worker. A whole read that comes back with faces and no triangles is read again in pieces.
-- **Past 20 MB it is read in PIECES** (`stepSplit.ts`). One pass indexes every entity (its bytes,
+  It was 20 MB: past 8, pieces in parallel are faster (a 12.6 MB file: 10.0 s whole, 4.2 s in pieces).
+- **Past 8 MB it is read in PIECES** (`stepSplit.ts`). One pass indexes every entity (its bytes,
   its type, its references and whether each sits in a list): 0.45 s and 1.8 M entities for REV,
   1.1 s and 4.1 M for goBILDA's 390 MB. A ROOT is every non-structural item of a shape
   representation (a solid, a shell model, a curve set); the SKELETON is everything no root reaches
   (products, occurrences, placements, colours: 1.3 and 1.5 MB). Each piece is a complete STEP file:
-  the header, the whole skeleton, and about `STEP_PIECE_BYTES` (12 MB) of roots, packed in file
+  the header, the whole skeleton, and about `pieceBytesFor` (3–6 MB, two a reader) of roots, packed in file
   order. A shape representation lists only its piece's roots, and a styled item on something left
   out is left out with it (a presentation list just loses it). A root over half a piece is split
   into its FACES (goBILDA's 99 MB gearbox body has 3,520): the solid and its shell come along as an
@@ -283,9 +284,16 @@ REV's is CC BY-NC-SA); `scripts/robot-import/realcadprobe.cjs` drives the real e
 - **Pieces mesh at an ABSOLUTE 0.5 mm and 0.5 rad** (`STEP_PIECE_PARAMS`): a bounding-box ratio is
   per top-level shape, and a piece's is a share of the robot. Meshing is not the cost: 2 mm and 1 rad
   cut a 24 MB piece's 29.3 s to 27.4 s. occt reads about 1 MB of STEP a second.
-- **A pool of occt workers** reads the pieces: a quarter of the cores, two on a 4 GB device, three at
-  most, each keeping its occt (and its heap's high-water mark) between pieces. Pieces were 24 MB at
-  first; 12 MB gave the same time and cut REV's renderer peak from 3.7 to 2.6 GB.
+- **A pool of occt workers** reads the pieces, biggest first (`poolSize`): every core but two, up to
+  six on a device that reports 8 GB (eight with 16 cores), three on 4 GB, two on 2 GB. Each keeps its
+  occt (and its heap's high-water mark) between pieces. The read is CPU-bound and splits evenly
+  (REV: 3 readers 64.6 s, 6 36.0 s, 8 30.5 s, 13 22.6 s, the summed occt time unchanged), so memory is
+  the limit: a reader peaks at 627 MB on 12 MB pieces and 368 MB on 6 MB ones, which is why pieces
+  are 6 MB at most (`STEP_PIECE_BYTES`; 24 MB at first, then 12). The skeleton every piece re-reads
+  costs occt ~0.26 s a piece (4–6 % of the read), so it is not trimmed per piece.
+- **Planning is string-light.** `planPieces` sized parts by parsing their points with
+  `String.fromCharCode(...bytes)`, a spread through the iterator protocol per byte: 6.7 s of a 420 MB
+  file. `fromCharCode.apply` (`chars`) gives the same strings: 1.7 s, the plan bit-identical.
 - **Parts under 16 mm across are left out of a file read in pieces** (`MIN_PART_MM`): screws, nuts,
   washers. A part's size is the box of the points ON it (B-rep vertices, B-spline control points, a
   whole circle's centre ± radius), not of every point it names: a cylinder's placement can sit
@@ -317,6 +325,11 @@ REV's is CC BY-NC-SA); `scripts/robot-import/realcadprobe.cjs` drives the real e
 | goBILDA DECODE mecanum (58 MB zip, 390 MB STEP) | 155 s | 0 ms | 2.7 GB | 6.24 M → 97.6k | 17.25 × 17.77 in, 17.80 in | ±4.70, ±8.15 in | assumed (CAD front = launcher) |
 | goBILDA BIOBUZZ (66 MB zip, 420 MB STEP) | 158.9 s | 0 ms | 2.48 GB | 5.66 M → 96.1k | 17.78 × 16.78 in, 12.02 in | ±5.72, ±7.8–7.9 in | detected from the intake |
 | goBILDA DECODE skid-steer (36 MB zip) | 1.1 s | 0 ms | 0.53 GB | the file is cut off, said so | | | |
+
+Re-measured 2026-10-03 with the pool, 6 MB pieces and the faster plan (32-thread, 63 GB machine, so
+eight readers; offscreen production editor, the whole import from drop to measured): REV 85 → 34.1 s
+(renderer peak 3.4 GB), goBILDA BIOBUZZ 170.1 → 53.9 s (unzip 1.9 s, index and plan 2.7, read 43,
+simplify 5.2, measure 0.7; peak 3.5 GB, was 2.6).
 
 Units mm (declared), up +Z, four wheels found, Review clean on all three; each test-drives. Against
 what the vendors publish: REV's frame is 420 mm extrusions across (measured 420 mm wide) on 408 mm

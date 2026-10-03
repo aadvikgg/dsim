@@ -3,11 +3,12 @@
  * reads the bytes itself (a 420 MB file never passes through the page), checks that the file is
  * whole, and has occt (`occtWorker.ts`) read it:
  *
- * - up to `DIRECT_MAX_BYTES`, in ONE read, exactly as the importer always has;
+ * - up to `DIRECT_MAX_BYTES`, in ONE read;
  * - past that, IN PIECES (`stepSplit.ts`): occt's wasm heap stops at 2 GB and needs about 35 bytes
  *   of it per byte of STEP text, so a 125 MB file cannot be read whole (it "succeeds" with no
- *   triangles). Pieces of `PIECE_BYTES` go to a small pool of occt workers, and parts under
- *   `MIN_PART_MM` (screws, nuts, washers) are left out of these big files, with a note saying so.
+ *   triangles), and pieces read in parallel. Pieces of `pieceBytesFor` go to a pool of occt workers
+ *   (`poolSize`), biggest first, and parts under `MIN_PART_MM` (screws, nuts, washers) are left out,
+ *   with a note saying so.
  *
  * A whole read that comes back with faces and no triangles (occt out of heap) is read again in
  * pieces. Every read carries a colour hint (`colourHint`): occt finds no colour for a body of a
@@ -16,11 +17,14 @@
  */
 import { EXPORT_HINT, ImportError, notStep, stepCutOff } from './importError';
 import { STEP_PARAMS, STEP_PIECE_PARAMS, type OcctRequest, type OcctResponse, type StepColourHint, type StepPart, type StepRequest, type StepResponse, type StepStage } from './stepConvert';
-import { STEP_PIECE_BYTES, StepSyntaxError, checkStepText, colourHint, indexStep, pieceText, planPieces, wholeHint } from './stepSplit';
+import { StepSyntaxError, checkStepText, colourHint, indexStep, pieceBytesFor, pieceText, planPieces, poolSize, wholeHint } from './stepSplit';
 import { zipEntryBytes } from './zip';
 
-/** files up to this are read whole (the importer's behaviour before pieces, kept bit for bit) */
-export const DIRECT_MAX_BYTES = 20 * 1024 * 1024;
+/**
+ * files up to this are read whole, in one occt worker. 8 MB, was 20 (2026-10-03): past it, pieces
+ * in parallel are faster (a 12.6 MB file: 10.0 s whole, 4.2 s in 3 MB pieces on 8 readers).
+ */
+export const DIRECT_MAX_BYTES = 8 * 1024 * 1024;
 /** parts whose bounding-box diagonal is under this are left out of a file read in pieces */
 export const MIN_PART_MM = 16;
 
@@ -31,13 +35,9 @@ const ctx = self as unknown as {
 
 const progress = (stage: StepStage, frac?: number): void => ctx.postMessage({ kind: 'progress', stage, frac });
 
-/** occt workers to run at once: a quarter of the cores, two on a 4 GB device, three at most */
-function poolSize(pieces: number): number {
+function devicePool(pieces: number): number {
   const nav = (self as unknown as { navigator?: { hardwareConcurrency?: number; deviceMemory?: number } }).navigator;
-  const cores = nav?.hardwareConcurrency ?? 4;
-  const memGb = nav?.deviceMemory ?? 8;
-  const byMem = memGb >= 8 ? 3 : memGb >= 4 ? 2 : 1;
-  return Math.max(1, Math.min(pieces, 3, byMem, Math.floor(cores / 4) || 1));
+  return poolSize(pieces, nav?.hardwareConcurrency ?? 4, nav?.deviceMemory ?? 8);
 }
 
 /** one occt worker, read by read */
@@ -102,14 +102,17 @@ async function readInPieces(bytes: Uint8Array, name: string): Promise<{ parts: S
     if (e instanceof StepSyntaxError && e.truncated) throw stepCutOff(name);
     throw new ImportError('corrupt', `Couldn’t read ${name}: it looks damaged (${e instanceof Error ? e.message : 'unknown error'}). Export it again, or export a GLB or STL instead.`);
   }
-  const plan = planPieces(ix, { pieceBytes: STEP_PIECE_BYTES, minPartMm: MIN_PART_MM });
+  const plan = planPieces(ix, { pieceBytes: pieceBytesFor(bytes.length, devicePool(Infinity)), minPartMm: MIN_PART_MM });
   if (!plan.pieces.length) {
     throw new ImportError('empty', `Couldn’t find any solids in ${name}. Export the robot as solids or surfaces and try again.`);
   }
   const weights = plan.pieces.map((p) => p.reduce((s, u) => s + plan.units[u].bytes, 0) + plan.skeletonBytes);
   const total = weights.reduce((s, w) => s + w, 0);
   const results: { parts: StepPart[]; trisIn: number }[] = new Array(plan.pieces.length);
-  const readers = Array.from({ length: poolSize(plan.pieces.length) }, () => new OcctReader());
+  const readers = Array.from({ length: devicePool(plan.pieces.length) }, () => new OcctReader());
+  // the biggest pieces first, so the last one to start is a small one (a split root's faces can make
+  // a piece twice the others)
+  const order = plan.pieces.map((_, k) => k).sort((a, b) => weights[b] - weights[a] || a - b);
   let next = 0;
   let doneBytes = 0;
   let started = false;
@@ -118,8 +121,9 @@ async function readInPieces(bytes: Uint8Array, name: string): Promise<{ parts: S
     await Promise.all(
       readers.map(async (reader) => {
         for (;;) {
-          const k = next++;
-          if (k >= plan.pieces.length) return;
+          const i = next++;
+          if (i >= order.length) return;
+          const k = order[i];
           const text = pieceText(ix, plan, k);
           const r = await reader.read(text, false, colourHint(ix, plan, plan.pieces[k]), () => {
             if (!started) {

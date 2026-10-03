@@ -37223,5 +37223,35 @@ function fxImportFixed(): RobotSpec {
   );
 }
 
+/**
+ * THE STEP READER'S POOL (`poolSize`, `docs/area/robot-import.md` "Real CAD"): the read is CPU-bound
+ * and splits evenly, so it takes every core but two, as memory allows (`deviceMemory` stops at 8).
+ */
+{
+  const { poolSize } = await import('../src/robotImport/engine/stepSplit');
+  const { STEP_PIECE_BYTES } = await import('../src/robotImport/engine/stepSplit');
+  const cases: [number, number, number, number][] = [
+    // pieces, cores, GB → readers
+    [100, 32, 8, 8],
+    [100, 12, 8, 6],
+    [100, 8, 8, 6],
+    [100, 4, 8, 2],
+    [100, 8, 4, 3],
+    [100, 8, 2, 2],
+    [100, 2, 8, 1],
+    [3, 32, 8, 3],
+    [0, 32, 8, 1],
+  ];
+  const bad = cases.filter(([p, c, m, want]) => poolSize(p, c, m) !== want).map(([p, c, m, want]) => `${p}/${c}/${m}: ${poolSize(p, c, m)} not ${want}`);
+  check('step pool: every core but two, six readers on an 8 GB device (eight with 16 cores), three on 4 GB, never more than the pieces', bad.length === 0, bad.join(' | '));
+  check('step pool: pieces are 6 MB of geometry at most (a reader peaks at ~370 MB, not ~630)', STEP_PIECE_BYTES === 6 * 1024 * 1024);
+  const { pieceBytesFor, STEP_PIECE_MIN_BYTES } = await import('../src/robotImport/engine/stepSplit');
+  const MB = 1024 * 1024;
+  check(
+    'step pool: a piece is about half a reader’s share of the file, between 3 and 6 MB (a mid-size file keeps every reader busy; a huge one stays at 6 MB)',
+    pieceBytesFor(420 * MB, 8) === STEP_PIECE_BYTES && pieceBytesFor(12.6 * MB, 8) === STEP_PIECE_MIN_BYTES && pieceBytesFor(60 * MB, 6) === 5 * MB && pieceBytesFor(60 * MB, 0) === STEP_PIECE_BYTES,
+  );
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

@@ -22,8 +22,41 @@
  */
 import type { StepColourHint, StepLostBody } from './stepConvert';
 
-/** the bytes one piece may carry of geometry (its skeleton comes on top) */
-export const STEP_PIECE_BYTES = 12 * 1024 * 1024;
+/**
+ * the bytes one piece may carry of geometry (its skeleton comes on top). 6 MB, was 12 (measured
+ * 2026-10-03): a reader's heap peaks at 368 MB instead of 627 (the real kits), so about twice the
+ * readers fit the same memory (`poolSize`); the skeleton each piece re-reads costs occt ~0.26 s a
+ * piece, 4–6 % of the read.
+ */
+export const STEP_PIECE_BYTES = 6 * 1024 * 1024;
+/** ...and the least: below it the skeleton every piece re-reads (~1.3 MB on a real kit) costs more
+ *  than the extra pieces save */
+export const STEP_PIECE_MIN_BYTES = 3 * 1024 * 1024;
+
+/**
+ * The piece size for a file of `fileBytes` read by up to `pool` readers: about two pieces a reader,
+ * between `STEP_PIECE_MIN_BYTES` and `STEP_PIECE_BYTES`. A mid-size file split by the cap alone
+ * would keep most readers idle: measured on a 12.6 MB file, 6 MB pieces (2) 7.7 s, 3 MB (6) 4.2 s,
+ * read whole 10.0 s.
+ */
+export function pieceBytesFor(fileBytes: number, pool: number): number {
+  const want = Math.floor(fileBytes / (2 * Math.max(1, pool)));
+  return Math.max(STEP_PIECE_MIN_BYTES, Math.min(STEP_PIECE_BYTES, want));
+}
+
+/**
+ * OCCT WORKERS TO RUN AT ONCE. The read is CPU-bound and splits evenly (measured, 2026-10-03, REV's
+ * 125 MB STEP: 3 workers 64.6 s, 6 36.0 s, 8 30.5 s, 13 22.6 s, with the occt time summed over the
+ * pieces unchanged), so the limit is memory: each worker keeps its heap's high-water mark, 368 MB
+ * at 6 MB pieces. Every core but two (the page and the import worker keep theirs); on a device
+ * that says it has 8 GB or more (`deviceMemory` stops at 8), six, or eight with 16 cores, which
+ * no 8 GB machine has (2.2 / 2.9 GB of occt heap, against the 1.9 GB of three 12 MB readers before);
+ * three on 4 GB, two on 2 GB, else one.
+ */
+export function poolSize(pieces: number, cores: number, memGb: number): number {
+  const byMem = memGb >= 8 ? (cores >= 16 ? 8 : 6) : memGb >= 4 ? 3 : memGb >= 2 ? 2 : 1;
+  return Math.max(1, Math.min(pieces, byMem, cores - 2));
+}
 
 // ---- what a file is, before reading it ------------------------------------------------------
 
@@ -44,6 +77,16 @@ function startsWithAt(buf: Uint8Array, at: number, word: Uint8Array): boolean {
  * stack is small (64 KB of them overflowed Chromium's STEP worker, measured, where Node took them).
  */
 const SPREAD = 4096;
+
+/**
+ * `bytes` as a string, one char per byte. `fromCharCode.apply` over the typed array, NOT a spread:
+ * the spread walks the iterator protocol per byte, and measured on goBILDA's 420 MB STEP it was 70 %
+ * of `planPieces`, mostly sizing parts from their points (`pointOf`). The same string, 3.8× faster.
+ * At most `SPREAD` bytes a call.
+ */
+function chars(bytes: Uint8Array): string {
+  return String.fromCharCode.apply(null, bytes as unknown as number[]);
+}
 
 const isSpace = (c: number): boolean => c === 32 || c === 10 || c === 13 || c === 9 || c === 0 || c === 12;
 
@@ -137,7 +180,7 @@ function growU8(a: Uint8Array, need: number): Uint8Array {
 function findData(buf: Uint8Array): number {
   const n = Math.min(buf.length, 4 << 20);
   let text = '';
-  for (let i = 0; i < n; i += SPREAD) text += String.fromCharCode(...buf.subarray(i, Math.min(n, i + SPREAD)));
+  for (let i = 0; i < n; i += SPREAD) text += chars(buf.subarray(i, Math.min(n, i + SPREAD)));
   const m = /ENDSEC\s*;\s*(?:\/\*[\s\S]*?\*\/\s*)*DATA\s*(?:\([^;]*\))?\s*;/.exec(text);
   if (!m) throw new StepSyntaxError('no DATA section', false);
   return m.index + m[0].search(/DATA\s*(?:\([^;]*\))?\s*;$/);
@@ -192,7 +235,7 @@ export function indexStep(buf: Uint8Array): StepIndex {
     }
     const t = typeNames.length;
     typeBytes.push(buf.slice(a, b));
-    typeNames.push(String.fromCharCode(...buf.subarray(a, b)).toUpperCase());
+    typeNames.push(chars(buf.subarray(a, b)).toUpperCase());
     if (list) list.push(t);
     else typeByHash.set(h, [t]);
     return t;
@@ -461,7 +504,7 @@ export function entityText(ix: StepIndex, e: number): string {
 /** bytes as a latin1 string, `SPREAD` bytes at a time */
 function latin1(bytes: Uint8Array): string {
   let s = '';
-  for (let k = 0; k < bytes.length; k += SPREAD) s += String.fromCharCode(...bytes.subarray(k, Math.min(bytes.length, k + SPREAD)));
+  for (let k = 0; k < bytes.length; k += SPREAD) s += chars(bytes.subarray(k, Math.min(bytes.length, k + SPREAD)));
   return s;
 }
 
@@ -508,7 +551,7 @@ function pointOf(ix: StepIndex, e: number, out: number[]): boolean {
   for (let j = k + 1; j < ix.end[e] && n < 3; j++) {
     const c = buf[j];
     if (c === C_COMMA || c === C_RP) {
-      out[n++] = parseFloat(String.fromCharCode(...buf.subarray(a, j)));
+      out[n++] = parseFloat(chars(buf.subarray(a, j)));
       a = j + 1;
       if (c === C_RP) break;
     }
