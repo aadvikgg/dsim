@@ -49,6 +49,29 @@
 - **Owner decisions:** imports simulate the starting configuration only (deploying intakes/lifts beyond the CAD are not modelled, except the BIOBUZZ ramp); the pre-existing swerve pod-order bug in the traction loop (fixing changes standard step output, so `SIM_VERSION`); whether imports ever reach ranked (no today).
 - **Not tested:** a real FTC robot CAD file (synthetic fixtures and generated stress models only).
 
+# HANDOFF — 2026-10-02b (moderation outcomes reach the players: notices, report feedback, rating refunds)
+
+**State: on `main` and `alpha`.** `npm test` (5152), `build`, `server:check`, `dbtest`, `test:workers`, `uiaudit`, `docaudit`, `bundleaudit` pass. **Server change** (migration 0057 + routes): production Fly was NOT redeployed, so until it is, the new client reads an empty inbox and the console's message boxes are ignored by the old server.
+
+- **Owner:** "a clear message when a score updates or an elo update happens or a standing update happens or a reported player got punished … PLUS admins can send an extra message back to the reporter. Research ways other games handle this."
+- **Built:** `player_notices` inbox (0057). `server/notices.ts` writes a notice after each outcome: score corrected → every player in the match (old → new, flipped result, refund); misscore ruled → the filer (corrected numbers, or the smite's cost); reports triaged → each reporter once (action taken / no action, never the penalty) and, on uphold, the reported player (cost, lock, rating, reasons); standing edited → the player. Moderator messages: two boxes on report triage, one per misscore row, and the score editor's "Why" (now shown to players).
+- **Rating refund** (VALORANT ranked rollback / lichess shape): ticking it on a correction gives a player back the rating a wrongly-recorded loss cost, once (`rating_refunds` PK), live ladder only, never takes rating. Judged against the ORIGINAL result. Rules in `docs/area/accounts.md`.
+- **Player side:** `NoticeDialog` pop-up on return to the menus (waits for the reward dialog), and Messages + Your reports (Epic's "My reports") on the career page.
+- **Verified** in `npm run adminharness` end to end: corrected the owner's seeded match with refund (+18, 2 told), upheld the claim and Alan's reports with messages, dismissed Annie's (status line "1 person told"), pop-up and career lists rendered. The harness now seeds a match/claim/report for the owner and the owner's terms acceptance.
+- **Not done:** privacy text does not list notices (they are in the export and deleted with the account). Changing it would move `LEGAL_UPDATED` and re-gate every account, so that is the owner's call. The pop-up reads the inbox on mount and on tab refocus only; no polling, to keep idle machines asleep.
+- **Gotcha:** the harness's seeded replays 404, so the score editor cannot be opened there; drive `/api/admin/match` directly.
+
+# HANDOFF — 2026-10-02 (satellites: why they never stopped, and the fixes — also on `main`)
+
+**State: on `main` and `alpha`; production Fly redeployed from `main`.** `npm test`, `test:mm`, `test:workers`, `build`, `server:check`, `docaudit`, `uiaudit` pass.
+
+- **Owner:** satellites still up 19-24 h/day after the router; find out why and fix it.
+- **Measured:** the router worked (satellite HTTP fell from ~350k to ~4.5k requests/day). Real uptime was 10-22 h/day, not the 18-24 the checkup reported: `trend.mjs`/`cost.mjs` counted any hour with one sample as a full hour (fixed in the scheduled-task scripts; projection $191 → $169). What kept them up: (1) tabs whose one boot probe of the router failed fell back to Anycast for good and polled the nearest satellite all day (ord: a request every 1-3 min, no socket, no match); (2) results screens and lobbies held a socket indefinitely, pinging every 300 ms (syd: one socket, no room, 7 h); (3) real play, e.g. one account running solo record runs on lhr every 2.5 min for 6 h.
+- **Fixes:** router fallback is a backoff (`PrimaryHealth`); satellites release sockets idle 15 min outside a live match (close 4002, not reconnected); a clean leave from a finished room frees the seat; `/health?region=` no longer replays; one presence poller per tab; `[wake]` log line per minute on satellites. Details in `docs/area/netcode.md`.
+- **Next:** read `fly logs -a dohun-sim-decode | grep '\[wake\]'` after a day. Old tabs (pre-fix bundles) keep the old fallback until reloaded; they decay over days. Judge upH/day from 2026-10-04 on.
+- **Not fixed:** the Discord Activity's HTTP polls go through its `/gs` mapping, which is Anycast; only a second Discord URL mapping to the router (Discord developer portal) would move them.
+- `dsim-alpha-primary`'s machine was found STOPPED (the alpha router auto-stops; harmless, it starts on request).
+
 # HANDOFF — 2026-10-02a (swerve pod order, SIM_VERSION 5)
 
 **State: pushed on `alpha` (92d87739).** `npm test` (shared 2877, BIOBUZZ 5399), `build`, `server:check`, `docaudit`, `bundleaudit` pass. **Server change** (`step()` output): needs `./scripts/fly-deploy.sh --alpha`. Not deployed. Not on `main`.

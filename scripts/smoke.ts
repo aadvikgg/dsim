@@ -16,7 +16,8 @@ import { sanitizePlayer, sanitizePlayerPatch } from '../src/net/sanitize';
 import { allianceDuo, derivedRole, savedStartCap, startHandleReach } from '../src/ui/startPositions';
 import { queuedModes, queuedGames, queuesFor, anyoneQueued, widenHint } from '../src/ui/queueDepth';
 import { roomJoinRegion } from '../src/net/roomRegion';
-import { PRIMARY_HOSTS, primaryWsBase } from '../src/net/primaryHost';
+import { PRIMARY_HOSTS, primaryWsBase, PrimaryHealth } from '../src/net/primaryHost';
+import { WakeTally, wakeAgent, wakeRoute, wakeSource } from '../server/wakeLog';
 import { parseLanAddress, mixedContentBlock, isPrivateHost } from '../src/net/lanAddress';
 import { filePath as staticFilePath, servableFile, servingClient } from '../server/static';
 import { enforceLanPolicy } from '../server/lanMode';
@@ -411,6 +412,10 @@ import {
   IDLE_RD_CAP, RD_MAX,
 } from '../server/ranked';
 import { isReportReason, REPORT_REASONS } from '../src/report';
+import {
+  NOTICE_KINDS, NOTICE_MESSAGE_MAX, cleanMessage, durationWords, filedStatus, filedWhat, noticeView,
+  ratingRefund, resultOf,
+} from '../src/notices';
 import {
   STANDING_MAX, STANDING_COST, STANDING_TIERS, REPORT_CAP, HEAL_PER_DAY, HEAL_PER_CLEAN_MATCH,
   COOLDOWN_LADDER, RATING_LADDER, WINDOW_HOURS, ladderRung,
@@ -8198,6 +8203,57 @@ function pushContest(A: Partial<RobotSpec>, B: Partial<RobotSpec>, seconds = 3):
           field(cfg, 'primary_region') === 'iad',
       );
     }
+    // ⚠️ A FAILED ROUTER PROBE IS A BACKOFF, NOT A VERDICT FOR THE LIFE OF THE TAB (2026-10-02).
+    // It was permanent, so a tab restored before the Wi-Fi came up polled the nearest
+    // satellite all day and kept it from ever auto-stopping.
+    const h = new PrimaryHealth(30_000, 300_000);
+    const t0 = 1_000_000;
+    const ok0 = h.usable(t0);
+    const retry1 = h.failed(t0);
+    const down1 = !h.usable(t0 + 29_999);
+    const up1 = h.usable(t0 + 30_000);
+    const retry2 = h.failed(retry1);
+    let retry = retry2;
+    for (let i = 0; i < 10; i++) retry = h.failed(retry);
+    const capped = h.failed(retry) - retry;
+    check(
+      '⚠️ primary router: a failed probe falls back for a WINDOW, then the router is used again',
+      ok0 && retry1 === t0 + 30_000 && down1 && up1,
+      `retry1=${retry1 - t0} down=${down1} up=${up1}`,
+    );
+    check('primary router: repeated failures back off (doubling, capped at 5 min)', retry2 - retry1 === 60_000 && capped === 300_000, `second=${retry2 - retry1} capped=${capped}`);
+    h.ok();
+    check('primary router: one good answer resets the backoff', h.usable(0) && h.failed(t0) === t0 + 30_000);
+  }
+
+  // ---- the satellite wake log: which requests keep an auto-stopping machine up ------------
+  {
+    check(
+      'wake log: routes drop the query and collapse ids',
+      wakeRoute('/api/presence?full=1') === '/api/presence' &&
+        wakeRoute('/api/user/2f7c9a10-0d0e-4c0b-9b52-1d2e3f4a5b6c') === '/api/user/:id' &&
+        wakeRoute('/') === '/',
+    );
+    check(
+      'wake log: the source is the page host, never a path or an address',
+      wakeSource('https://www.playdsim.com', undefined) === 'www.playdsim.com' &&
+        wakeSource(undefined, 'https://abc.discordsays.com/.proxy/x?y=1') === 'abc.discordsays.com' &&
+        wakeSource('null', undefined) === '-' &&
+        wakeSource(undefined, undefined) === '-',
+    );
+    check(
+      'wake log: the agent is a family, not the user-agent string',
+      wakeAgent('Mozilla/5.0 (Windows NT 10.0) Chrome/130') === 'browser' && wakeAgent('curl/8.4.0') === 'curl' && wakeAgent(undefined) === '-',
+    );
+    const t = new WakeTally();
+    for (let i = 0; i < 3; i++) t.add('GET', '/api/presence', 'https://www.playdsim.com', undefined, 'Mozilla/5.0');
+    t.add('GET', '/health', undefined, undefined, 'curl/8');
+    const line = t.drain(60) ?? '';
+    check(
+      'wake log: one line per window, busiest first, then reset',
+      line.startsWith('[wake] 4 req/60s: GET /api/presence ← www.playdsim.com browser ×3') && t.drain(60) === null,
+      line,
+    );
   }
 
   // ---- LAN: what address may be joined, and from which page --------------
@@ -18211,6 +18267,32 @@ const recordDrive: CommandSource = (tick) => {
     r.room.pumpForTest(maxMatchTicks());
     check('versus buzzer: a match everybody left MID-MATCH is still not saved (unchanged)', r.saved() === 0, `saved=${r.saved()}`);
   }
+  // ⚠️ A CLEAN LEAVE FROM A FINISHED MATCH FREES THE SEAT AT ONCE (2026-10-02). Holding it for
+  // the grace let the client's auto-reconnect take it straight back, so a results screen left
+  // in a background tab held its satellite awake all night — and the server's idle release
+  // (IDLE_RELEASE_MS) is a clean close, so it relies on exactly this.
+  {
+    const r = vsRun('smoke-vs-results-clean', ['a', 'b']);
+    forceMatch(r.room, 'post');
+    runUntil(r.room, (w) => w.match.phase === 'post');
+    r.room.pumpForTest(maxMatchTicks()); // settled and finalized: the results are up
+    const savedFirst = r.saved();
+    r.room.detach('a', undefined, true);
+    const back = r.room.reattach('a', () => {});
+    check('⚠️ results: a CLEAN leave from a finished match frees the seat at once (a reconnect is refused)', savedFirst === 1 && back === null, `saved=${savedFirst} reattach=${String(back)}`);
+    check('results: ...without closing the room on the driver still reading it', r.gone() === 0, `${r.gone()}`);
+    r.room.detach('b', undefined, true);
+    check('results: ...and the last clean leave frees the room without waiting out the grace', r.gone() === 1, `${r.gone()}`);
+  }
+  {
+    const r = vsRun('smoke-vs-results-drop', ['a']);
+    forceMatch(r.room, 'post');
+    runUntil(r.room, (w) => w.match.phase === 'post');
+    r.room.pumpForTest(maxMatchTicks());
+    r.room.detach('a'); // a network drop, not a leave
+    const back = r.room.reattach('a', () => {});
+    check('results: a NETWORK drop from a finished match still keeps the seat for the reconnect', typeof back === 'number', `${String(back)}`);
+  }
 
   // ---- THE SETTLE: a match is finalized when the field comes to REST, not on a timer -------
   // The buzzer ends driving, not scoring. The server (and solo practice) finalize once the game
@@ -28023,10 +28105,13 @@ const dumperSetup = (): RobotSetup => {
   check('region: legalRegion agrees with the router', legalRegion('iad') && !legalRegion('IAD') && !legalRegion('ia') && !legalRegion('iad\n'));
 
   const idx = readFileSync('server/index.ts', 'utf8').replace(/\r\n/g, '\n');
+  // /health no longer fly-replays at all (2026-10-02): a replay booted the named region, so an
+  // old per-region ping picker woke every satellite. With no replay there is no header to guard.
+  const health = idx.slice(idx.indexOf("req.url?.startsWith('/health')"), idx.indexOf("res.end('ok');"));
   check(
-    'region: /health validates before building its replay header',
-    /legalRegion\(want\)/.test(idx),
-    'the sibling handler carried the guard and this one did not — the comment there named this exact file',
+    'region: /health is answered where it lands and never builds a replay header',
+    health.length > 0 && !/fly-replay/.test(health.replace(/\/\/.*$/gm, '')),
+    'a /health?region= replay boots that region (auto_start) for a latency number',
   );
 }
 
@@ -35397,6 +35482,168 @@ function fxShoot(
   check(
     'touch: a fixed launcher keeps SHOOT under auto fire — holding it is the driver’s call, and it steers the chassis',
     has('decode', fxKit(), 'fire') && !has('decode', ROBOT_PRESETS[0], 'fire'),
+  );
+}
+
+/**
+ * MODERATOR NOTICES (0057) — the words a player reads after a moderation outcome, and the one
+ * rule that moves a rating: the refund after a corrected result.
+ */
+{
+  const day = (): string => 'Sep 30';
+  const view = (kind: string, data: Record<string, unknown>, game: string | null = 'decode') =>
+    noticeView({ kind, game, data }, day);
+
+  // ---- the refund: only a LOSS, only to a player whose result got better, judged against the
+  // result the rating was computed from
+  const red = { alliance: 'red' as const, ratingBefore: 1000, ratingAfter: 980 };
+  const blue = { alliance: 'blue' as const, ratingBefore: 1000, ratingAfter: 1020 };
+  const orig = { red: 40, blue: 55 };
+  check('notices: a loss corrected into a win gives the loss back', ratingRefund(red, orig, { red: 62, blue: 55 }) === 20);
+  check('notices: ...a loss corrected into a tie does too', ratingRefund(red, orig, { red: 55, blue: 55 }) === 20);
+  check(
+    'notices: the wrongly-awarded winner is never charged (a refund only gives)',
+    ratingRefund(blue, orig, { red: 62, blue: 55 }) === 0,
+  );
+  check('notices: a correction that leaves the loser losing gives nothing', ratingRefund(red, orig, { red: 50, blue: 55 }) === 0);
+  check(
+    'notices: a custom match (no rating) gives nothing',
+    ratingRefund({ alliance: 'red', ratingBefore: null, ratingAfter: null }, orig, { red: 62, blue: 55 }) === 0,
+  );
+  check(
+    'notices: a player who GAINED rating in a loss (a strong underdog result) is owed nothing',
+    ratingRefund({ alliance: 'red', ratingBefore: 900, ratingAfter: 905 }, orig, { red: 62, blue: 55 }) === 0,
+  );
+  check('notices: a tie is nobody’s win', resultOf('red', { red: 3, blue: 3 }) === 'tie' && resultOf('blue', { red: 3, blue: 3 }) === 'tie');
+
+  // ---- every kind words itself, and an unknown one is skipped rather than drawn blank
+  const samples: Record<string, Record<string, unknown>> = {
+    'match.corrected': { at: '2026-09-30T12:00:00Z', mode: '1v1', ranked: true, alliance: 'red', before: orig, after: { red: 62, blue: 55 }, refund: 20 },
+    'misscore.upheld': { at: '2026-09-30T12:00:00Z', mode: '1v1', ranked: true, corrected: { before: orig, after: { red: 62, blue: 55 } } },
+    'misscore.rejected': { cost: { points: 40, scoreAfter: 60, cooldownMin: 120, ratingCharge: 0 } },
+    'report.actioned': { subject: '@ada', reasons: ['throwing'] },
+    'report.closed': { subject: '@ada', reasons: ['afk'] },
+    penalty: { points: 25, scoreAfter: 50, cooldownMin: 1440, ratingCharge: 20, reasons: ['throwing', 'afk'], reporters: 3 },
+    'standing.edited': { scoreBefore: 60, scoreAfter: 100, pardoned: 2, lock: 'cleared' },
+  };
+  for (const k of NOTICE_KINDS) {
+    const v = view(k, samples[k] ?? {});
+    check(`notices: ${k} has words`, !!v && v.title.length > 0 && v.lines.length > 0, JSON.stringify(v));
+    // the house copy rules: typographic apostrophes, "rating" never "ELO", no exclamation marks
+    const text = v ? [v.title, ...v.lines].join(' ') : '';
+    check(`notices: ${k} follows the copy rules`, !/'/.test(text) && !/\bELO\b/i.test(text) && !/!/.test(text), text);
+  }
+  check('notices: an unknown kind (a newer server) is skipped, not drawn blank', view('something.new', {}) === null);
+  check('notices: a malformed correction is skipped rather than printing undefined', view('match.corrected', { alliance: 'red' }) === null);
+
+  // ---- what each one actually says
+  const fixed = view('match.corrected', samples['match.corrected'])!;
+  check(
+    'notices: a corrected score says old → new, the flipped result, and the exact refund',
+    fixed.lines[0] === 'Red 40, Blue 55 → Red 62, Blue 55.' &&
+      fixed.lines.includes('You’re now recorded as the winner.') &&
+      fixed.lines.includes('+20 rating given back for the loss.') &&
+      fixed.tone === 'good',
+    JSON.stringify(fixed.lines),
+  );
+  check('notices: ...and names the match it is about', fixed.meta === 'Ranked 1v1 · DECODE · Sep 30', String(fixed.meta));
+  const loser = view('match.corrected', { ...samples['match.corrected'], alliance: 'blue', refund: 0 })!;
+  check(
+    'notices: the other side is told it lost, and that its rating stays where it was',
+    loser.lines.includes('You’re now recorded as losing it.') && loser.lines.includes('Your rating stays where it was.'),
+    JSON.stringify(loser.lines),
+  );
+  const unranked = view('match.corrected', { ...samples['match.corrected'], ranked: false, refund: 0, alliance: 'blue' })!;
+  check('notices: a custom match says nothing about rating', !unranked.lines.some((l) => /rating/.test(l)), JSON.stringify(unranked.lines));
+  const upheld = view('misscore.upheld', samples['misscore.upheld'])!;
+  check(
+    'notices: an upheld misscore tells the filer the corrected numbers',
+    upheld.lines[0] === 'The score was corrected: Red 40, Blue 55 → Red 62, Blue 55.',
+    upheld.lines[0],
+  );
+  check(
+    'notices: ...and one upheld before the correction still says the moderator agreed',
+    view('misscore.upheld', {})!.lines[0] === 'A moderator agreed the score was wrong.',
+  );
+  const smitten = view('misscore.rejected', samples['misscore.rejected'])!;
+  check(
+    'notices: a smitten claim says what it cost, the tier it left, and the lock in words',
+    smitten.lines.includes('Standing −40, now 60 (Warning).') && smitten.lines.includes('Ranked is locked for 2 hours.') && smitten.tone === 'bad',
+    JSON.stringify(smitten.lines),
+  );
+  check(
+    'notices: a plain rejection costs nothing and says so by not saying it',
+    view('misscore.rejected', { cost: null })!.lines.length === 1 && view('misscore.rejected', {})!.tone === 'info',
+  );
+  const actioned = view('report.actioned', samples['report.actioned'])!;
+  check(
+    'notices: a reporter is told action was taken, named, and NOT told the penalty',
+    /@ada/.test(actioned.lines[0]) && /Throwing the match on purpose/.test(actioned.lines[0]) &&
+      !actioned.lines.some((l) => /standing|rating|locked/i.test(l)),
+    JSON.stringify(actioned.lines),
+  );
+  check('notices: a dismissed report says no action was taken', /took no action/.test(view('report.closed', samples['report.closed'])!.lines[0]));
+  const pen = view('penalty', samples.penalty)!;
+  check(
+    'notices: the penalized player is told how many reported them, for what, and what it cost',
+    /from 3 players/.test(pen.lines[0]) && /Not playing \/ AFK/.test(pen.lines[0]) &&
+      pen.lines.includes('Standing −25, now 50 (Restricted).') &&
+      pen.lines.includes('Ranked is locked for 1 day.') &&
+      pen.lines.includes('−20 rating on your most recent ranked ladder.') &&
+      pen.tone === 'bad',
+    JSON.stringify(pen.lines),
+  );
+  const edit = view('standing.edited', samples['standing.edited'])!;
+  check(
+    'notices: a moderator restoring standing reads as good news, with the pardons and the lifted lock',
+    edit.title === 'A moderator restored your standing' && edit.tone === 'good' &&
+      edit.lines.includes('Standing 60 → 100 (Good standing).') &&
+      edit.lines.includes('2 penalties no longer count against you.') &&
+      edit.lines.includes('Your ranked lock was lifted.'),
+    JSON.stringify(edit),
+  );
+  const lowered = view('standing.edited', { scoreBefore: 100, scoreAfter: 70, pardoned: 0, lock: 60 })!;
+  check(
+    'notices: ...and lowering it reads as a penalty, with the new lock',
+    lowered.title === 'A moderator lowered your standing' && lowered.tone === 'bad' && lowered.lines.includes('Ranked is locked for 1 hour.'),
+    JSON.stringify(lowered),
+  );
+
+  // ---- a moderator's message, and the durations
+  check('notices: an empty message is no message', cleanMessage('   ') === null && cleanMessage(undefined) === null && cleanMessage(42) === null);
+  check(
+    'notices: a message keeps its line breaks, loses control characters, and is capped',
+    cleanMessage('line one\nline\u0007 two') === 'line one\nline two' && cleanMessage('x'.repeat(900))!.length === NOTICE_MESSAGE_MAX,
+  );
+  check(
+    'notices: a week is a week, not 168 hours',
+    durationWords(1440 * 7) === '7 days' && durationWords(30) === '30 minutes' && durationWords(120) === '2 hours' && durationWords(1) === '1 minute',
+  );
+
+  // ---- "Your reports" (Epic's My reports)
+  check('notices: an open report reads as waiting, not ignored', filedStatus({ kind: 'player', status: 'open' }).label === 'Waiting for review');
+  check(
+    'notices: a player report reads as action taken / no action',
+    filedStatus({ kind: 'player', status: 'reviewed' }).label === 'Action taken' && filedStatus({ kind: 'player', status: 'dismissed' }).label === 'No action',
+  );
+  check(
+    'notices: a smitten claim says the standing was charged',
+    filedStatus({ kind: 'score', status: 'rejected', smite: 25 }).tone === 'bad' && filedStatus({ kind: 'score', status: 'rejected', smite: 0 }).label === 'Rejected',
+  );
+  check(
+    'notices: a filed report names who and why; a misscore is a misscore',
+    filedWhat({ kind: 'player', subject: '@ada', reason: 'afk' }) === '@ada: Not playing / AFK' && filedWhat({ kind: 'score', subject: null, reason: null }) === 'Misscore',
+  );
+
+  // ---- the wiring that has no other test: every admin outcome sends its notice
+  const idx = readFileSync('server/index.ts', 'utf8');
+  check('notices: triaging reports tells the reporters and the reported', /noticeReportTriage\(\{/.test(idx));
+  check('notices: resolving a misscore tells the filer', /noticeMisscore\(\{/.test(idx));
+  check('notices: correcting a score tells every player in it', /noticeCorrection\(\{/.test(idx));
+  check('notices: editing standing tells the player', /noticeStandingEdit\(\{/.test(idx));
+  check(
+    'notices: the refund is opt-in per correction and gated on the live ladder',
+    /searchParams\.get\('refund'\) === '1' && match\.liveBoard/.test(idx),
   );
 }
 

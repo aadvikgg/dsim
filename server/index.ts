@@ -25,7 +25,7 @@ import { initPhysics } from '../src/sim/physicsEngine';
 import { initPhysics3d } from '../src/games/biobuzz/sim3d/engine';
 import { migrate } from './db/migrate';
 import { persistMatch, persistDodges, persistBehaviour } from './persist';
-import { legalRegion, routeTarget } from './routing';
+import { routeTarget } from './routing';
 import { SERVER_CHANNEL, isAlphaServer } from './channel';
 import { LAN_MODE, enforceLanPolicy } from './lanMode';
 import { LAN_SIGNALLING, LAN_UPLOADS } from './lanUploads';
@@ -35,6 +35,8 @@ import { lockRemaining, tierOf,
   STANDING_MAX,
 } from '../src/standing';
 import { isReportReason, REPORT_DETAIL_MAX } from '../src/report';
+import { cleanMessage, ratingRefund } from '../src/notices';
+import { noticeCorrection, noticeMisscore, noticeReportTriage, noticeStandingEdit, costOf } from './notices';
 import { handleApi } from './api';
 import { ADMIN_IDS, ADMIN_LIST, OWNER_ID } from './staff';
 import {
@@ -64,6 +66,7 @@ import { coerceGameId, isGameId, serverPhysics } from '../src/games/types';
 import { simModuleFor } from '../src/games/sim';
 import { runStarSweep, warnNoToken, STAR_SWEEP_MS } from './stargazers';
 import { runBoostSweep, BOOST_SWEEP_MS } from './boosts';
+import { WakeTally } from './wakeLog';
 import { dbEnabled } from './db/pool';
 import {
   currentSeasonNumber,
@@ -107,6 +110,7 @@ import {
   resolveScoreReport,
   submitScoreReport,
   setReportsStatus,
+  refundMatchRatings,
   userRecentMatches,
   getMaintenance,
   setMaintenance,
@@ -526,6 +530,48 @@ function readAdminBody(req: import('node:http').IncomingMessage): Promise<string
 // while the WebSocket upgrade rides the same port
 const REGION = process.env.FLY_REGION ?? process.env.SERVER_REGION ?? '';
 
+/**
+ * THIS MACHINE AUTO-STOPS WHEN IDLE: a satellite, not the always-warm primary (Fly sets
+ * `PRIMARY_REGION` from fly.toml's `primary_region`, and `min_machines_running` holds only
+ * that one up). A satellite is cheap only while it is stopped, so two things below apply to
+ * satellites alone: the idle-socket release and the wake log. Off locally and on a
+ * single-region deploy, where nothing auto-stops.
+ */
+const AUTO_STOPS = !!REGION && !!process.env.PRIMARY_REGION && REGION !== process.env.PRIMARY_REGION;
+
+/**
+ * A SOCKET THAT IS NOT IN A LIVE MATCH AND HAS SAID NOTHING FOR THIS LONG IS CLOSED (satellites
+ * only). A results screen or a lobby left open in a background tab held its socket — and the
+ * session pings every 300 ms on top — so the machine never went idle and ran all night for a
+ * game that had ended hours before. "Said nothing" ignores `ping` and `input`, which a client
+ * sends on a timer whether anybody is there or not. Closed with `IDLE_CLOSE_CODE`, which a
+ * current client treats as final (`transport.ts`); an older one reconnects once, finds its
+ * finished-room seat already freed (`Room.detach`, clean), is refused, and closes.
+ */
+const IDLE_RELEASE_MS = 15 * 60_000;
+const IDLE_CLOSE_CODE = 4002;
+/** every open socket's idle state, for the sweep below (satellites only) */
+const idleWatch = new Map<WebSocket, { saidAt: () => number; busy: () => boolean; release: () => void }>();
+if (AUTO_STOPS) {
+  const t = setInterval(() => {
+    const now = Date.now();
+    for (const s of [...idleWatch.values()]) {
+      if (!s.busy() && now - s.saidAt() > IDLE_RELEASE_MS) s.release();
+    }
+  }, 60_000);
+  t.unref?.();
+}
+
+/** see `server/wakeLog.ts` — one line a minute naming the HTTP requests a satellite answered */
+const wakeTally = new WakeTally();
+if (AUTO_STOPS) {
+  const t = setInterval(() => {
+    const line = wakeTally.drain(60);
+    if (line) console.log(line);
+  }, 60_000);
+  t.unref?.();
+}
+
 // ---- perf probe (GET /api/perf) ---------------------------------------------
 // Sizing evidence. The question "can this machine run on a SHARED cpu?" is not
 // answered by average cpu% — the room loop is a FIXED 60Hz step that must finish
@@ -944,24 +990,21 @@ function unionLive(local: LiveRoom[], global: unknown[]): unknown[] {
 }
 
 const httpServer = createServer((req, res) => {
-  if (req.method === 'GET' && req.url?.startsWith('/health')) {
-    // `?region=<code>` lets the client ping a SPECIFIC region (the picker) or read
-    // its home region: on Fly we fly-replay the GET to that region's machine, which
-    // answers with its own x-region. Locally (REGION='') we just answer here.
-    const want = new URL(req.url, 'http://x').searchParams.get('region');
-    const already = !!req.headers['fly-replay-src'];
-    // ⚠️ VALIDATED, because this value reaches a `fly-replay` header — the same guard
-    // `/api/lobbies` carries, and the one this handler was flagged for missing. An unvalidated
-    // CRLF here throws inside the handler and leaves the socket hanging with no response.
-    if (REGION && want && legalRegion(want) && want !== REGION && !already) {
-      res.writeHead(200, {
-        'fly-replay': `region=${want}`,
-        'access-control-allow-origin': '*',
-        'cache-control': 'no-store',
-      });
-      res.end();
-      return;
+  // what woke / is keeping this satellite up (see wakeLog.ts). The platform's own health
+  // check (a `/health` with no Origin) and the operator's `/api/perf` are not callers.
+  if (AUTO_STOPS && req.url) {
+    const operator = req.url.startsWith('/api/perf') || (req.url.startsWith('/health') && !req.headers.origin);
+    if (!operator) {
+      wakeTally.add(req.method ?? '?', req.url, req.headers.origin, req.headers.referer, req.headers['user-agent']);
     }
+  }
+  if (req.method === 'GET' && req.url?.startsWith('/health')) {
+    // `?region=<code>` USED to fly-replay this probe to that region's machine (the old
+    // per-region ping picker). It is answered HERE now, whatever it asks for: a replay BOOTS
+    // the target region (auto_start), so every client still running that picker woke every
+    // satellite on each visit. No current client sends it (`ping.ts` measures the home
+    // region and estimates the rest); an old one now reads its own region's latency for
+    // every row, which is a worse estimate and costs nothing.
     // CORS so the web client (different origin) can time this for the pre-connect
     // ping picker. Includes the region so a client can confirm which one answered.
     // `expose-headers` is REQUIRED for that: a cross-origin fetch can only read
@@ -1238,6 +1281,7 @@ const httpServer = createServer((req, res) => {
        *   GET  /api/admin/reports                  the queue (one row per reported player)
        *   GET  /api/admin/reports?user=<id>        that player's reports + recent matches
        *   POST /api/admin/reports?user=<id>&status=reviewed|dismissed
+       *        [&reporterMessage=…][&playerMessage=…]
        *
        * The per-user GET returns the MATCHES alongside the reports deliberately. A report
        * for cheating or throwing cannot be judged from its text — the moderator has to
@@ -1265,26 +1309,36 @@ const httpServer = createServer((req, res) => {
             res.end('bad request');
             return;
           }
-          const n = await setReportsStatus(target, status, user?.userId ?? 'admin');
+          const closed = await setReportsStatus(target, status, user?.userId ?? 'admin');
+          const n = closed.length;
           // UPHELD is the only event in the standing system a human has actually verified,
           // so it is the only one big enough to move a player two tiers — and unlike the raw
           // reports it replaces, it restricts. DISMISSED deliberately does nothing: the raw
           // nudges those reports already applied heal off on their own, and reversing them
           // would need a per-report ledger to undo exactly, which is a lot of machinery for
           // a few points that expire anyway.
-          if (status === 'reviewed' && n > 0) {
-            void chargeStanding(target, 'reportUpheld', {}).catch((e) =>
-              console.error('[standing] upheld charge failed:', e),
-            );
-          }
+          // AWAITED (0057): the penalty notice tells the player what was actually stored, so it
+          // needs the verdict. `chargeStanding` never throws; a null is "nothing charged".
+          const verdict =
+            status === 'reviewed' && n > 0 ? await chargeStanding(target, 'reportUpheld', {}) : null;
+          // THE PEOPLE IT CONCERNS ARE TOLD (0057): each reporter learns the outcome of their
+          // own report, and on an upheld verdict the player learns what it cost and why.
+          const reporterMessage = cleanMessage(u.searchParams.get('reporterMessage'));
+          const playerMessage = status === 'reviewed' ? cleanMessage(u.searchParams.get('playerMessage')) : null;
+          const notified = await noticeReportTriage({
+            target, status, closed, verdict, reporterMessage, playerMessage,
+          });
           await writeAudit({
             adminId: actor,
             action: status === 'reviewed' ? 'report.uphold' : 'report.dismiss',
             targetUser: target,
-            detail: { reports: n },
+            detail: { reports: n, notified },
+            note: [reporterMessage && `to reporters: ${reporterMessage}`, playerMessage && `to player: ${playerMessage}`]
+              .filter(Boolean)
+              .join(' | ') || undefined,
           });
           res.writeHead(200, { ...cors, 'content-type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, updated: n }));
+          res.end(JSON.stringify({ ok: true, updated: n, notified }));
           return;
         }
         if (target) {
@@ -1320,7 +1374,7 @@ const httpServer = createServer((req, res) => {
        * history — how many they have filed and how many were rejected — because that history
        * is what separates an honest confusion from a habit before anyone reaches for a smite.
        *
-       * POST ?id=&verdict=upheld|rejected&smite=N. The smite is standing points taken off the
+       * POST ?id=&verdict=upheld|rejected&smite=N[&message=…]. The smite is standing points taken off the
        * REPORTER for a claim found malicious, and it goes through the ordinary standing ledger
        * (`falseReport`) rather than a private one, so the player sees it where they see every
        * other penalty and the tier/cooldown machinery treats it like any other offence.
@@ -1350,12 +1404,23 @@ const httpServer = createServer((req, res) => {
           // right; charging them for being right is the failure mode this whole feature is
           // supposed to guard against, so the server refuses it rather than trusting the UI
           // to never offer it.
-          if (done && verdict === 'rejected' && smite > 0) {
-            void chargeStanding(done.reporterId, 'falseReport', {
-              roomCode: done.roomCode,
-              points: smite,
-            }).catch((e) => console.error('[standing] smite failed:', e));
-          }
+          const charged =
+            done && verdict === 'rejected' && smite > 0
+              ? await chargeStanding(done.reporterId, 'falseReport', { roomCode: done.roomCode, points: smite })
+              : null;
+          // THE FILER IS TOLD (0057): upheld with the corrected numbers when the match has been
+          // corrected, rejected with what the smite cost. `message` is the moderator's own words.
+          const message = cleanMessage(u.searchParams.get('message'));
+          const notified = done
+            ? await noticeMisscore({
+                reporterId: done.reporterId,
+                matchId: done.matchId,
+                game: done.game,
+                verdict,
+                cost: costOf(charged),
+                message,
+              })
+            : 0;
           if (done) {
             // the TARGET of this row is the REPORTER, not the match: a misscore claim is
             // resolved against a person only when it is smitten, and "what has been done to
@@ -1365,11 +1430,12 @@ const httpServer = createServer((req, res) => {
               action: `misscore.${verdict}`,
               targetUser: smite > 0 ? done.reporterId : null,
               targetId: id,
-              detail: { verdict, smite, roomCode: done.roomCode },
+              detail: { verdict, smite, roomCode: done.roomCode, notified },
+              note: message ?? undefined,
             });
           }
           res.writeHead(200, { ...cors, 'content-type': 'application/json' });
-          res.end(JSON.stringify({ ok: Boolean(done) }));
+          res.end(JSON.stringify({ ok: Boolean(done), notified }));
           return;
         }
         const reports = await listScoreReports({ status: u.searchParams.get('status') ?? undefined });
@@ -1381,7 +1447,7 @@ const httpServer = createServer((req, res) => {
        * GET/POST /api/admin/match — READ or CORRECT one finished match's score.
        *
        *   GET  ?id=<matchId>                       who played, what it says, what has been done
-       *   POST ?id=<matchId>&red=N&blue=N&note=…   correct it
+       *   POST ?id=<matchId>&red=N&blue=N&note=…[&refund=1]   correct it
        *
        * This is the half the misscore queue was missing. Upholding a claim recorded that the
        * sim got a result wrong and then left the wrong number on the match, in both players'
@@ -1416,17 +1482,45 @@ const httpServer = createServer((req, res) => {
             res.end('bad score');
             return;
           }
-          const done = await correctMatchScore(
-            id,
-            { red, blue },
-            user?.userId ?? 'admin',
-            u.searchParams.get('note') ?? undefined,
-          );
+          // the note is SHOWN TO THE PLAYERS now (0057), so it goes through the same cleaning as
+          // every other moderator message
+          const note = cleanMessage(u.searchParams.get('note'));
+          const done = await correctMatchScore(id, { red, blue }, user?.userId ?? 'admin', note ?? undefined);
+          let refunds: { userId: string; points: number }[] = [];
+          let notified = 0;
           if (done) {
             console.log(
               `[admin] match ${id} score corrected by ${user?.userId ?? 'admin'}: ` +
                 `${done.redBefore}-${done.blueBefore} -> ${done.redAfter}-${done.blueAfter}`,
             );
+            const after = { red: done.redAfter, blue: done.blueAfter };
+            const match = await matchScoreDetail(id);
+            /* RATING GIVEN BACK, when the moderator asked for it (VALORANT's ranked rollback,
+               lichess's refund). `ratingRefund` judges each player against the result the
+               rating was computed from, gives back only a LOSS, and only to a player whose
+               result got better; `refundMatchRatings` applies each once and only on a live
+               ladder. Nobody's rating goes down here. */
+            if (match && u.searchParams.get('refund') === '1' && match.liveBoard) {
+              const want = match.participants.map((p) => ({
+                userId: p.userId,
+                points: ratingRefund(p, match.original, after),
+              }));
+              refunds = await refundMatchRatings(id, want, user?.userId ?? 'admin').catch((e) => {
+                console.error('[admin] rating refund failed:', e);
+                return [];
+              });
+            }
+            // EVERY PLAYER IN THE MATCH IS TOLD (0057): the old and new totals, whether their
+            // result changed, and any rating given back.
+            if (match) {
+              notified = await noticeCorrection({
+                match,
+                before: { red: done.redBefore, blue: done.blueBefore },
+                after,
+                refunds,
+                message: note,
+              });
+            }
             await writeAudit({
               adminId: actor,
               action: 'match.rescore',
@@ -1434,12 +1528,14 @@ const httpServer = createServer((req, res) => {
               detail: {
                 before: `${done.redBefore}-${done.blueBefore}`,
                 after: `${done.redAfter}-${done.blueAfter}`,
+                refunds: refunds.map((r) => `${r.userId}:+${r.points}`),
+                notified,
               },
-              note: u.searchParams.get('note') ?? undefined,
+              note: note ?? undefined,
             });
           }
           res.writeHead(done ? 200 : 404, { ...cors, 'content-type': 'application/json' });
-          res.end(JSON.stringify(done ? { ok: true, ...done } : { error: 'no such match' }));
+          res.end(JSON.stringify(done ? { ok: true, ...done, refunds, notified } : { error: 'no such match' }));
           return;
         }
         const match = await matchScoreDetail(id);
@@ -1494,12 +1590,23 @@ const httpServer = createServer((req, res) => {
               : rawLock === 'clear'
                 ? (false as const)
                 : Math.max(0, Math.round(Number(rawLock) || 0));
+          const note = cleanMessage(u.searchParams.get('note'));
           const out = await adminEditStanding(target, user?.userId ?? 'admin', {
             score,
             pardonAll: pardon === 'all',
             pardonIds: pardon && pardon !== 'all' ? pardon.split(',').filter(Boolean) : undefined,
             lock,
-            note: u.searchParams.get('note') ?? undefined,
+            note: note ?? undefined,
+          });
+          // the ledger row already carries the note; the notice is what makes the player SEE it
+          // the next time they are in the menus, rather than when they next open their career
+          const notified = await noticeStandingEdit({
+            target,
+            scoreBefore: out.scoreBefore,
+            scoreAfter: out.scoreAfter,
+            pardoned: out.pardoned,
+            lock,
+            note,
           });
           console.log(
             `[standing] ${target} edited by ${user?.userId ?? 'admin'}: ` +
@@ -1516,11 +1623,12 @@ const httpServer = createServer((req, res) => {
               scoreAfter: out.scoreAfter,
               pardoned: out.pardoned,
               lock: lock === false ? 'cleared' : lock,
+              notified,
             },
-            note: u.searchParams.get('note') ?? undefined,
+            note: note ?? undefined,
           });
           res.writeHead(200, { ...cors, 'content-type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, ...out }));
+          res.end(JSON.stringify({ ok: true, ...out, notified }));
           return;
         }
         const [standings, events, profile] = await Promise.all([
@@ -2961,6 +3069,25 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
    *  decremented exactly once on close (a spectator never becomes a driver — the
    *  `spectate` branch is only reachable while `room` is null, and it sets it). */
   let spectating = false;
+  /** the last time this socket sent something other than `ping`/`input` (see IDLE_RELEASE_MS) */
+  let saidAt = Date.now();
+  /** a LAN host waits on this socket for guests; it is not idle while it does */
+  let lanHosting = false;
+  /** the server closed this socket for idleness — its detach is a clean leave */
+  let idleReleased = false;
+  if (AUTO_STOPS) {
+    idleWatch.set(ws, {
+      saidAt: () => saidAt,
+      // in a LIVE match (driving or watching), or hosting a LAN room: never idle
+      busy: () => lanHosting || (room !== null && room.summary() !== null),
+      release: () => {
+        if (idleReleased) return;
+        idleReleased = true;
+        console.log(`[idle] releasing ${id} (${room ? `room ${room.code}` : 'no room'}) after ${Math.round((Date.now() - saidAt) / 60_000)} min`);
+        ws.close(IDLE_CLOSE_CODE, 'idle');
+      },
+    });
+  }
   const wasEmpty = onlineCount === 0;
   onlineCount++;
   liveSockets.set(id, { authed: false });
@@ -3700,6 +3827,10 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     } catch {
       return; // ignore malformed frames
     }
+    // a person did something (timers send `ping` and `input` whether anyone is there or not)
+    if (msg.t !== 'ping' && msg.t !== 'input') saidAt = now;
+    if (msg.t === 'lanHost') lanHosting = true;
+    else if (msg.t === 'lanStopHosting') lanHosting = false;
     // never let a bad message take down the process (and every other room)
     try {
       if (msg.t === 'ping') {
@@ -4119,6 +4250,7 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 
   ws.on('close', (code: number) => {
     closed = true; // an in-flight async join must stop and hand its room back
+    idleWatch.delete(ws);
     onlineCount--;
     if (spectating) {
       spectating = false;
@@ -4139,7 +4271,9 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     // 1000/1005 is the client closing on purpose (`transport.close()`: a restart, back to
     // the menu); a dropped network is 1006 and a closing tab 1001, both of which keep the
     // grace — a phone that backgrounds the tab may send 1001 and come straight back.
-    room?.detach(id, conn, code === 1000 || code === 1005);
+    // An idle release (IDLE_CLOSE_CODE) is clean too: nobody was there, and holding the seat
+    // for the grace only let the client's auto-reconnect take it straight back.
+    room?.detach(id, conn, code === 1000 || code === 1005 || idleReleased);
   });
 
   ws.on('error', () => {
