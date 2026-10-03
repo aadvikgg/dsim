@@ -1,3 +1,12 @@
+# HANDOFF — 2026-10-03g (import speed, moving parts round two, realism research)
+
+**State: on `alpha`; client only, no deploy needed. Not on `main`.** `npm test`, `build`, `server:check`, `uiaudit`, `docaudit`, `bundleaudit` pass. Checked in the dev preview: found groups, a swing and a slide animating in Play, no console errors.
+
+- **Import speed** (09e8211d): a STEP reader pool sized to cores and memory (`poolSize`), 3–6 MB pieces, largest first. REV kit 85 → 34 s, goBILDA 170 → 54 s. robot-import.md "Real CAD".
+- **Moving parts, round two** (752a3abb). Owner: a static channel and a gear came as one part; a motor or its shield spun with a wheel. `splitLumps` gives each lump of a body its own id (first lump keeps the old id, so saved rows hold). `turnsWithWheel` keeps to the wheel's ring width: goBILDA rear wheels 12–13 → 9 bodies, front 78 → 64. New finders: side rollers, flywheels, a turret, a part the file shows deployed. Generic `spin`/`swing`/`slide` joints driven by a robot signal, about a robot axis or a picked axle, geared to another part at a ratio, riding on another. robot-import.md "Moving parts".
+- **Realism research, not implemented** (`docs/realism-plan.md`): motor + battery + per-wheel traction model, validation against a reference drivetrain calculator and real-robot logs, AdvantageScope export, phases P0–P5. Owner decides before any of it is built.
+- **Open:** a multi-stage slide and a two-position claw are not their own rows yet (a slide geared to a slide does a cascade); an extended slide is not solid in the collision hull; mechanism timing is still from the tuning, not the motor.
+
 # HANDOFF — 2026-10-03f (imported-robot mesh quality, done)
 
 **State: on `alpha`; client only (the one server-side file touched, `visualCheck.ts`, changed a comment), no deploy needed. Not on `main`.** `npm test`, `build`, `server:check`, `uiaudit`, `docaudit`, `bundleaudit` pass. Checked in the dev preview: import, Detail re-read, test drive in BIOBUZZ 3D Ultra with the compressed mesh, no console errors.
