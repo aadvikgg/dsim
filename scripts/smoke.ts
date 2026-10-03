@@ -33294,6 +33294,51 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
     r2.dispose();
   }
 
+  // ---- a re-upload keeps the last good look until it validates ------------------------------------------
+  // A reconnect sends the look again. That upload used to replace the ready one at its FIRST frame, so a
+  // junk, oversized or interrupted second upload left every viewer with nothing where it had a good look.
+  {
+    let now = 1000;
+    fakes.clear();
+    allows = true;
+    liveMatch = false;
+    const budget = SV.localVisualBudget(IV.VISUAL_PROCESS_BYTES);
+    const relay = new SV.VisualRelay(host, budget, () => now);
+    const a = mkFake('a', PROTO.CLIENT_CAPS, ID_A);
+    const b = mkFake('b', PROTO.CLIENT_CAPS);
+    put(relay, a, 'top', png);
+    const junk = new Uint8Array(png.length).fill(7);
+    put(relay, a, 'top', junk);
+    check('visuals/keep: a junk re-upload is refused, and the last good look stays ready and reserved (only its bytes)',
+      refusals(a).join() === 'put:format' && relay.stats().ready === 1 && relay.stats().reserved === png.length && budget.used() === png.length, refusals(a).join());
+    get(relay, b, 'a', ID_A, 'top');
+    drain(relay);
+    check('visuals/keep: ...and a viewer that asks after it still gets the good one, identical', same(received(b, 'a', 'top').bytes, png));
+    // half a re-upload, then silence: swept, and the good one stays
+    a.got.length = 0;
+    put(relay, a, 'top', png, ID_A, 2); // frames 0 and 1, never 2
+    check('visuals/keep: while a re-upload travels the old look is still served (both are reserved)',
+      relay.stats().ready === 1 && relay.stats().reserved === 2 * png.length);
+    now += IV.VISUAL_PUT_STALE_MS + 1;
+    relay.sweepStale(now);
+    check('visuals/keep: an interrupted re-upload is swept after the stale time and the good look stays',
+      relay.stats().ready === 1 && relay.stats().reserved === png.length && budget.used() === png.length);
+    // a GOOD re-upload (another picture) replaces it, announced again, and the old bytes are freed
+    const png2 = pngBytes(140, 120, { noise: true, seed: 77 });
+    a.got.length = 0;
+    const announced = msgs(b, 'visualReady').length;
+    put(relay, a, 'top', png2);
+    check('visuals/keep: a good re-upload replaces it once it validates: announced again, the old bytes freed',
+      relay.stats().ready === 1 && relay.stats().reserved === png2.length && budget.used() === png2.length && msgs(b, 'visualReady').length === announced + 1);
+    b.got.length = 0;
+    get(relay, b, 'a', ID_A, 'top');
+    drain(relay);
+    check('visuals/keep: ...and the new one is what a viewer gets now', same(received(b, 'a', 'top').bytes, png2));
+    // the room's cap counts the asset a re-upload replaces: a full room still takes the replacement
+    relay.dispose();
+    check('visuals/keep: dispose frees the ready look and any upload on its way', budget.used() === 0 && relay.stats().reserved === 0);
+  }
+
   // ---- refusals ----------------------------------------------------------------------------------
   {
     const { relay, budget } = reset();
@@ -34111,6 +34156,72 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
     await sleepMs(120);
     check('visuals/client: ...but only twice', tx.count('visualPut') === 4 * n);
     cli.reset();
+  }
+
+  // ---- THE OWNER IS TOLD WHY ITS LOOK IS NOT IN THE ROOM (`ownLookTrouble`, the lobby's one line) ----------------
+  {
+    const roster = (spec: typeof DEFAULT_SPEC) => [{ clientId: 'me', name: 'me', alliance: 'red', startIndex: 0, ready: true, spec, assists: { ...DEFAULT_ASSISTS } } as PROTO.LobbyPlayer];
+    const tx = new FakeTx();
+    const cli = mkClient({ own: own(png, null) });
+    let told = 0;
+    const off = cli.subscribeOwnLook(() => told++);
+    cli.bind(tx);
+    cli.setOffered(true);
+    cli.onWelcome('me');
+    cli.noteRoster('me', roster(impSpec(ID)));
+    await until(() => tx.count('visualPut') === IV.visualFrames(png.length));
+    check('visuals/owner: nothing to say while the upload is on its way', cli.ownLookTrouble() === null);
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'budget', message: IV.VISUAL_REFUSAL_COPY.budget });
+    const t = cli.ownLookTrouble();
+    check('visuals/owner: ⚠️ a room that refuses the look for space is said, once, in one line',
+      t?.reason === 'budget' && t.kind === 'top' && told === 1 && IVC.ownLookLine(t) === 'Couldn’t share your robot’s look: this room is out of space.', JSON.stringify(t));
+    cli.handle({ t: 'visualRefused', op: 'put', owner: 'me', id: ID, kind: 'top', reason: 'dup', message: '' });
+    check('visuals/owner: an id taken and a file the room cannot use have their own lines; a mesh says 3D model',
+      IVC.ownLookLine({ kind: 'top', reason: 'dup' }) === 'Couldn’t share your robot’s look: another robot here has its id.' &&
+        IVC.ownLookLine({ kind: 'top', reason: 'format' }) === 'Couldn’t share your robot’s look: the room can’t use the file.' &&
+        IVC.ownLookLine({ kind: 'mesh', reason: 'budget' }) === 'Couldn’t share your 3D model: this room is out of space.');
+    check('visuals/owner: every line fits the robot line it stands in (64 characters, one line)',
+      (['room', 'id', 'size', 'format', 'budget', 'seq', 'dup', 'missing', 'stale'] as const).every((reason) =>
+        (['top', 'mesh'] as const).every((kind) => IVC.ownLookLine({ kind, reason }).length <= 64 && !/ - /.test(IVC.ownLookLine({ kind, reason })))));
+    cli.onWelcome('me'); // a reconnect: it starts over, and so does what was said
+    check('visuals/owner: a new seat (a reconnect) clears it, and the upload starts over', cli.ownLookTrouble() === null && (await until(() => tx.count('visualPut') === 2 * IV.visualFrames(png.length))));
+    cli.handle({ t: 'visualReady', owner: 'me', id: ID, kind: 'top', bytes: png.length });
+    check('visuals/owner: a confirmed upload says nothing', cli.ownLookTrouble() === null);
+    off();
+    cli.reset();
+
+    // a model that is not on this device, and one that is OUT OF DATE here (edited on another device)
+    const tx2 = new FakeTx();
+    const gone = mkClient({ own: own(null, null) });
+    gone.bind(tx2);
+    gone.setOffered(true);
+    gone.onWelcome('me');
+    gone.noteRoster('me', roster(impSpec(ID)));
+    check('visuals/owner: a robot whose model is not on this device says so', await until(() => gone.ownLookTrouble()?.reason === 'missing') && tx2.count('visualPut') === 0);
+    gone.reset();
+    const tx3 = new FakeTx();
+    const older = { ...impSpec(ID).imported!, heightIn: 11 };
+    let asked = 0;
+    const staleCli = mkClient({ own: { top: async () => (asked++, png), mesh: async () => null, describe: async () => older } });
+    staleCli.bind(tx3);
+    staleCli.setOffered(true);
+    staleCli.onWelcome('me');
+    staleCli.noteRoster('me', roster(impSpec(ID)));
+    check('visuals/owner: ⚠️ an OUT-OF-DATE model here is never sent (it would put the old model on the new hull on every screen), and it is said',
+      (await until(() => staleCli.ownLookTrouble()?.reason === 'stale')) && tx3.count('visualPut') === 0 && asked === 0);
+    staleCli.reset();
+    const tx4 = new FakeTx();
+    const fresh = mkClient({ own: { top: async () => png, mesh: async () => null, describe: async () => ({ ...impSpec(ID).imported! }) } });
+    fresh.bind(tx4);
+    fresh.setOffered(true);
+    fresh.onWelcome('me');
+    fresh.noteRoster('me', roster(impSpec(ID)));
+    check('visuals/owner: ...while a model made for the robot the seat holds is sent as before',
+      await until(() => tx4.count('visualPut') === IV.visualFrames(png.length)), String(tx4.count('visualPut')));
+    fresh.reset();
+    const lobby = readFileSync('src/ui/Lobby.tsx', 'utf8').replace(/\r\n/g, '\n');
+    check('visuals/owner: the custom-room lobby shows it in the robot line\'s place (nothing moves)',
+      /\{sendImport && ownLook \? \(\s*<p className="ds-sub" role="status">\s*\{ownLookLine\(ownLook\)\}/.test(lobby));
   }
 
   // ---- a viewer does not believe what it is sent ----------------------------------------------------------------------------

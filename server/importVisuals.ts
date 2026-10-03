@@ -222,8 +222,16 @@ interface Asset {
 interface Owner {
   /** the robot id this owner's assets are for */
   id: string;
+  /** the READY assets, the ones served */
   top?: Asset;
   mesh?: Asset;
+  /**
+   * An upload in progress, per kind. ⚠️ IT IS NOT THE READY ONE: a re-upload (a reconnect sends the
+   * look again) used to replace the ready asset at its first frame, so a junk or interrupted one left
+   * the viewers with nothing where they had a good look. The ready one is served until the new one
+   * VALIDATES, and only then replaced.
+   */
+  up?: Partial<Record<VisualKind, Asset>>;
 }
 interface Stream {
   owner: string;
@@ -291,30 +299,34 @@ export class VisualRelay {
     if (held && held.id !== cur) this.freeOwner(c.id);
 
     if (seq === 0) {
-      // a new upload of this kind replaces whatever was here, ready or half sent
-      this.freeAsset(c.id, kind);
+      // a new upload of this kind replaces one still on its way; a READY one is kept, and served,
+      // until this one validates (`Owner.up`)
+      this.freeUpload(c.id, kind);
       for (const [other, o] of this.owners) if (other !== c.id && o.id === id) return refuse('dup');
       const key = budgetKeyOf(c);
-      if (this.reserved + total > VISUAL_ROOM_BYTES || !this.budget.reserve(total, key)) return refuse('budget');
+      // the room's cap counts what the room will hold once this replaces the ready one, so a re-upload
+      // is not refused for the asset it replaces; while it travels the room holds both (one asset over)
+      const replaces = this.owners.get(c.id)?.[kind]?.total ?? 0;
+      if (this.reserved - replaces + total > VISUAL_ROOM_BYTES || !this.budget.reserve(total, key)) return refuse('budget');
       this.reserved += total;
       let o = this.owners.get(c.id);
       if (!o) this.owners.set(c.id, (o = { id }));
-      o[kind] = { id, kind, total, key, buf: new Uint8Array(total), got: 0, next: 0, ready: false, touched: now };
+      (o.up ??= {})[kind] = { id, kind, total, key, buf: new Uint8Array(total), got: 0, next: 0, ready: false, touched: now };
       this.ensureSweep();
     }
     const o = this.owners.get(c.id);
-    const a = o?.[kind];
+    const a = o?.up?.[kind];
     // a chunk after the asset completed (a duplicate frame) is not worth losing a good asset over
-    if (a?.ready && seq > 0) return;
+    if (!a && o?.[kind]?.ready && seq > 0) return;
     if (!o || !a || a.id !== id || a.total !== total || a.next !== seq) {
-      this.freeAsset(c.id, kind);
+      this.freeUpload(c.id, kind);
       return refuse('seq');
     }
     const data = raw.data;
     const bytes = typeof data === 'string' && data.length <= VISUAL_CHUNK_CHARS ? base64ToBytes(data) : null;
     const span = visualSpan(total, seq);
     if (!bytes || bytes.length !== span.end - span.start) {
-      this.freeAsset(c.id, kind);
+      this.freeUpload(c.id, kind);
       return refuse('size');
     }
     a.buf.set(bytes, span.start);
@@ -323,10 +335,16 @@ export class VisualRelay {
     a.touched = now;
     if (a.got < total) return;
     if (validateVisual(kind, a.buf)) {
-      this.freeAsset(c.id, kind);
+      // junk: refused, and the last good look stays
+      this.freeUpload(c.id, kind);
       return refuse('format');
     }
+    // it validated: now it replaces the last good one (whose streams end with it)
+    delete o.up![kind];
+    this.freeAsset(c.id, kind);
     a.ready = true;
+    o[kind] = a;
+    this.owners.set(c.id, o);
     this.announce(c.id, a);
   }
 
@@ -395,7 +413,7 @@ export class VisualRelay {
   sweepStale(now = this.clock()): void {
     this.sweep(now);
     let open = false;
-    for (const o of this.owners.values()) if ((o.top && !o.top.ready) || (o.mesh && !o.mesh.ready)) open = true;
+    for (const o of this.owners.values()) if (o.up?.top || o.up?.mesh) open = true;
     if (!open && this.sweepTimer) {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
@@ -461,6 +479,12 @@ export class VisualRelay {
 
   // ---- freeing -----------------------------------------------------------------------------
 
+  /** an owner with nothing ready and nothing on its way is forgotten */
+  private tidy(owner: string, o: Owner): void {
+    if (!o.top && !o.mesh && !o.up?.top && !o.up?.mesh) this.owners.delete(owner);
+  }
+
+  /** free the READY asset of a kind */
   private freeAsset(owner: string, kind: VisualKind): void {
     const o = this.owners.get(owner);
     const a = o?.[kind];
@@ -468,11 +492,24 @@ export class VisualRelay {
     delete o[kind];
     this.reserved -= a.total;
     this.budget.release(a.total, a.key);
-    if (!o.top && !o.mesh) this.owners.delete(owner);
+    this.tidy(owner, o);
+  }
+
+  /** free the upload of a kind still on its way (the ready one, if any, stays) */
+  private freeUpload(owner: string, kind: VisualKind): void {
+    const o = this.owners.get(owner);
+    const a = o?.up?.[kind];
+    if (!o || !a) return;
+    delete o.up![kind];
+    this.reserved -= a.total;
+    this.budget.release(a.total, a.key);
+    this.tidy(owner, o);
   }
 
   /** the owner has left, or a seat's robot is no longer the one its assets were for */
   freeOwner(owner: string): void {
+    this.freeUpload(owner, 'top');
+    this.freeUpload(owner, 'mesh');
     this.freeAsset(owner, 'top');
     this.freeAsset(owner, 'mesh');
   }
@@ -494,12 +531,12 @@ export class VisualRelay {
     this.streams.delete(id);
   }
 
-  /** an upload that went quiet is not worth the bytes it reserved */
+  /** an upload that went quiet is not worth the bytes it reserved (the ready look, if any, stays) */
   private sweep(now: number): void {
     for (const [owner, o] of this.owners) {
       for (const kind of ['top', 'mesh'] as const) {
-        const a = o[kind];
-        if (a && !a.ready && now - a.touched > VISUAL_PUT_STALE_MS) this.freeAsset(owner, kind);
+        const a = o.up?.[kind];
+        if (a && now - a.touched > VISUAL_PUT_STALE_MS) this.freeUpload(owner, kind);
       }
     }
   }
