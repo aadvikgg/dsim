@@ -82,7 +82,8 @@ export function heldSlotPos(spec: RobotState['spec'], slot: number, side: number
    * held artifact inside the wall plane, and a pile it shoved was held 4in off its footprint,
    * out of reach of the G408 contact test. Measured from the tip so every legal length fits
    * (the rear one stays inside the chassis whenever length + reach ≥ 15in, which every
-   * preset's floor satisfies).
+   * preset's floor satisfies). NO INTAKE (reach 0) puts the same line with its front skin at the
+   * chassis face, inside the chassis at its 15-in floor.
    */
   const front = hl + C.INTAKE_PRESETS[spec.intake].reach - C.BALL_RADIUS;
   const xs = [front - 4 * C.BALL_RADIUS, front - 2 * C.BALL_RADIUS, front];
@@ -1328,6 +1329,8 @@ function ballRobotContact(
   r: RobotState,
   p: Vec2,
 ): { nx: number; ny: number; pen: number; cp: Vec2 } | null {
+  // NO INTAKE: nothing on the front is open, so the robot is its chassis box (reach 0)
+  if (C.noIntake(r.spec)) return ballRobotFrontContact(r, p);
   const R = C.BALL_RADIUS;
   const preset = C.INTAKE_PRESETS[r.spec.intake];
   const local = rot({ x: p.x - r.pos.x, y: p.y - r.pos.y }, -r.heading);
@@ -1570,6 +1573,8 @@ function overIntakeRoof(
   pad = C.BALL_RADIUS,
   frontPad = pad,
 ): boolean {
+  // no intake, no roof: what lands on the front lands on the chassis top
+  if (C.noIntake(r.spec)) return false;
   const local = rot({ x: p.x - r.pos.x, y: p.y - r.pos.y }, -r.heading);
   if (r.spec.imported) {
     // an IMPORT's roof is over ITS mouth: face to roller line, its own width, off its centreline

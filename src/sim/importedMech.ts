@@ -398,6 +398,8 @@ export function decodeImportGrabRect(spec: RobotSpec): { edge: 'front'; x0: numb
  */
 export function decodeImportSolids(spec: RobotSpec): { chassis: Vec2[]; structure: Vec2[][] } {
   const imp = spec.imported!;
+  // NO INTAKE: no mouth carves the hull, so the whole hull is chassis
+  if (C.noIntake(spec)) return { chassis: imp.hull.map((p) => ({ x: p.x, y: p.y })), structure: [] };
   const d = decodeImportMouth(spec);
   if (!d.mouth.wedge) return carveImportPlates(imp.hull, [d.m], Math.min(C.INTAKE_RAIL_T, d.m.half));
   let chassis = clipHalf(imp.hull, 1, 0, d.face);
@@ -436,8 +438,16 @@ export function importChassisPoly(spec: RobotSpec): Vec2[] {
 /** DECODE's held-artifact slot on an import: the standard arrangement behind THIS mouth's roller
  *  line and on its centreline, each slot kept a radius inside the hull's rear on that line */
 export function decodeImportHeldSlot(spec: RobotSpec, slot: number, side: number): Vec2 {
-  const d = decodeImportMouth(spec);
   const R = C.BALL_RADIUS;
+  if (C.noIntake(spec)) {
+    // NO INTAKE: the standard line of three on the robot's own centreline, the front one's skin at
+    // the hull's front there; a hull too short for three 5-in balls packs them closer, never out
+    // of its rear
+    const ch = chordAt(spec.imported!.hull, { x: 0, y: 1 }, { x: 1, y: 0 }, 0) ?? [-R, R];
+    const sp = clamp((ch[1] - ch[0] - 2 * R) / 2, 0, 2 * R);
+    return { x: ch[1] - R - (2 - Math.min(Math.max(slot, 0), 2)) * sp, y: 0 };
+  }
+  const d = decodeImportMouth(spec);
   const back = chordAt(spec.imported!.hull, { x: 0, y: 1 }, { x: 1, y: 0 }, d.yc);
   const xMin = back ? back[0] + R : -Infinity;
   if (spec.intake === 'triangle') {

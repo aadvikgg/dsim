@@ -52,6 +52,7 @@ const INTAKE_LABEL: Record<IntakeStyle, string> = {
   sloped: 'Sloped',
   vector: 'Vector',
   triangle: 'Triangle',
+  none: 'Hand loaded',
 };
 
 /** a driver's name on a board: display handle + muted @username, clickable to

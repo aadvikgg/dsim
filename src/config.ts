@@ -1627,7 +1627,7 @@ export const HELD_SLIDE_SPEED = 150;
  * the mouth and changes no physics at all. The wedges meet it at its axle, so the funnel
  * keeps a visible mouth in front of them.
  */
-export const INTAKE_ROLLER_MM = { sloped: 72, vector: 48, triangle: 72 } as const;
+export const INTAKE_ROLLER_MM = { sloped: 72, vector: 48, triangle: 72, none: 0 } as const;
 /** fore-aft thickness of the gate-opener tab on each shaft end. A tab on a beam end, not a
  * slab: drawing it the full roller diameter made the front read as one solid block. */
 export const INTAKE_OPENER_THICK = 0.9; // in
@@ -1840,7 +1840,25 @@ export const INTAKE_PRESETS = {
       capMin: 0.00833, capMax: 0.04167, clumpInterval: 0.00833, dual: true,
     },
   },
+  /** NONE (DECODE only): no intake at all. The footprint is the chassis (reach 0), nothing on the
+   * front is open to an artifact, and the robot is loaded by the HUMAN PLAYER while it sits in its
+   * own LOADING ZONE (`updateHumanPlayers`, manual G432: "DRIVE TEAM members may load SCORING
+   * ELEMENTS into a ROBOT that is partially or fully in the LOADING ZONE"). The kit robot is built
+   * this way. Every capture path is gated on `noIntake`, not on these numbers; the mouth is all
+   * zeros so nothing that forgets the gate can grab. `minLength` 15 keeps the three held artifacts
+   * (a line of 5-in balls, front skin at the face) inside the chassis; `fireInterval` is the
+   * vector's, for a turret robot loaded by hand. */
+  none: {
+    reach: 0, overhang: false, minLength: 15, maxLength: 18, minWidth: ROBOT_MIN_WIDTH, fireInterval: 0.1, fireCap: 0,
+    mouth: {
+      wedge: false, mouthHalf: 0, throatHalf: 0, drawIn: 0,
+      capMin: 0, capMax: 0, clumpInterval: 0, dual: false,
+    },
+  },
 } as const;
+
+/** a robot with NO intake (`intake: 'none'`, DECODE): the human player loads it by hand */
+export const noIntake = (spec: { intake: string }): boolean => spec.intake === 'none';
 
 /** the intake mouth geometry as it applies to a SPECIFIC robot. The VECTOR wheel
  * row spans the FULL chassis width (mouthHalf = width/2 — the intake is exactly as
@@ -2968,6 +2986,19 @@ export const START_PEN_SLOP = 0.75;
 
 // --------------------------------------------------------- human player ----
 export const HP_PLACE_DELAY = 0.15; // s between placements from the box into the grab row (fast HP)
+/**
+ * HAND LOADING (`updateHumanPlayers`): a robot with NO intake (`noIntake`) is loaded by the human
+ * player while any part of it is in its own LOADING ZONE (manual G432: "DRIVE TEAM members may load
+ * SCORING ELEMENTS into a ROBOT that is partially or fully in the LOADING ZONE"), TELEOP only.
+ * One artifact per `HP_HAND_LOAD_S` (APPROX: a person dropping balls one at a time into a hopper),
+ * from the box first, else off the zone's own floor, and only while the robot is nearly still —
+ * nobody hand-feeds a robot driving past (`HP_HAND_LOAD_MAX_SPEED` in/s, `_MAX_TURN` rad/s, both
+ * APPROX). Robots WITH an intake are left to it: the rule allows loading them too, but the sim's
+ * human player stages the grab row for them, as it always has.
+ */
+export const HP_HAND_LOAD_S = 0.4;
+export const HP_HAND_LOAD_MAX_SPEED = 12;
+export const HP_HAND_LOAD_MAX_TURN = 1.5;
 /** the alliance-area pool is two 3-ball preload sets (4P+2G total); each present
  * robot takes one, and any leftover sets seed the human-player box (spawn.ts hpBox) */
 export const PRELOAD: readonly ('purple' | 'green')[] = ['purple', 'green', 'purple'];

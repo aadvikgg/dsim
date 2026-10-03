@@ -119,7 +119,9 @@ export interface AssistConfig {
   autoFire: boolean;
 }
 
-export type IntakeStyle = 'sloped' | 'vector' | 'triangle';
+/** `none` is DECODE only: no intake, the human player loads the robot by hand in its LOADING
+ *  ZONE (G432). Chain Reaction and BIOBUZZ coerce it to `sloped`. */
+export type IntakeStyle = 'sloped' | 'vector' | 'triangle' | 'none';
 export type DrivetrainType = 'mecanum' | 'tank' | 'swerve' | 'xdrive' | 'butterfly';
 
 export interface RobotSpec {

@@ -197,7 +197,7 @@ import {
   wheelContacts,
 } from '../src/sim/physics';
 import { beamBlock, beamDrag, beamDragFactor, beamStrafeBlock, beamForwardness, beamRide, canCrossBeams, cogFactor, wheelsOnBeam, CHAIN_BEAMS } from '../src/games/chain/beams';
-import { butterflyTankRpmLimits, driveParams, massLimits, rpmLimits, motorStep, driveSummary, widthLimits, pushForce, shoveMass } from '../src/sim/drivetrain';
+import { butterflyTankRpmLimits, driveParams, lengthLimits, massLimits, rpmLimits, motorStep, driveSummary, widthLimits, pushForce, shoveMass } from '../src/sim/drivetrain';
 import { PERF_DISPLAY_LEVELS, coerceSettings, defaultSettings, hasStoredSettings, practiceSeatsFor, practiceSetups, saveSettings, switchGame, syncAudioMirrors } from '../src/settings';
 import { legalRegion, routeTarget } from '../server/routing';
 import {
@@ -35645,6 +35645,207 @@ function fxShoot(
     'notices: the refund is opt-in per correction and gated on the live ladder',
     /searchParams\.get\('refund'\) === '1' && match\.liveBoard/.test(idx),
   );
+}
+
+// ---- NO INTAKE: the human player loads the robot in its LOADING ZONE (G432) ----------------------
+/**
+ * `intake: 'none'` (DECODE): the footprint is the chassis, nothing on the front takes an artifact,
+ * and `handLoad` (`humanPlayer.ts`) drops one in per `HP_HAND_LOAD_S` while any part of the robot is
+ * in its own LOADING ZONE and it is nearly still — from the box first, else off the zone's floor.
+ * Robots with an intake are untouched (the shared pins above hold that).
+ */
+{
+  const NONE = { ...DEFAULT_SPEC, intake: 'none' as const, length: 16, width: 16 };
+  const d = coerceSpec(NONE);
+  check(
+    'no intake: the coercer keeps `none` for DECODE, idempotently, on its own size range (15–18 in, no reach)',
+    d.intake === 'none' && d.length === 16 && lengthLimits('none').min === 15 && lengthLimits('none').max === 18 &&
+      JSON.stringify(coerceSpec(d)) === JSON.stringify(d),
+    JSON.stringify({ intake: d.intake, length: d.length, lim: lengthLimits('none') }),
+  );
+  check(
+    'no intake: Chain Reaction and BIOBUZZ have no hand loading, so `none` becomes the sloped preset there',
+    coerceSpec(NONE, DEFAULT_SPEC, 'chain').intake === 'sloped' && coerceSpec(NONE, DEFAULT_SPEC, 'biobuzz').intake === 'sloped' &&
+      coerceSpec(DEFAULT_SPEC, { ...DEFAULT_SPEC, intake: 'none' }, 'chain').intake === 'sloped',
+  );
+  const fx = footprintExtents(d);
+  check('no intake: the footprint is the chassis — no reach on the front', fx.front === 8 && fx.rear === 8 && fx.half === 8, JSON.stringify(fx));
+
+  // the solids: the chassis box and nothing else; the three held slots inside it at the 15-in floor
+  const w0 = mkWorld('free', 'blue', 41, NONE);
+  const r0 = w0.robots[0];
+  const sol = robotSolids(r0, []);
+  check(
+    'no intake: the artifact solids are the chassis box alone (no wedges, no rails)',
+    sol.structure.length === 0 && sol.chassis.kind === 'box' && sol.chassis.hx === 8 && sol.chassis.hy === 8,
+    JSON.stringify(sol.structure),
+  );
+  const s15 = coerceSpec({ ...NONE, length: 15 });
+  const slots = [0, 1, 2].map((i) => heldSlotPos(s15, i, 0));
+  check(
+    'no intake: three held artifacts fit inside a 15-in chassis, in a line, front skin at the face',
+    slots.every((p) => p.x - BALL_RADIUS >= -7.5 - 1e-9 && p.x + BALL_RADIUS <= 7.5 + 1e-9 && p.y === 0) &&
+      Math.abs(slots[2].x + BALL_RADIUS - 7.5) < 1e-9 && slots[1].x - slots[0].x === 2 * BALL_RADIUS,
+    JSON.stringify(slots),
+  );
+
+  // the intake button does nothing: driving at an artifact with it held shoves the artifact
+  {
+    const w = mkWorld('match', 'blue', 43, NONE);
+    startMatch(w);
+    w.match.phase = 'teleop';
+    for (const a of ['red', 'blue'] as const) {
+      w.humanPlayers[a].box = [];
+      w.humanPlayers[a].nextPlaceAt = 1e9;
+    }
+    const r = w.robots[0];
+    w.balls = w.balls.filter((b) => !(b.state.kind === 'held' && b.state.robot === r.id));
+    r.hopper.length = 0;
+    r.pos = { x: 0, y: -20 };
+    r.heading = 0;
+    r.vel = { x: 0, y: 0 };
+    r.fieldCentric = false;
+    r.autoIntake = true;
+    const target = w.balls.find((b) => b.state.kind === 'ground')!;
+    target.pos = { x: 14, y: -20 };
+    target.vel = { x: 0, y: 0 };
+    const start = target.pos.x;
+    run(w, cmd({ driveY: 1, intake: true }), 0.8);
+    check(
+      'no intake: driving onto an artifact with the intake held (and auto intake on) takes nothing — the front pushes it',
+      r.hopper.length === 0 && target.state.kind === 'ground' && target.pos.x > start + 4,
+      `hopper ${r.hopper.length}, artifact ${target.state.kind} moved ${(target.pos.x - start).toFixed(1)} in`,
+    );
+  }
+
+  // hand loading
+  const zone = loadZone('blue');
+  const scene = (spec: RobotSpec, phase: MatchPhase = 'teleop'): World => {
+    const w = mkWorld('match', 'blue', 47, spec);
+    startMatch(w);
+    w.match.phase = phase;
+    const r = w.robots[0];
+    w.balls = w.balls.filter((b) => !(b.state.kind === 'held' && b.state.robot === r.id));
+    r.hopper.length = 0;
+    w.humanPlayers.blue.box = ['purple', 'green', 'purple'];
+    w.humanPlayers.blue.nextPlaceAt = 0;
+    // partly in: the chassis reaches 4 in over the zone's inner edge, facing away from the wall
+    r.pos = { x: (zone.x0 + zone.x1) / 2, y: zone.y1 + 4 };
+    r.heading = Math.PI / 2;
+    r.vel = { x: 0, y: 0 };
+    r.angVel = 0;
+    return w;
+  };
+  {
+    const w = scene(d);
+    const r = w.robots[0];
+    const count0 = w.balls.length;
+    run(w, cmd({}), 0.2);
+    const after1 = r.hopper.length;
+    run(w, cmd({}), 0.9);
+    const held = w.balls.filter((b) => b.state.kind === 'held' && b.state.robot === r.id);
+    check(
+      'hand loading: a robot with no intake, partly in its loading zone and still, is loaded one artifact per HP_HAND_LOAD_S',
+      robotIntersectsRect(r, zone) && after1 === 1 && r.hopper.length === HOPPER_CAPACITY,
+      `after 0.2 s ${after1}, after 1.1 s ${r.hopper.length} (HP_HAND_LOAD_S ${IMPC.HP_HAND_LOAD_S})`,
+    );
+    check(
+      'hand loading: from the box first, into real held artifacts in hopper order (the box gives up three)',
+      w.humanPlayers.blue.box.length === 0 && held.length === HOPPER_CAPACITY && w.balls.length === count0 + 3 &&
+        held.map((b) => b.color).join() === r.hopper.join() && r.hopper.join() === 'purple,green,purple',
+      JSON.stringify({ box: w.humanPlayers.blue.box, hopper: r.hopper, held: held.length, balls: [count0, w.balls.length] }),
+    );
+  }
+  {
+    // an empty box: the human player picks them off the zone's floor (the pre-staged three)
+    const w = scene(d);
+    w.humanPlayers.blue.box = [];
+    const r = w.robots[0];
+    const inZone0 = w.balls.filter((b) => b.state.kind === 'ground' && inRect(b.pos, zone)).length;
+    const count0 = w.balls.length;
+    run(w, cmd({}), 1.1);
+    const inZone1 = w.balls.filter((b) => b.state.kind === 'ground' && inRect(b.pos, zone)).length;
+    check(
+      'hand loading: with nothing in hand the human player takes artifacts off the loading zone floor, and none appears or vanishes',
+      inZone0 >= 3 && r.hopper.length === HOPPER_CAPACITY && inZone1 === inZone0 - 3 && w.balls.length === count0,
+      JSON.stringify({ inZone0, inZone1, hopper: r.hopper.length, balls: [count0, w.balls.length] }),
+    );
+  }
+  {
+    // what does NOT get loaded: moving, turning, outside the zone, during AUTO, or a robot with an intake
+    const probe = (mod: (w: World, r: RobotState) => void, spec: RobotSpec = d, phase: MatchPhase = 'teleop'): number => {
+      const w = scene(spec, phase);
+      const r = w.robots[0];
+      mod(w, r);
+      updateHumanPlayers(w);
+      return r.hopper.length;
+    };
+    const still = probe(() => {});
+    const moving = probe((_w, r) => { r.vel = { x: 0, y: IMPC.HP_HAND_LOAD_MAX_SPEED + 1 }; });
+    const turning = probe((_w, r) => { r.angVel = IMPC.HP_HAND_LOAD_MAX_TURN + 0.1; });
+    const outside = probe((_w, r) => { r.pos = { x: zone.x0 + 2, y: zone.y1 + 12 }; });
+    const auto = probe(() => {}, d, 'auto');
+    const full = probe((_w, r) => { r.hopper.push('green', 'green', 'green'); });
+    const sloped = probe(() => {}, coerceSpec({ ...DEFAULT_SPEC, intake: 'sloped' }));
+    check(
+      'hand loading: only a still robot with room, partly in the zone, in TELEOP, with no intake of its own',
+      still === 1 && moving === 0 && turning === 0 && outside === 0 && auto === 0 && full === 3 && sloped === 0,
+      JSON.stringify({ still, moving, turning, outside, auto, full, sloped }),
+    );
+  }
+
+  // an IMPORTED robot with no intake: the whole hull is solid, its slots are inside it, and it is loaded too
+  {
+    const imp = coerceImported({
+      v: 1, id: '00000000000000aa', heightIn: 14,
+      hull: [{ x: -8, y: -7 }, { x: 9, y: -7 }, { x: 9, y: 7 }, { x: -8, y: 7 }],
+      mech: { shooter: { x: -3, y: 0, z: 12 } },
+    })!;
+    const spec = coerceSpec({ ...DEFAULT_SPEC, intake: 'none', imported: imp });
+    const w = scene(spec);
+    const r = w.robots[0];
+    const sol = robotSolids(r, []);
+    const iSlots = [0, 1, 2].map((i) => heldSlotPos(spec, i, 0));
+    check(
+      'no intake (import): the artifact solids are the whole hull, and the held slots sit inside it on the centreline',
+      sol.structure.length === 0 && sol.chassis.kind === 'poly' && sol.chassis.pts.length === imp.hull.length &&
+        iSlots.every((p) => p.y === 0 && p.x - BALL_RADIUS >= -8 - 1e-9 && p.x + BALL_RADIUS <= 9 + 1e-9),
+      JSON.stringify({ structure: sol.structure.length, iSlots }),
+    );
+    run(w, cmd({}), 1.1);
+    check('hand loading (import): an imported robot with no intake is loaded in its zone the same way', r.hopper.length === HOPPER_CAPACITY, `hopper ${r.hopper.length}`);
+  }
+
+  // the controls and the tutorial follow
+  {
+    const build = { spec: d, autoIntake: false, autoFire: false, fieldCentric: false, aimAssist: true };
+    const hasIntake = (game: GameId, spec: RobotSpec): boolean =>
+      visibleTouchButtons(game, { ...build, spec }).some((b) => b.action === 'intake');
+    check(
+      'no intake: the touch pad drops INTAKE for a DECODE robot with no intake, and keeps it for every other build',
+      !hasIntake('decode', d) && hasIntake('decode', DEFAULT_SPEC) && hasIntake('chain', coerceSpec(NONE, DEFAULT_SPEC, 'chain')),
+    );
+    const ids = (spec: RobotSpec): string => DECODE_TUTORIAL.steps.filter((s) => s.applies?.(spec) ?? true).map((s) => s.id).join();
+    check(
+      'no intake: the DECODE tutorial teaches loading at the loading zone in the intake step’s place',
+      ids(d) === 'drive,load,score,return' && ids(DEFAULT_SPEC) === 'drive,intake,score,return',
+      `${ids(d)} / ${ids(DEFAULT_SPEC)}`,
+    );
+    const load = DECODE_TUTORIAL.steps.find((s) => s.id === 'load')!;
+    const w = mkWorld('free', 'blue', 53, NONE);
+    const r = w.robots[0];
+    r.fieldCentric = false;
+    load.stage?.(w, r.id);
+    const staged = r.hopper.length;
+    const doneAtStage = load.done(w, r.id);
+    run(w, cmd({ driveY: 0.6 }), 0.6);
+    run(w, cmd({}), 2);
+    check(
+      'no intake: the tutorial’s load step starts one short, and driving into the zone and waiting completes it',
+      staged === HOPPER_CAPACITY - 1 && !doneAtStage && load.done(w, r.id),
+      JSON.stringify({ staged, doneAtStage, hopper: r.hopper.length, pos: r.pos, inZone: robotIntersectsRect(r, zone) }),
+    );
+  }
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

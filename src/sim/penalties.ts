@@ -803,7 +803,8 @@ export function controlledArtifacts(
    * instantaneous, so it should cover the artifact the rollers own RIGHT NOW and nothing else.
    * An intake takes one per cycle; excusing a hopper's worth at once modelled nothing.
    */
-  const perCycle = C.INTAKE_PRESETS[r.spec.intake].mouth.dual ? 2 : 1;
+  // (a robot with NO intake acquires nothing through a mouth, so nothing is excused)
+  const perCycle = C.noIntake(r.spec) ? 0 : C.INTAKE_PRESETS[r.spec.intake].mouth.dual ? 2 : 1;
   const cap = geom?.hopperCap ? geom.hopperCap(r) : C.HOPPER_CAPACITY;
   let room = Math.min(perCycle, Math.max(0, cap - r.hopper.length));
   if (room > 0 && intaking) {

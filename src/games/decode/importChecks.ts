@@ -23,7 +23,8 @@ function handles(spec: RobotSpec): ImportMechHandle[] {
   // point; a turret aims itself and has none
   const facing = spec.launcher === 'fixed' ? { facingDeg: spec.imported?.mech?.shooterYawDeg ?? 0 } : {};
   return [
-    ...spanHandles(['front']),
+    // NO INTAKE has no span to place (the human player loads it)
+    ...(C.noIntake(spec) ? [] : spanHandles(['front'])),
     { key: 'shooter', kind: 'point', label: spec.launcher === 'fixed' ? 'Fixed launcher' : 'Launcher', z: decodeImportLaunchZ(spec), zMin: DECODE_IMPORT_LAUNCH_MIN, zMax: 18, ...facing },
   ];
 }
@@ -33,7 +34,7 @@ function defaults(spec: RobotSpec): ImportedMech {
   const imp = bare.imported!;
   const t = decodeImportTurret(bare);
   return coercedMech(imp, {
-    intakes: defaultSpans([decodeImportMouth(bare).m]),
+    ...(C.noIntake(spec) ? {} : { intakes: defaultSpans([decodeImportMouth(bare).m]) }),
     shooter: { x: t.x, y: t.y, z: Math.min(C.LAUNCH_HEIGHT, imp.heightIn) },
     // a FIXED launcher starts facing forward, the way the standard one fires
     ...(spec.launcher === 'fixed' ? { shooterYawDeg: 0 } : {}),
@@ -42,6 +43,14 @@ function defaults(spec: RobotSpec): ImportedMech {
 
 function issues(spec: RobotSpec): ImportMechIssue[] {
   const imp = spec.imported!;
+  if (C.noIntake(spec)) {
+    // NO INTAKE: only the launcher to check; its artifacts are stored on the centreline by hand
+    const sh = imp.mech?.shooter;
+    const out: ImportMechIssue[] = [];
+    if (!sh) out.push(unplacedIssue('shooter', 'The launcher'));
+    out.push(...heightIssue('shooter', 'Launcher', sh?.z, DECODE_IMPORT_LAUNCH_MIN, 18));
+    return out;
+  }
   const d = decodeImportMouth(spec);
   const out = mouthIssues(imp, [d.m], decodeMouthHalfRange(spec.intake).min, 'DECODE intakes face forward: turn the robot’s front in the Model step.');
   const sh = imp.mech?.shooter;

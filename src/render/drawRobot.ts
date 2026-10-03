@@ -270,6 +270,8 @@ export function drawRobot(
   // (sloped/triangle) are two RIGHT TRIANGLES — one per side — whose hypotenuses
   // are the slopes that funnel balls to the compliant wheels at the throat (no
   // flat front). VECTOR is a flat plate with a full-width wheel roller.
+  // NO INTAKE: no wedges, no roller, nothing out front — the chassis is the whole robot
+  const none = C.noIntake(r.spec);
   const preset = C.INTAKE_PRESETS[r.spec.intake];
   const m = C.intakeMouth(r.spec); // vector's mouth spans the chassis width
   const rw = m.mouthHalf;
@@ -322,7 +324,9 @@ export function drawRobot(
       ctx.stroke();
     }
   };
-  if (m.wedge) {
+  if (none) {
+    // nothing to draw
+  } else if (m.wedge) {
     const th = m.throatHalf;
     // funnel mouth: opening at the (recessed) wedge line, narrowing to the throat
     // the mouth opening: wide at the roller axle, narrowing to the throat
@@ -608,12 +612,15 @@ function drawImportedDecodeRobot(
   // face and roller line, the mouth's lateral centre `yc` and width, the funnel wedges the artifact
   // solve collides with (`decodeImportSolids`), and the band the capture grabs in
   // (`decodeImportGrabRect`: the nip about the axle, across the mouth)
-  const d = decodeImportMouth(r.spec);
-  const band = decodeImportGrabRect(r.spec);
-  const mh = d.mouth.mouthHalf;
-  const th = d.mouth.throatHalf;
+  // (NO INTAKE draws none: the hull is the robot)
+  const d = C.noIntake(r.spec) ? null : decodeImportMouth(r.spec);
+  const band = d ? decodeImportGrabRect(r.spec) : null;
+  const mh = d ? d.mouth.mouthHalf : 0;
+  const th = d ? d.mouth.throatHalf : 0;
   const dia = C.intakeRollerDia(r.spec);
-  if (pictured) {
+  if (!d || !band) {
+    // nothing to draw
+  } else if (pictured) {
     drawMouthState(ctx, [band], intakeOn);
   } else {
     // the funnel WEDGES (sloped/triangle) or the vector's flanking rails: the sim's own solids

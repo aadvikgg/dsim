@@ -193,8 +193,9 @@ export const SHARED_TOUCH_BUTTONS: readonly TouchButton[] = [
     cls: 'intake',
     side: 'left',
     slot: 'intake',
-    // `cmd.intake || r.autoIntake` in all three sims (2D and 3D), with no reverse or outtake
-    present: (c) => !c.autoIntake,
+    // `cmd.intake || r.autoIntake` in all three sims (2D and 3D), with no reverse or outtake;
+    // a DECODE robot with NO intake is loaded by the human player, so the bit does nothing
+    present: (c) => !c.autoIntake && !(c.game === 'decode' && c.spec.intake === 'none'),
     ready: (l) => l.held.length < l.cap,
   },
   {

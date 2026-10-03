@@ -622,6 +622,7 @@ export function intakeClaims(world: World, commands: Map<number, RobotCommand>):
   for (const r of world.robots) {
     const running = (commands.get(r.id)?.intake ?? false) || r.autoIntake;
     if (!running || r.hopper.length >= C.HOPPER_CAPACITY) continue;
+    if (C.noIntake(r.spec)) continue; // nothing to hold an artifact with: loaded by hand
     const preset = C.INTAKE_PRESETS[r.spec.intake];
     // an IMPORT's mouth: ITS face, roller line, width and lateral centre (`decodeImportMouth`)
     const imp = r.spec.imported ? decodeImportMouth(r.spec) : null;
@@ -956,6 +957,7 @@ export function intakeSuction(world: World, r: RobotState, cmd: RobotCommand): v
   if (!robotsEnabled(world)) return;
   const running = cmd.intake || r.autoIntake;
   if (!running || r.hopper.length >= C.HOPPER_CAPACITY) return;
+  if (C.noIntake(r.spec)) return; // no rollers to pull with
 
   const preset = C.INTAKE_PRESETS[r.spec.intake];
   // an IMPORT's mouth (`decodeImportMouth`): everything below is written in the mouth's own
@@ -1086,6 +1088,8 @@ export function updateIntake(world: World, r: RobotState, cmd: RobotCommand): vo
   if (!robotsEnabled(world)) return;
   const running = cmd.intake || r.autoIntake;
   if (!running || r.hopper.length >= C.HOPPER_CAPACITY) return;
+  // NO INTAKE: the human player loads it by hand in its loading zone (`humanPlayer.ts`)
+  if (C.noIntake(r.spec)) return;
 
   // an IMPORT's mouth (`decodeImportMouth`), read in the mouth's own frame (`local.y − yc`)
   const imp = r.spec.imported ? decodeImportMouth(r.spec) : null;

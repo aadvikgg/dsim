@@ -29,6 +29,7 @@ import { decodeImportSolids } from './importedMech';
  *    forward of the face but two thin RAILS along the flanks, so a wide frame cannot be
  *    entered from the side. The rail sits just inside the notch with its outer face flush
  *    with the chassis side.
+ *  · NO INTAKE (`intake: 'none'`): nothing but the chassis box; the front is a wall like the rest.
  *  · The artifacts the robot is HOLDING are circles at their storage slots — a full hopper is
  *    a physical plug in the mouth, so incoming artifacts pile up on it.
  *
@@ -110,8 +111,9 @@ export function robotSolids(
       ];
       structure.push({ kind: 'poly', pts: s > 0 ? pts : pts.reverse() });
     }
-  } else {
+  } else if (!C.noIntake(r.spec)) {
     // the rails: thin, inside the notch, outer face flush with the chassis side
+    // (NO INTAKE has neither wedges nor rails: the chassis box is the whole robot)
     const t = Math.min(C.INTAKE_RAIL_T, hw);
     for (const s of [1, -1]) {
       structure.push({

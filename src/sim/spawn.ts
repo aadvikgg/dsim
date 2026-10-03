@@ -169,8 +169,12 @@ export function coerceSpec(raw: unknown, base: RobotSpec = DEFAULT_SPEC, game?: 
   // resolve INTAKE + DRIVETRAIN first (width's floor depends on the drivetrain —
   // swerve needs a wider base). Legacy preset names from older saves migrate.
   if (sp.intake === 'sloped' || sp.intake === 'vector' || sp.intake === 'triangle') out.intake = sp.intake;
+  else if (sp.intake === 'none') out.intake = 'none';
   else if (sp.intake === 'compact') out.intake = 'sloped';
   else if (sp.intake === 'extended') out.intake = 'vector';
+  // NO INTAKE is DECODE's (hand loading in its LOADING ZONE); the other games have no human
+  // player who loads a robot, so they get the sloped preset, from `sp` or from `base`
+  if (out.intake === 'none' && (game === 'chain' || game === 'biobuzz')) out.intake = 'sloped';
   if (
     sp.drivetrain === 'mecanum' ||
     sp.drivetrain === 'tank' ||

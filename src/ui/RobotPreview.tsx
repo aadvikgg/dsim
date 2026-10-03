@@ -154,7 +154,7 @@ export function RobotPreview({
       className="ds-robot-sprite"
       style={{ width: size, height }}
       role="img"
-      aria-label={spec.imported ? importedFootprintLabel(spec.imported) : `${spec.width} by ${spec.length} inch robot, ${spec.intake} intake`}
+      aria-label={spec.imported ? importedFootprintLabel(spec.imported) : `${spec.width} by ${spec.length} inch robot, ${spec.intake === 'none' ? 'no intake' : `${spec.intake} intake`}`}
     />
   );
 }

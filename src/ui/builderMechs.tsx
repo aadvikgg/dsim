@@ -69,6 +69,7 @@ const INTAKE_LABELS: Record<IntakeStyle, string> = {
   sloped: 'Sloped',
   vector: 'Vector wheel',
   triangle: 'Triangle',
+  none: 'Hand loaded',
 };
 
 // Chain Reaction robot config blurbs (CR-only builder controls). The LABELS
