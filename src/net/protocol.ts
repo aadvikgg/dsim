@@ -962,7 +962,14 @@ export type ErrorCode =
    * save. Actionable in place — the screen shows the code form rather than TRY AGAIN, which
    * would only be refused the same way. Older servers send the sentence alone.
    */
-  | 'email_unverified';
+  | 'email_unverified'
+  /**
+   * A join named a matchmaker room code (`isStagedRoomCode`) whose match is already over: no
+   * live room and no staged row. An older server created an empty custom room instead and the
+   * ranked client waited in it forever. The client raises it itself when a staged room never
+   * answers (`LobbyClient.watchStagedStart`).
+   */
+  | 'match_gone';
 
 export type ServerMsg =
   /**

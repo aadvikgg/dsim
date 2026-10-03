@@ -69,6 +69,7 @@ import { runStarSweep, warnNoToken, STAR_SWEEP_MS } from './stargazers';
 import { runBoostSweep, BOOST_SWEEP_MS } from './boosts';
 import { WakeTally } from './wakeLog';
 import { dbEnabled } from './db/pool';
+import { isStagedRoomCode, type PendingMatch } from './matchTypes';
 import {
   currentSeasonNumber,
   purgeSeasonReplays,
@@ -3440,11 +3441,44 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       }
     }
     if (created && dbEnabled) {
-      const pending = await takePendingMatch(code).catch(() => null);
+      // one retry: a read that fails is usually Neon waking, and failing here strands a match
+      const take = (): Promise<PendingMatch | null> => takePendingMatch(code);
+      let pending: PendingMatch | null = null;
+      let unread = false;
+      try {
+        pending = await take().catch(() => take());
+      } catch (e) {
+        unread = true;
+        console.error(`[admit] couldn't read the staged match for ${code}:`, e);
+      }
       if (pending) {
         // a room on a worker answers once the roster is in, so every read below sees it
         const applied = r.applyPending(pending);
         if (applied instanceof Promise) await applied;
+      } else if (isStagedRoomCode(code)) {
+        /**
+         * A MATCHMAKER CODE WITH NO ROOM AND NO ROW IS A MATCH THAT IS OVER. Its room was
+         * cancelled (the join grace or the strategy window ran out) or its machine restarted,
+         * and the row went with whoever claimed it first. Creating the room here made an empty
+         * custom room under a ranked code, and the client, which only ever waits for
+         * `strategyStart`, `matchStart` or `error`, sat on "Match found" until the socket was
+         * reaped: 15 minutes on a satellite, never on iad. It is usually a reconnect landing
+         * after the cancel it missed, or the reload path (`stagedMatch.ts`).
+         *
+         * Refused, so every client build treats it as the cancellation it is. A failed read is
+         * refused too: the opponent's join can still claim the row, and an empty room here
+         * would keep them out of it.
+         */
+        console.warn(`[admit] refused room ${code}: staged match ${unread ? 'unreadable' : 'gone'}`);
+        send({
+          t: 'error',
+          code: 'match_gone',
+          message: unread
+            ? 'Couldn’t load that match. Find a new one.'
+            : 'That match was cancelled before it started.',
+        });
+        abandon();
+        return;
       }
     }
     /**
@@ -3889,7 +3923,12 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       }
       if (msg.t === 'join') {
         if (room) return; // already in a room on this connection
-        void joinRoom(msg).catch((e) => console.error(`[server] join error from ${id}:`, e));
+        void joinRoom(msg).catch((e) => {
+          console.error(`[server] join error from ${id}:`, e);
+          // A join that throws used to answer nothing at all, and every waiting screen waits
+          // for an answer: a ranked client sat on "Match found" with nothing coming.
+          if (!room && !closed) send({ t: 'error', message: 'Couldn’t join that room. Try again.' });
+        });
       } else if (msg.t === 'spectate') {
         if (room) return;
         /* A CLOSED SITE CLOSES WATCHING TOO. Asked only while a site lockdown is armed, so the

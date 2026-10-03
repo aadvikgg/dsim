@@ -81,6 +81,9 @@ const READY_WINDOW_NOTE = (
   </>
 );
 
+/** how long a cancelled room's socket stays open to hear its `dodgeVerdict` (`LobbyClient.retire`) */
+const VERDICT_WAIT_MS = 10_000;
+
 /**
  * Region-aware ranked matchmaking. We connect to the DESIGNATED matchmaker (a
  * `?mm=1` connection Fly routes to one region), report our home region + access
@@ -407,9 +410,19 @@ export function Matchmaking({
     setQueue({ size: p.size, need: p.need });
     queueRef.current = { size: p.size, need: p.need };
     startedAtRef.current = p.since;
+    /**
+     * A PARKED SEARCH THAT CARRIES AN ERROR IS OVER. Every parked handler that records one (a
+     * refused queue, a cancelled room, a dead socket, `watchStagedStart` giving up) stands in for
+     * a live handler that ends the search. This used to adopt it as still running, so a room that
+     * cancelled while parked came back as "Match found · loading into the match" with nothing
+     * left to move it, and ← Back re-parked it for the takeover to bring straight back.
+     */
+    if (p.error && !p.start) {
+      strategyCancelled(p.error);
+      return true;
+    }
     setSearching(true);
     searchingRef.current = true;
-    if (p.error) setError(p.error);
     // whatever the search had already achieved comes back with it
     foundRef.current = p.found;
     setFound(p.found);
@@ -645,8 +658,15 @@ export function Matchmaking({
       matchFound();
       updateQueue({ start: m, found: true });
     });
-    lobby.on('error', (msg) => updateQueue({ error: msg }));
-    lobby.on('closed', () => updateQueue({ error: 'Lost connection to the match server.' }));
+    // every error a staged room sends ends the match, so the way back and the socket go with it
+    // (`strategyCancelled` is the live twin); the adopting screen shows the error
+    const parkedEnd = (msg: string): void => {
+      clearStagedMatch();
+      lobby.dispose();
+      updateQueue({ error: msg });
+    };
+    lobby.on('error', parkedEnd);
+    lobby.on('closed', () => parkedEnd('Lost connection to the match server.'));
   };
 
   /**
@@ -674,6 +694,8 @@ export function Matchmaking({
     const lobby = new LobbyClient(transport);
     wireRoomLobby(lobby, room, live);
     lobby.join(room, playerInfoRef.current());
+    // and if the room never answers, this socket gives up on it rather than holding "Match found"
+    lobby.watchStagedStart();
     // THE SEAT IS TAKEN HERE, so this is where it reports its physics in. The chunks were
     // already asked for when the queue was joined (`find`), so this normally resolves at once
     // and the room never waits at all.
@@ -702,6 +724,12 @@ export function Matchmaking({
   /** a cancel/close arrived (deadline lapsed, opponent left): drop the strategy
    * screen back to the queue with the reason shown. */
   const strategyCancelled = (msg: string): void => {
+    // THE SOCKET GOES WITH THE MATCH. Left open, its next reconnect re-sent `join` for a room
+    // that no longer exists, and an older server answers that with an empty one. Retired, not
+    // closed: the room's `dodgeVerdict` follows its `error`.
+    const lobby = lobbyRef.current;
+    lobbyRef.current = null;
+    lobby?.retire(VERDICT_WAIT_MS);
     clearStagedMatch(); // there is no room to go back to
     // THE MATCH IS OVER — forget it. A socket still marked as a seat in a staged room would be
     // parked on the way out (`teardown`) and the takeover would drag the player back into a
@@ -933,9 +961,11 @@ export function Matchmaking({
     setFound(true);
     assignedRoomRef.current = room;
     lobbyRef.current?.dispose(); // the matchmaker socket's whole job is done
+    lobbyRef.current = null;
     const lobby = openAssignedRoom(room, true);
     if (!lobby) {
-      setError('Couldn’t reach the match server.');
+      // not `setError` alone: that left "Match found" up with no socket behind it
+      strategyCancelled('Couldn’t reach the match server.');
       return;
     }
     joinedRef.current = true;

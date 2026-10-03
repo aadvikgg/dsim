@@ -7,7 +7,7 @@ import type { GameId, Physics } from '../src/types';
 import { simModuleFor } from '../src/games/sim';
 import { serverPhysics } from '../src/games/types';
 import { DEPLOY_REGIONS, bestHost, type PingInfo } from './regions';
-import type { PendingMatch, PendingRosterEntry } from './matchTypes';
+import { stagedRoomCode, type PendingMatch, type PendingRosterEntry } from './matchTypes';
 import { QUEUE_NEED, type LobbyPlayer, type QueueMode, type ServerMsg } from '../src/net/protocol';
 
 /**
@@ -763,7 +763,7 @@ export class Matchmaker {
     const group = bestSplit(allianceOrder(rawGroup)).group;
     const half = group.length / 2;
     const seed = (this.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
-    const code = `${hostRegion}-${mode}${roomSeq++}${rand6()}`;
+    const code = stagedRoomCode(hostRegion, mode, roomSeq++, rand6());
     const roster: PendingRosterEntry[] = await Promise.all(
       group.map(async (e, i) => ({
         userId: e.userId,
