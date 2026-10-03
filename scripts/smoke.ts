@@ -35162,6 +35162,14 @@ const IMP_REVIEW_HULLS: Record<string, ImportedRobot> = {
   const meas = new Measurer(prepared);
   const viaMeasurer = meas.normalise(setup);
   check('moving parts: the engine’s cached measurer reports the same moving parts as measureParts, field for field', JSON.stringify(viaMeasurer.measurement.motion) === JSON.stringify(fm.motion));
+  // a wheel nudge keeps the moving parts ARRAY: the preview rebuilds its whole mesh on a new one
+  const wheelsNow = viaMeasurer.measurement.wheelsUsed ?? [{ x: 5, y: 5 }, { x: 5, y: -5 }, { x: -5, y: 5 }, { x: -5, y: -5 }];
+  const nudged = meas.normalise({ ...setup, wheels: wheelsNow.map((w, i) => (i ? { x: w.x, y: w.y } : { x: w.x + 0.25, y: w.y })) });
+  const remarked = meas.normalise({ ...setup, motion: (setup.motion ?? []).slice(0, 1) });
+  check(
+    'moving parts: a wheel nudge keeps the moving parts, the array itself (no re-measure, no preview rebuild); a change of the moving parts measures them again',
+    nudged.measurement !== viaMeasurer.measurement && nudged.measurement.motion === viaMeasurer.measurement.motion && JSON.stringify(nudged.measurement.motion) === JSON.stringify(fm.motion) && remarked.measurement.motion !== viaMeasurer.measurement.motion,
+  );
 
   // ---- saved: the stored mesh is folded, and reopening does not fold it twice ----------------------
   const stored = motion.motionAsStored(setup.motion, fm.motion);

@@ -5,8 +5,8 @@
  * band switch; `finishMeasure` (the light half) on the wheels, their layout and the hull cap. So a `Measurer` keeps
  * one `OrientedMeasure` per orientation it has seen, with the model-frame parts built from it, and a
  * wheel drag, a drivetrain pick or a mechanism nudge re-runs only the light half (well under a
- * millisecond to a few). The model-frame arrays keep their identity while the orientation does,
- * so the preview does not rebuild its mesh on those edits either.
+ * millisecond to a few). The model-frame arrays and the moving parts keep their identity while the
+ * orientation (and `setup.motion`) does, so the preview does not rebuild its mesh on those edits.
  *
  * A NEW orientation is computed in `measureWorker.ts` (`prepare`), so a Units, Up axis or Turn click
  * costs the main thread only the arrays' rebuild. `normalise` answers at once from the cache, and
@@ -34,6 +34,9 @@ interface Entry {
   modelParts?: MeshPart[];
   finKey?: string;
   fin?: NormalisedModel;
+  /** the moving parts for `motionKey` (they read the orientation and `setup.motion`, never the wheels) */
+  motionKey?: string;
+  motion?: ImportMeasurement['motion'];
 }
 
 /** what `finishMeasure` (and the moving parts on it) reads that `orientKey` does not */
@@ -88,7 +91,18 @@ export class Measurer {
     if (!entry.modelParts) entry.modelParts = toModelFrame(this.model.parts, entry.oriented.sourceToModel, entry.oriented.folds);
     const fk = finishKey(setup);
     if (entry.fin && entry.finKey === fk) return entry.fin;
-    const measurement = withMotion(finishMeasure(entry.oriented, setup), entry.modelParts, setup, entry.oriented);
+    const measurement = finishMeasure(entry.oriented, setup);
+    // ⚠️ THE MOVING PARTS ARE KEPT, ARRAY AND ALL, while the orientation and `setup.motion` are. A
+    // wheel nudge re-ran them (every vertex of the model) and handed the preview a new `motion`,
+    // which rebuilt its whole mesh: a 100–120 ms task per nudge at 250k triangles (2026-10-03)
+    const mk = JSON.stringify(setup.motion ?? null);
+    if (entry.motionKey === mk) {
+      if (entry.motion) measurement.motion = entry.motion;
+    } else {
+      withMotion(measurement, entry.modelParts, setup, entry.oriented);
+      entry.motionKey = mk;
+      entry.motion = measurement.motion;
+    }
     measurement.trisIn = this.model.trisIn;
     if (this.model.trisOut < this.model.trisIn) {
       measurement.checks.push({
