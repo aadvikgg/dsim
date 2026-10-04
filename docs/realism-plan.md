@@ -25,7 +25,10 @@ plan. Nothing here is built.
   from logged `Pose3d` arrays. FTC support is experimental (Road Runner logs, FTC Dashboard live,
   `.wpilog` via libraries such as KoalaLog). DSIM can WRITE its format (an import's stored GLB already
   has a node per moving part at its pivot) and EXPORT replays as WPILOG, so a team overlays a sim run
-  on a real-robot log as a ghost.
+  on a real-robot log as a ghost. What teams watch as "AdvantageScope simulation" is robot code in
+  WPILib's simulation mode (its motor, battery and drivetrain classes, below) or a 2D physics library
+  for FRC robot code on dyn4j (forces, collisions with field elements and game pieces), drawn live
+  through "Connect to Simulator". Those models, not the viewer, are the accuracy bar.
 - **ILITE drivetrain simulator** (FRC 1885, v2020 spreadsheet): time-stepped at 0.02 s; a linear
   torque–speed motor with back-EMF scaled by applied voltage; system voltage `V_rest − I·N·R_batt`
   less a fixed wiring loss, from the previous step's current; torque clamped by a current limit and
